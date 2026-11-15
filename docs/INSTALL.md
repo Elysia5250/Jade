@@ -1,5 +1,8 @@
 # 安装
 
+> 仓库目前是 Private 的话，匿名 `curl` / Release 下载都不可用（回 404）。
+> 要么把仓库改成 Public，要么用 `--base-url` 指向一个公开的静态镜像。
+
 ## 一行安装（推荐）
 
 ```bash
@@ -66,7 +69,16 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-工作流会校验 tag 与 workspace 版本一致。已有 release 后，安装一行命令立即生效。
+工作流会校验 tag 与 workspace 版本一致。已有 release 后，安装一行命令立即生效
+（**仓库必须是 Public**，否则 raw 与 Release 资产都需要鉴权）。
+
+Private 仓库想验证安装流程，可以用静态镜像：
+
+```bash
+./scripts/package.sh
+python3 -m http.server 8000 --directory dist
+./scripts/install.sh --base-url http://127.0.0.1:8000 --dir /tmp/envoy-test
+```
 不想用 CI 时也可以手动上传 `scripts/package.sh` 的产物：
 
 ```bash
