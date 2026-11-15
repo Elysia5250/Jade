@@ -1,17 +1,18 @@
 //! Transport and host boundary traits for `envoy-service`.
 //!
-//! `envoy-service` does not know how peer streams are dialed or verified;
-//! any transport adapter implements [`AgentDialer`] / passes an [`AgentStream`]
-//! and any policy host implements [`AgentHost`].
+//! `envoy-service` does not know how peer streams are dialed or verified: a
+//! transport adapter implements [`AgentDialer`] (client side) and hands an
+//! [`AgentStream`] to `AgentServer::serve_stream` (server side). Any policy
+//! source implements [`AgentHost`].
 
 use envoy_core::{AgentConfig, AgentConfigStore};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures::future::BoxFuture;
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
+use std::task::{Context as TaskContext, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 /// Marker trait for bidirectional byte streams carried by an external transport.
@@ -30,7 +31,7 @@ impl BoxStream {
 impl AsyncRead for BoxStream {
     fn poll_read(
         mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        cx: &mut TaskContext<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         Pin::new(&mut *self.0).poll_read(cx, buf)
@@ -40,24 +41,34 @@ impl AsyncRead for BoxStream {
 impl AsyncWrite for BoxStream {
     fn poll_write(
         mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        cx: &mut TaskContext<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         Pin::new(&mut *self.0).poll_write(cx, buf)
     }
 
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut *self.0).poll_flush(cx)
     }
 
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut *self.0).poll_shutdown(cx)
     }
 }
 
-/// Future network/IPC adapters implement this to open agent streams to a peer.
+/// A transport adapter: opens an agent stream to `peer` for `service_id`.
 pub trait AgentDialer: Send + Sync + 'static {
     fn open_stream<'a>(&'a self, peer: &'a str, service_id: u16) -> BoxFuture<'a, Result<BoxStream>>;
+}
+
+impl AgentDialer for Box<dyn AgentDialer> {
+    fn open_stream<'a>(
+        &'a self,
+        peer: &'a str,
+        service_id: u16,
+    ) -> BoxFuture<'a, Result<BoxStream>> {
+        self.as_ref().open_stream(peer, service_id)
+    }
 }
 
 /// Supplies live [`AgentConfig`] to [`crate::AgentServer`].
@@ -108,5 +119,95 @@ impl AgentHost for StoreHost {
         let mut guard = self.store.lock().unwrap();
         let _ = guard.reload();
         guard.config.clone()
+    }
+}
+
+/// Dials the local daemon's control socket, which serves the agent protocol
+/// directly for same-user callers.
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+pub struct UnixDialer {
+    pub path: PathBuf,
+}
+
+#[cfg(unix)]
+impl UnixDialer {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+#[cfg(unix)]
+impl AgentDialer for UnixDialer {
+    fn open_stream<'a>(
+        &'a self,
+        _peer: &'a str,
+        _service_id: u16,
+    ) -> BoxFuture<'a, Result<BoxStream>> {
+        Box::pin(async move {
+            let stream = tokio::net::UnixStream::connect(&self.path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "connecting to the daemon at {} (is it running? try `envoy daemon start`)",
+                        self.path.display()
+                    )
+                })?;
+            Ok(BoxStream::new(stream))
+        })
+    }
+}
+
+/// Dials a *router* socket and names the target peer before the agent protocol
+/// starts: `[u32 BE len][peer]`. The router — the conduit bridge — resolves the
+/// name to an authenticated device and splices the stream; `envoy-service`
+/// never learns what transport that is.
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+pub struct RouteDialer {
+    pub path: PathBuf,
+}
+
+#[cfg(unix)]
+impl RouteDialer {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+}
+
+#[cfg(unix)]
+impl AgentDialer for RouteDialer {
+    fn open_stream<'a>(
+        &'a self,
+        peer: &'a str,
+        _service_id: u16,
+    ) -> BoxFuture<'a, Result<BoxStream>> {
+        Box::pin(async move {
+            use tokio::io::AsyncWriteExt as _;
+            let mut stream = tokio::net::UnixStream::connect(&self.path)
+                .await
+                .with_context(|| {
+                    format!(
+                        "connecting to the fabric bridge at {} (is `envoy-bridge` running?)",
+                        self.path.display()
+                    )
+                })?;
+            let name = peer.as_bytes();
+            stream.write_all(&(name.len() as u32).to_be_bytes()).await?;
+            stream.write_all(name).await?;
+            stream.flush().await?;
+            Ok(BoxStream::new(stream))
+        })
+    }
+}
+
+/// Build a dialer for a target name: `local` goes to the daemon socket, any
+/// other name goes to the fabric bridge router.
+#[cfg(unix)]
+pub fn dialer_for(data_dir: &std::path::Path, target: &str) -> Box<dyn AgentDialer> {
+    if target == "local" || target.is_empty() {
+        Box::new(UnixDialer::new(data_dir.join("envoy.sock")))
+    } else {
+        Box::new(RouteDialer::new(data_dir.join("bridge.sock")))
     }
 }

@@ -22,6 +22,8 @@ where
     Ok(())
 }
 
+/// Read one frame. An error here after a completed handshake means the peer
+/// went away (detach), which callers treat as end-of-stream, not failure.
 pub async fn read_framed<R, T>(r: &mut R) -> Result<T>
 where
     R: AsyncRead + Unpin,

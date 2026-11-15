@@ -1,12 +1,18 @@
-//! Core execution, configuration, auditing, and job logging for the
-//! standalone agent.
+//! Core execution layer: jobs, process execution, job logs, filesystem.
 
 pub mod audit;
 pub mod config;
-pub mod job_log;
-pub mod runner;
+pub mod exec;
+pub mod fs;
+pub mod job;
+pub mod log;
 
 pub use audit::{audit, truncate};
 pub use config::{gate, AgentConfig, AgentConfigStore};
-pub use job_log::{prune_jobs, JobLog, JOB_LOG_CAP, KEEP_JOBS};
-pub use runner::{mode_of, part_path, resolve, set_mode, write_atomic, Runner};
+pub use exec::{kill_group, ExecSpec};
+pub use fs::{
+    home_dir, list_dir, mode_of, parse_mode, part_path, read_range, resolve, set_mode,
+    write_atomic, write_file,
+};
+pub use job::{now_ms, Jobs, KEEP_JOBS};
+pub use log::{read_from, JobLogs, LogWriter, MAX_LOG_BYTES};

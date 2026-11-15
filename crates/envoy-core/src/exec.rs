@@ -1,0 +1,339 @@
+//! Detached command execution.
+//!
+//! `run_job` is what a job supervisor awaits: it spawns the child in its own
+//! process group, tees stdout/stderr into the job log, and maps exit, timeout
+//! and cancellation onto a [`JobResult`]. It never talks to a client — that is
+//! the whole point of the interaction/execution split.
+
+use crate::log::LogWriter;
+use envoy_proto::{JobResult, AGENT_CHUNK, DEFAULT_EXEC_TIMEOUT, MAX_EXEC_TIMEOUT};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
+use tokio::sync::{mpsc, Notify};
+use tracing::{debug, warn};
+
+/// Everything needed to start one process.
+#[derive(Debug, Clone)]
+pub struct ExecSpec {
+    pub argv: Vec<String>,
+    pub cwd: String,
+    pub env: Vec<(String, String)>,
+    pub timeout_s: u64,
+}
+
+trait AsyncReadUnpin: tokio::io::AsyncRead + Unpin {}
+impl<T: tokio::io::AsyncRead + Unpin> AsyncReadUnpin for T {}
+
+/// Run `spec` to completion, feeding output into `log`.
+///
+/// * `pid_slot` publishes the process-group leader as soon as it exists, so a
+///   cancel from another task has something to signal.
+/// * `cancel` fires when a caller cancelled the job.
+pub async fn run_job(
+    spec: ExecSpec,
+    mut log: LogWriter,
+    pid_slot: Arc<AtomicU32>,
+    cancel: Arc<Notify>,
+) -> JobResult {
+    let start = Instant::now();
+    if spec.argv.is_empty() {
+        return JobResult::FailedToSpawn {
+            error: "empty argv".into(),
+        };
+    }
+
+    let mut cmd = tokio::process::Command::new(&spec.argv[0]);
+    cmd.args(&spec.argv[1..]);
+    if !spec.cwd.is_empty() {
+        cmd.current_dir(&spec.cwd);
+    }
+    // Do not inherit the daemon's environment wholesale: a token in the
+    // service's env must not leak into every remote command.
+    cmd.env_clear();
+    for (k, v) in base_env() {
+        cmd.env(k, v);
+    }
+    for (k, v) in &spec.env {
+        cmd.env(k, v);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Own group: a shell's grandchildren die with it.
+        cmd.as_std_mut().process_group(0);
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return JobResult::FailedToSpawn {
+                error: format!("spawn {}: {e}", spec.argv[0]),
+            }
+        }
+    };
+    let pid = child.id().unwrap_or(0);
+    pid_slot.store(pid, Ordering::SeqCst);
+    // Backstop for every cancellation path, including this future being
+    // dropped mid-await.
+    let mut guard = KillOnDrop { pid, armed: true };
+
+    let (out_tx, mut out_rx) = mpsc::channel::<(u8, Vec<u8>)>(64);
+    for (fd, pipe) in [
+        (
+            0u8,
+            child
+                .stdout
+                .take()
+                .map(|p| Box::new(p) as Box<dyn AsyncReadUnpin + Send>),
+        ),
+        (
+            1u8,
+            child
+                .stderr
+                .take()
+                .map(|p| Box::new(p) as Box<dyn AsyncReadUnpin + Send>),
+        ),
+    ] {
+        let Some(mut pipe) = pipe else { continue };
+        let out_tx = out_tx.clone();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; AGENT_CHUNK];
+            loop {
+                match pipe.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if out_tx.send((fd, buf[..n].to_vec())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+    drop(out_tx);
+
+    let timeout_s = match spec.timeout_s {
+        0 => DEFAULT_EXEC_TIMEOUT,
+        n => n.min(MAX_EXEC_TIMEOUT),
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s);
+    let mut timed_out = false;
+
+    let status = loop {
+        tokio::select! {
+            // Output first so a chatty child never starves exit detection.
+            biased;
+            Some((fd, data)) = out_rx.recv() => log.record(fd, &data),
+            st = child.wait() => break Some(st),
+            _ = cancel.notified() => break None,
+            _ = tokio::time::sleep_until(deadline) => {
+                timed_out = true;
+                break None;
+            }
+        }
+    };
+
+    // Normal exit: drain whatever the pipes still hold before reporting.
+    if let Some(status) = status {
+        while let Ok(Some((fd, data))) =
+            tokio::time::timeout(Duration::from_millis(200), out_rx.recv()).await
+        {
+            log.record(fd, &data);
+        }
+        guard.armed = false;
+        debug!(pid, ms = start.elapsed().as_millis() as u64, "job process finished");
+        return match status {
+            Ok(st) => match st.code() {
+                Some(0) => JobResult::Success,
+                Some(code) => JobResult::Failed { code },
+                None => JobResult::Errored {
+                    error: "terminated by a signal".into(),
+                },
+            },
+            Err(e) => {
+                warn!(pid, error = %e, "waiting for the job process failed");
+                JobResult::Errored {
+                    error: format!("wait: {e}"),
+                }
+            }
+        };
+    }
+
+    // Killed: cancel or timeout. Kill the whole group and reap.
+    guard.kill();
+    guard.armed = false;
+    let _ = child.wait().await;
+    while let Ok(Some((fd, data))) =
+        tokio::time::timeout(Duration::from_millis(100), out_rx.recv()).await
+    {
+        log.record(fd, &data);
+    }
+    if timed_out {
+        JobResult::TimedOut
+    } else {
+        JobResult::Killed
+    }
+}
+
+/// A child whose group is killed if this guard drops while armed.
+struct KillOnDrop {
+    pid: u32,
+    armed: bool,
+}
+
+impl KillOnDrop {
+    fn kill(&self) {
+        kill_group(self.pid);
+    }
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            kill_group(self.pid);
+        }
+    }
+}
+
+/// Kill a whole process group by its leader pid.
+pub fn kill_group(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+fn base_env() -> Vec<(String, String)> {
+    const KEEP: &[&str] = &[
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR",
+    ];
+    KEEP.iter()
+        .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::log::{read_from, LogWriter};
+    use std::path::PathBuf;
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p = std::env::temp_dir().join(format!("envoy-exec-{tag}-{n}"));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn spec(argv: Vec<&str>, timeout_s: u64) -> ExecSpec {
+        ExecSpec {
+            argv: argv.into_iter().map(str::to_string).collect(),
+            cwd: std::env::temp_dir().to_string_lossy().to_string(),
+            env: Vec::new(),
+            timeout_s,
+        }
+    }
+
+    #[tokio::test]
+    async fn streams_output_and_reports_exit() {
+        let dir = tmpdir("exit");
+        let path = dir.join("1.log");
+        let wake = Arc::new(Notify::new());
+        let log = LogWriter::create(path.clone(), wake).unwrap();
+        let pid = Arc::new(AtomicU32::new(0));
+        let cancel = Arc::new(Notify::new());
+        let result = run_job(
+            spec(vec!["sh", "-c", "echo out; echo err >&2; exit 3"], 10),
+            log,
+            pid.clone(),
+            cancel,
+        )
+        .await;
+        assert_eq!(result, JobResult::Failed { code: 3 });
+        assert!(pid.load(Ordering::SeqCst) > 0);
+        let (recs, _) = read_from(&path, 0, 4096).unwrap();
+        let out: String = recs
+            .iter()
+            .filter(|r| r.fd == 0)
+            .map(|r| String::from_utf8_lossy(&r.data).to_string())
+            .collect();
+        let err: String = recs
+            .iter()
+            .filter(|r| r.fd == 1)
+            .map(|r| String::from_utf8_lossy(&r.data).to_string())
+            .collect();
+        assert!(out.contains("out"), "{out}");
+        assert!(err.contains("err"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn timeout_kills_the_whole_group() {
+        let dir = tmpdir("timeout");
+        let marker = dir.join("late");
+        let log = LogWriter::create(dir.join("1.log"), Arc::new(Notify::new())).unwrap();
+        let cancel = Arc::new(Notify::new());
+        let script = format!("sleep 2; touch {}", marker.display());
+        let result = run_job(
+            spec(vec!["sh", "-c", &script], 1),
+            log,
+            Arc::new(AtomicU32::new(0)),
+            cancel,
+        )
+        .await;
+        assert_eq!(result, JobResult::TimedOut);
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert!(!marker.exists(), "the group survived the timeout");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn cancel_kills_a_running_job() {
+        let dir = tmpdir("cancel");
+        let log = LogWriter::create(dir.join("1.log"), Arc::new(Notify::new())).unwrap();
+        let cancel = Arc::new(Notify::new());
+        let c2 = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            c2.notify_one();
+        });
+        let result = run_job(
+            spec(vec!["sh", "-c", "sleep 30"], 60),
+            log,
+            Arc::new(AtomicU32::new(0)),
+            cancel,
+        )
+        .await;
+        assert_eq!(result, JobResult::Killed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_missing_program_is_reported_not_fatal() {
+        let dir = tmpdir("spawn");
+        let log = LogWriter::create(dir.join("1.log"), Arc::new(Notify::new())).unwrap();
+        let result = run_job(
+            spec(vec!["definitely-not-a-real-binary-xyz"], 5),
+            log,
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(Notify::new()),
+        )
+        .await;
+        assert!(matches!(result, JobResult::FailedToSpawn { .. }), "{result:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

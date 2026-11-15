@@ -98,7 +98,14 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 /// Why a call is refused, or `None` when it may run.
+///
+/// Same-user local connections ([`envoy_proto::LOCAL_CALLER`]) bypass the gate:
+/// `enabled` and the allowlist govern *remote* callers, and a local shell can
+/// run the same commands anyway.
 pub fn gate(cfg: &AgentConfig, caller: &str) -> Option<String> {
+    if caller == envoy_proto::LOCAL_CALLER {
+        return None;
+    }
     if !cfg.enabled {
         return Some("agent disabled on this device (envoy enable)".into());
     }
@@ -129,6 +136,12 @@ mod tests {
         let denied = gate(&cfg(true, &["dev-a"]), "dev-b").unwrap();
         assert!(denied.contains("not allowlisted"), "{denied}");
         assert!(gate(&cfg(true, &["dev-a"]), "dev-a").is_none());
+    }
+
+    #[test]
+    fn local_callers_bypass_the_remote_gate() {
+        assert!(gate(&cfg(false, &[]), envoy_proto::LOCAL_CALLER).is_none());
+        assert!(gate(&cfg(true, &[]), envoy_proto::LOCAL_CALLER).is_none());
     }
 
     #[test]

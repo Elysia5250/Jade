@@ -12,7 +12,7 @@
 | :--- | :--- | :--- | :--- | :--- |
 | **`conduit`** | **纯网络与会话引擎底座** | `conduit`、`conduit-coord` | 设备密钥身份、账号信任链、Coord 信令/Relay/STUN、QUIC/mTLS、NAT 打洞、mDNS、多路复用会话与插件分发 | `~/.conduit` |
 | **`grain`** | **文件同步项目（上层应用）** | `grain` | `blake3` 分块索引、Delta 同步、冲突保留、历史版本（`.grain/versions`）、忽略规则（`.grainignore`）、Ed25519 签名文件夹策略 | `~/.grain` |
-| **`envoy`** | **Agent 执行与 MCP 项目（上层应用，待重做/演进）** | `envoy` | 独立进程组命令执行、范围读取、原子写、目录列表、审计与作业日志、stdio MCP 服务、策略门禁 | `~/.envoy` |
+| **`envoy`** | **Agent 执行与 MCP 项目（已重构为分离式任务模型）** | `envoy`、`envoy-bridge` | 分离式作业（submit/logs/cancel，断线不影响执行）、进程组执行与超时、范围读取、原子写、目录列表、审计与作业日志、策略门禁、stdio MCP 服务、conduit 适配器 | `~/.envoy` |
 
 ### 当前状态：刻意不耦合
 三个项目之间目前**没有任何代码级依赖**（Cargo 依赖完全隔离）。`grain` 和 `envoy` 当前均内置本地 CLI 与内存/双工流测试，不直接依赖网络实现。
@@ -97,11 +97,20 @@
   - 其中 `S: AsyncRead + AsyncWrite + Unpin`，直接传入 `conduit_net::Channel` 即可完成适配。
 - 接入形态建议：实现一个 `GrainFabricService` 包装 `Arc<grain_service::SyncService>`，在 `id()` 返回 `grain_proto::SYNC_SERVICE_ID (1)`，在 `on_session()` 主动开流跑 `handle_stream`，在 `on_stream()` 被动应答 `handle_stream`。
 
-### 4.3 `envoy` 侧（待重做或后续接入 `conduit` 的接口）
+### 4.3 `envoy` 侧（已按分离式任务模型重构，适配器为独立 crate）
+- **交互层 / 执行层分离**（协议 v2）：
+  - 执行层在守护进程内：`envoy_core::Jobs` 持有 `BTreeMap<JobId, Job>`，按 group 排队并发，作业输出写入 `~/.envoy/jobs/<id>.log`（`[fd][len][payload]` 自描述记录，天然是可断点续读的游标）。
+  - 交互层每条流只承载**一个短请求**：`Probe`、`Submit`、`Jobs`、`JobStatus`、`JobLog{id, offset, follow}`、`JobCancel`、以及 `Read`/`Write`/`List`。
+  - **断线 ≠ 取消**：`JobLog` 只是"订阅"，流关闭仅停止推送；`JobCancel` 才是显式取消（杀进程组）。这直接满足 conduit "长驻处理必须在 on_stream 中 spawn 后立即返回" 的要求。
 - 传输与策略边界 trait（位于 `envoy_service::transport`）：
-  - `envoy_service::AgentDialer::open_stream(peer, service_id) -> BoxFuture<Result<BoxStream>>` → 对接 `EngineHandle::open(peer, AGENT_SERVICE_ID)`
-  - `envoy_service::AgentHost::config(&self) -> AgentConfig` → 提供本地/动态策略配置（并可通过信任列表将对端设备名解析为 `device_id`）
+  - `AgentDialer::open_stream(peer, service_id) -> BoxFuture<Result<BoxStream>>`
+  - `UnixDialer`（本机守护进程 socket）、`RouteDialer`（bridge 路由 socket + `[u32 BE len][device name/id]` 前导）
+  - `AgentHost::config(&self) -> AgentConfig`（`StoreHost` 每次请求重读 `agent.json`）
 - 服务端与客户端入口：
-  - 服务端：`AgentServer::serve_stream(&self, caller_id: &str, stream: S)`（接收 `Channel` 并 `tokio::spawn` 运行）
-  - 客户端：`AgentClient<D>` 或流级函数 `open_call` / `probe` / `pump` / `ReadStream` / `WriteStream`
-- 注意：`envoy` 后续计划结合新需求重构交互/工具模型；只要保持“通过双向字节流 `AsyncRead + AsyncWrite` 通信、通过 `conduit` 的 `service_id = 16` 承载”这一契约，底层传输即可无缝对接 `conduit`。
+  - 服务端：`AgentServer::serve_stream(caller_id, stream)`（调用方应 `tokio::spawn`）
+  - 客户端：`Remote<D>` 或流级函数 `open` / `submit` / `logs` / `cancel` / `read` / `write` / `list`
+- **conduit 装配层（唯一同时认识两边的地方）**：`envoy/bridge/`，独立 workspace，`exclude` 于 envoy 主 workspace：
+  - `EnvoyService` 实现 `conduit_fabric::Service`，`id() = AGENT_SERVICE_ID (16)`；`on_stream(peer, channel)` 中 `tokio::spawn(server.serve_stream(&peer.device_id, channel))` 后立即返回。
+  - `caller_id` 来自 mTLS 认证的 `PeerInfo.device_id`，因此 `agent.json` 的 allowlist 校验的是**不可伪造的设备身份**；展示名取自签名的 `DeviceCert.name`。
+  - 本机控制 socket 接受 `[u32 BE len][device name/id]`，用 `EngineHandle::device_set()` 解析目标后 `EngineHandle::open(device_id, 16)` 并双向拼接；解析/拨号失败以 `Reply::Denied` 回写，客户端能拿到真实原因。
+  - 本机（同用户 socket）调用恒放行，`enabled` 与 allowlist 只约束远程调用方。

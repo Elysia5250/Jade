@@ -168,6 +168,7 @@ dependencies = [
  "envoy-core",
  "envoy-proto",
  "envoy-service",
+ "libc",
  "serde_json",
  "tokio",
  "tracing",

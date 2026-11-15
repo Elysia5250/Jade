@@ -1,20 +1,129 @@
 # Envoy (`envoy/`)
 
-Standalone local execution, policy gate, wire server/client, and stdio MCP workspace (zero network engine or file-sync dependencies).
+Detached remote execution, a policy gate, and a stdio MCP server. Zero network
+dependencies: peers are reached through whatever transport you plug in, and the
+included `conduit` bridge is the only crate that knows about one.
+
+## The one idea
+
+**Interaction and execution are separate layers.**
+
+```
+client ──short RPC──▶ envoy-service ──▶ Jobs (daemon)  ──▶ child process group
+   submit / jobs / status          │        queue + concurrency
+   logs(cursor) / cancel           │        log file per job
+                                   └──▶ nothing waits on the client
+```
+
+* `submit` returns a **job id immediately**; the process keeps running.
+* `logs` is a **cursor into a file**, not a connection. Drop it, reattach later,
+  read from the same byte offset. Dropping a watcher never kills a job.
+* `cancel` is an explicit RPC. It kills the whole process group.
+* Jobs are queued per **group** with a concurrency limit; `max_jobs` in
+  `agent.json` is the default group's limit.
+
+That is also what makes a multiplexed transport viable: a stream carrying a job
+watch can live for minutes without blocking anything else.
+
+## Layers
+
+| Layer | Where | Responsibility |
+|---|---|---|
+| Interaction | `envoy-service` (server/client) | One short request per stream: submit, list, status, log cursor, cancel, file ops |
+| Execution | `envoy-core::job` / `exec` / `log` | Job table, queueing, process groups, timeouts, cancellation, log records |
+| Policy | `envoy-core::config` | `agent.json`: enabled + caller allowlist + `max_jobs` |
+| Transport | `envoy-service::transport` | `AgentDialer` / `AgentStream` / `AgentHost`; Unix socket now, conduit later |
+| Assembly | `bridge/` (standalone crate) | Mounts the agent on a conduit session; resolves device names to authenticated ids |
 
 ## Crates
 
-- `envoy-proto`: Wire protocol (`AgentOp`, `AgentCall`, `AgentMsg`, `AgentEvent`, `Entry`) and length-prefixed postcard framing (`write_framed`, `read_framed`).
-- `envoy-core`: `Runner` (process-group exec with timeout/cancel, range read, atomic `.part` write, directory listing), `AgentConfigStore` (`agent.json`), `audit.log`, and `JobLog` pruning.
-- `envoy-service`: Transport-agnostic `AgentServer::serve_stream` and client helpers (`open_call`, `probe`, `pump`, `ReadStream`, `WriteStream`, `read`, `write`, `list`, `AgentClient`), plus boundary traits `AgentDialer`, `AgentStream`, and `AgentHost`.
-- `envoy-cli` (`envoy`): Standalone CLI (`status`, `enable`, `disable`, `allow`, `deny`, `run`, `read`, `write`, `ls`, `copy`) and stdio MCP server (`mcp serve`).
+- `envoy-proto`: protocol v2 — `Op`, `Reply`, `ClientMsg`, `Job`, `JobState`,
+  `JobResult`, `LogRecord`, and length-prefixed postcard framing.
+- `envoy-core`: job table (`Jobs`), detached execution (`exec`), append-only job
+  logs with resume cursors (`log`), filesystem primitives (`fs`), policy
+  (`config`), audit trail.
+- `envoy-service`: `AgentServer::serve_stream` (one request per stream) and a
+  client (`Remote<D>`, plus stream-level helpers). Transport traits.
+- `envoy-cli` (`envoy`): daemon (`envoy serve`), job commands, file commands,
+  and the stdio MCP server.
+- `bridge/` (`envoy-bridge`): conduit adapter — **not** a workspace member, so
+  `envoy` builds without `conduit` checked out.
 
-## Boundary
+## Quick start
 
-When ready to connect or redesign remote transport on top of `conduit`, adapters implement `envoy_service::AgentDialer` / `envoy_service::AgentHost` and pipe any `AsyncRead + AsyncWrite + Unpin + Send + 'static` stream into `AgentServer::serve_stream`. See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full engine integration contract.
+The daemon auto-starts on first use; jobs outlive your terminal.
+
+```bash
+envoy run "make -j8 && echo built"     # queue, follow, exit with its code
+envoy submit "cargo test"             # print a job id and return
+envoy jobs
+envoy logs 7 --follow                 # reattach at any time
+envoy logs 7 --offset 4096            # page a finished job's output
+envoy cancel 7
+
+envoy read  /etc/hosts                # files stream over the same socket
+envoy write notes.txt "hello"         # atomic: .part + rename
+envoy ls    ~/src
+envoy copy local a.bin local /tmp/b.bin
+```
+
+`envoy run` is `submit` + `logs --follow`. With a single argument it runs
+through `sh -c`; multiple arguments are executed verbatim (no shell) unless
+`--shell` is passed.
+
+## Policy and trust
+
+`~/.envoy/agent.json`:
+
+```json
+{ "enabled": false, "allow": [], "max_jobs": 4 }
+```
+
+- **Local** (same-user daemon socket, mode `0600`) always works: `enabled` and
+  the allowlist govern *remote* callers, and a local shell can run the same
+  commands anyway.
+- **Remote** callers are identified by the transport. Over the conduit bridge
+  that is the mTLS-authenticated `device_id`, so the allowlist is no longer a
+  string the caller invents:
+
+```bash
+envoy enable
+envoy allow 3fa9c1d2a0b7e451      # a device id, or the name the bridge resolves
+```
+
+## Multi-machine: the bridge
+
+`bridge/` glues `envoy` to `conduit` (QUIC/mTLS sessions, relay fallback, mDNS).
+It is a separate workspace on purpose — neither project depends on the other.
+
+```bash
+# terminal 1: conduit session engine + the envoy agent service (id 16)
+cd bridge && cargo run --release
+
+# terminal 2: any device in the account, by name or id
+envoy --on laptop run "uname -a"
+envoy --on 3fa9c1d2a0b7e451 submit "sleep 300"
+```
+
+The bridge prints the account's devices at startup. Its local socket accepts
+`[u32 BE length][device name or id]` and then splices the connection to that
+peer's agent service; failures are reported as an agent-protocol `Denied` reply
+so the CLI prints the reason instead of a bare EOF. See
+[bridge/README.md](./bridge/README.md).
 
 ## Test
 
 ```bash
-cargo test --workspace
+cargo test --workspace          # envoy only
+cd bridge && cargo test         # needs ../conduit checked out
 ```
+
+Covered end to end: submit returning before the child exits, a dropped watcher
+not killing its job, group queueing, cancel of running and queued jobs, state
+recovery across restarts, log cursor resume with partial trailing records,
+atomic write rollback, and the daemon socket serving jobs across independent
+connections.
+
+## Platform
+
+Unix only for now: the daemon and the bridge both speak over Unix sockets.
