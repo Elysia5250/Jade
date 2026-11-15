@@ -3,7 +3,7 @@
 ## 一行安装（推荐）
 
 ```bash
-curl -fsSL https://YOUR_HOST/envoy/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Elysia5250/envoy/main/scripts/install.sh | sh
 ```
 
 安装完成后**新开一个 shell**，`envoy` 就能直接用了：
@@ -15,18 +15,20 @@ envoy run "uname -a"
 envoy ui
 ```
 
-装到固定版本、或指向自己的发布源：
+默认解析 `Elysia5250/envoy` 的最新 GitHub Release。装固定版本或换仓库：
 
 ```bash
-curl -fsSL https://YOUR_HOST/envoy/install.sh | sh -s -- --version 0.1.0
-curl -fsSL https://YOUR_HOST/envoy/install.sh | sh -s -- --base-url https://my.host/envoy/releases
+curl -fsSL https://raw.githubusercontent.com/Elysia5250/envoy/main/scripts/install.sh \
+  | sh -s -- --version 0.1.0
+curl -fsSL ... | sh -s -- --repo your-org/envoy
 ```
 
 ## 安装器做了什么
 
 1. 按 `uname` 选目标三元组（`aarch64-apple-darwin` / `x86_64-apple-darwin` /
    `x86_64-unknown-linux-gnu` / `aarch64-unknown-linux-gnu`）；
-2. 从 `<base>/latest` 读取版本，下载 `<base>/v<version>/envoy-v<version>-<target>.tar.gz`；
+2. 默认查 GitHub Releases 的 `latest`，下载
+   `releases/download/v<version>/envoy-v<version>-<target>.tar.gz`；
 3. 有 `.sha256` 就校验；
 4. 解压到 `~/.envoy/bin/envoy`（可用 `--dir` 改）；
 5. 把 `~/.envoy/bin` 写进当前 shell 的启动文件（`--no-path` 可跳过）；
@@ -53,7 +55,25 @@ envoy ui                     # 机器列表里只有 local 和当前目标
 `envoy serve` 默认会尝试挂 conduit 的 accept 池；conduit 不在时会静默退避重试，不影响本地使用。
 完全不想让它尝试就加 `--local-only`。
 
-## 自建发布源
+## 发版（维护者）
+
+推 tag 即可，`.github/workflows/release.yml` 会为 linux-x64、linux-arm64、
+macOS-arm64、macOS-x64 各构建一个 tar.gz + sha256 并挂到 Release：
+
+```bash
+# 先把 Cargo.toml 里的 workspace version 改成 0.1.0 并提交
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+工作流会校验 tag 与 workspace 版本一致。已有 release 后，安装一行命令立即生效。
+不想用 CI 时也可以手动上传 `scripts/package.sh` 的产物：
+
+```bash
+gh release create v0.1.0 dist/v0.1.0/* --repo Elysia5250/envoy
+```
+
+## 自建静态镜像
 
 发布产物由 `scripts/package.sh` 生成：
 

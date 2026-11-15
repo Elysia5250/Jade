@@ -8,7 +8,7 @@ no compile-time coupling in either direction.
 ## Install
 
 ```bash
-curl -fsSL https://YOUR_HOST/envoy/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Elysia5250/envoy/main/scripts/install.sh | sh
 envoy status          # first run starts the local daemon
 ```
 

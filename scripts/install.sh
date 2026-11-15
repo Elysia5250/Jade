@@ -1,18 +1,20 @@
 #!/bin/sh
 # envoy installer — download a release, put it on PATH, done.
 #
-#   curl -fsSL https://YOUR_HOST/envoy/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Elysia5250/envoy/main/scripts/install.sh | sh
 #   curl -fsSL ... | sh -s -- --version 0.1.0
-#   ./install.sh --base-url https://YOUR_HOST/envoy/releases
+#   ./install.sh --base-url https://my.host/envoy/releases
 #
-# The default release host is set below; override with --base-url or
-# ENVOY_RELEASE_BASE. After install, `envoy` works in a new shell and starts
-# its daemon on first use (no service manager required).
+# By default this resolves the latest GitHub Release of Elysia5250/envoy.
+# After install, `envoy` works in a new shell and starts its daemon on first
+# use (no service manager required).
 set -eu
 
-DEFAULT_BASE="https://github.com/Elysia5250/envoy/releases/download"
+DEFAULT_REPO="Elysia5250/envoy"
 
-BASE="${ENVOY_RELEASE_BASE:-$DEFAULT_BASE}"
+REPO="${ENVOY_REPO:-$DEFAULT_REPO}"
+# Empty means "use GitHub Releases for $REPO"; set it for a static mirror.
+BASE="${ENVOY_RELEASE_BASE:-}"
 VERSION="${ENVOY_VERSION:-}"
 DIR="${ENVOY_INSTALL_DIR:-$HOME/.envoy/bin}"
 ADD_PATH=1
@@ -27,14 +29,15 @@ usage() {
     cat <<'EOF'
 envoy installer
 
-  --version <v>      install a specific version (default: the release's `latest`)
-  --base-url <url>   release host (default: $ENVOY_RELEASE_BASE or the GitHub URL)
+  --version <v>      install a specific version (default: the latest release)
+  --base-url <url>   static release mirror (default: GitHub Releases)
+  --repo <owner/name> GitHub repository to resolve releases from
   --dir <path>       install directory (default: ~/.envoy/bin)
   --no-path          do not modify shell startup files
   --service          also install login autostart (launchd / systemd --user)
   -h, --help         this text
 
-Environment: ENVOY_VERSION, ENVOY_RELEASE_BASE, ENVOY_INSTALL_DIR
+Environment: ENVOY_VERSION, ENVOY_REPO, ENVOY_RELEASE_BASE, ENVOY_INSTALL_DIR
 EOF
 }
 
@@ -42,6 +45,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --version) [ $# -ge 2 ] || die "--version needs a value"; VERSION="$2"; shift 2 ;;
         --base-url) [ $# -ge 2 ] || die "--base-url needs a value"; BASE="${2%/}"; shift 2 ;;
+        --repo) [ $# -ge 2 ] || die "--repo needs a value"; REPO="$2"; shift 2 ;;
         --dir) [ $# -ge 2 ] || die "--dir needs a value"; DIR="$2"; shift 2 ;;
         --no-path) ADD_PATH=0; shift ;;
         --service) INSTALL_SERVICE=1; shift ;;
@@ -72,21 +76,34 @@ case "$os" in
     *) die "unsupported OS: $os (macOS and Linux only)" ;;
 esac
 
-if [ -z "$VERSION" ]; then
-    step "resolving the latest version from $BASE"
-    VERSION="$(curl -fsSL "$BASE/latest" 2>/dev/null | tr -d 'v \r\n' || true)"
-    [ -n "$VERSION" ] || die "cannot read $BASE/latest; pass --version or --base-url"
+if [ -z "$BASE" ]; then
+    if [ -z "$VERSION" ]; then
+        step "resolving the latest release of $REPO"
+        VERSION="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
+            | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"v\{0,1\}\([^"]*\)".*/\1/p' \
+            | head -1 || true)"
+        [ -n "$VERSION" ] || die "cannot resolve the latest release (no releases yet, or GitHub rate limit); pass --version"
+    fi
+    VERSION="${VERSION#v}"
+    asset_base="https://github.com/$REPO/releases/download/v$VERSION"
+else
+    if [ -z "$VERSION" ]; then
+        step "resolving the latest version from $BASE"
+        VERSION="$(curl -fsSL "$BASE/latest" 2>/dev/null | tr -d 'v \r\n' || true)"
+        [ -n "$VERSION" ] || die "cannot read $BASE/latest; pass --version or --base-url"
+    fi
+    VERSION="${VERSION#v}"
+    asset_base="$BASE/v$VERSION"
 fi
-VERSION="${VERSION#v}"
 
 name="envoy-v${VERSION}-${target}"
-url="$BASE/v${VERSION}/${name}.tar.gz"
+url="$asset_base/${name}.tar.gz"
 tmp="$(mktemp -d 2>/dev/null || mktemp -d -t envoy)"
 trap 'rm -rf "$tmp"' EXIT
 
 step "downloading $url"
 curl -fsSL "$url" -o "$tmp/$name.tar.gz" || die "download failed: $url
-  check --version / --base-url, or self-host with scripts/package.sh"
+  check --version / --repo / --base-url; no release published yet? see docs/INSTALL.md"
 
 if curl -fsSL "$url.sha256" -o "$tmp/$name.tar.gz.sha256" 2>/dev/null; then
     step "verifying checksum"
