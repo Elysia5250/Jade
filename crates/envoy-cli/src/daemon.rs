@@ -28,6 +28,175 @@ pub async fn is_running(data_dir: &Path) -> bool {
         .is_ok()
 }
 
+pub const LAUNCHD_LABEL: &str = "dev.envoy.agent";
+pub const SYSTEMD_UNIT: &str = "envoy.service";
+
+fn home() -> Result<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("no HOME set; cannot locate user service dirs"))
+}
+
+pub fn launchd_plist_path() -> Result<PathBuf> {
+    Ok(home()?
+        .join("Library/LaunchAgents")
+        .join(format!("{LAUNCHD_LABEL}.plist")))
+}
+
+pub fn systemd_unit_path() -> Result<PathBuf> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home().map(|h| h.join(".config")).ok())
+        .ok_or_else(|| anyhow::anyhow!("no HOME/XDG_CONFIG_HOME; cannot locate systemd user dir"))?;
+    Ok(config.join("systemd/user").join(SYSTEMD_UNIT))
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+pub fn launchd_plist(exe: &Path, data_dir: &Path) -> String {
+    let exe = xml_escape(&exe.display().to_string());
+    let dir = xml_escape(&data_dir.display().to_string());
+    let log = xml_escape(&log_path(data_dir).display().to_string());
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
+         \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n<dict>\n\
+         \x20 <key>Label</key><string>{LAUNCHD_LABEL}</string>\n\
+         \x20 <key>ProgramArguments</key>\n\
+         \x20 <array>\n\
+         \x20   <string>{exe}</string>\n\
+         \x20   <string>--data-dir</string>\n\
+         \x20   <string>{dir}</string>\n\
+         \x20   <string>serve</string>\n\
+         \x20 </array>\n\
+         \x20 <key>RunAtLoad</key><true/>\n\
+         \x20 <key>KeepAlive</key><true/>\n\
+         \x20 <key>ProcessType</key><string>Background</string>\n\
+         \x20 <key>StandardOutPath</key><string>{log}</string>\n\
+         \x20 <key>StandardErrorPath</key><string>{log}</string>\n\
+         </dict>\n</plist>\n"
+    )
+}
+
+pub fn systemd_unit(exe: &Path, data_dir: &Path) -> String {
+    format!(
+        "[Unit]\nDescription=Envoy agent daemon\nAfter=network-online.target\n\n\
+         [Service]\nExecStart={} --data-dir {} serve\nRestart=on-failure\nRestartSec=5\n\n\
+         [Install]\nWantedBy=default.target\n",
+        exe.display(),
+        data_dir.display()
+    )
+}
+
+fn run(cmd: &mut std::process::Command) -> Result<()> {
+    let out = cmd.output().context("spawn the service controller")?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        bail!(
+            "{} failed: {}",
+            cmd.get_program().to_string_lossy(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )
+    }
+}
+
+/// Install a user-level autostart unit for `envoy serve`.
+///
+/// The daemon keeps the local socket and the conduit accept pool; launching it
+/// through the OS is what makes it survive logout/reboot.
+pub fn install(exe: &Path, data_dir: &Path) -> Result<String> {
+    std::fs::create_dir_all(data_dir)?;
+    if cfg!(target_os = "macos") {
+        let path = launchd_plist_path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, launchd_plist(exe, data_dir))?;
+        let _ = run(std::process::Command::new("launchctl").args([
+            "unload",
+            &path.display().to_string(),
+        ]));
+        run(std::process::Command::new("launchctl").args([
+            "load",
+            "-w",
+            &path.display().to_string(),
+        ]))?;
+        Ok(format!(
+            "installed and loaded {} (logs: {})",
+            path.display(),
+            log_path(data_dir).display()
+        ))
+    } else {
+        let path = systemd_unit_path()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, systemd_unit(exe, data_dir))?;
+        run(std::process::Command::new("systemctl").args(["--user", "daemon-reload"]))?;
+        run(std::process::Command::new("systemctl").args([
+            "--user",
+            "enable",
+            "--now",
+            SYSTEMD_UNIT,
+        ]))?;
+        Ok(format!(
+            "installed and started {} (logs: journalctl --user -u {SYSTEMD_UNIT})",
+            path.display()
+        ))
+    }
+}
+
+pub fn uninstall() -> Result<String> {
+    if cfg!(target_os = "macos") {
+        let path = launchd_plist_path()?;
+        if path.exists() {
+            let _ = run(std::process::Command::new("launchctl").args([
+                "unload",
+                "-w",
+                &path.display().to_string(),
+            ]));
+            std::fs::remove_file(&path)?;
+        }
+        Ok(format!("uninstalled {}", path.display()))
+    } else {
+        let path = systemd_unit_path()?;
+        if path.exists() {
+            let _ = run(std::process::Command::new("systemctl").args([
+                "--user",
+                "disable",
+                "--now",
+                SYSTEMD_UNIT,
+            ]));
+            std::fs::remove_file(&path)?;
+            let _ = run(std::process::Command::new("systemctl").args(["--user", "daemon-reload"]));
+        }
+        Ok(format!("uninstalled {}", path.display()))
+    }
+}
+
+/// One-line autostart report for `daemon status`.
+pub fn autostart_line() -> String {
+    if cfg!(target_os = "macos") {
+        let installed = launchd_plist_path().map(|p| p.exists()).unwrap_or(false);
+        format!("launchd installed={installed}")
+    } else {
+        let installed = systemd_unit_path().map(|p| p.exists()).unwrap_or(false);
+        let active = std::process::Command::new("systemctl")
+            .args(["--user", "is-active", SYSTEMD_UNIT])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|| "unknown".into());
+        format!("systemd installed={installed} active={active}")
+    }
+}
+
 /// One daemon per data directory. `flock` is advisory, but every envoy entry
 /// point goes through this file, so in practice it is the single-instance gate:
 /// without it a second `envoy serve` would unlink the live socket, bind its
@@ -172,6 +341,25 @@ pub async fn run_server(
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[test]
+    fn autostart_units_carry_exe_and_data_dir() {
+        let exe = Path::new("/Users/u/.local/bin/envoy");
+        let dir = Path::new("/Users/u/.envoy");
+        let plist = launchd_plist(exe, dir);
+        assert!(plist.starts_with("<?xml"));
+        assert!(plist.contains(&format!("<string>{LAUNCHD_LABEL}</string>")));
+        assert!(plist.contains("<string>/Users/u/.local/bin/envoy</string>"));
+        assert!(plist.contains("<string>/Users/u/.envoy</string>"));
+        assert!(plist.contains("<string>serve</string>"));
+        assert!(plist.contains("StandardErrorPath"));
+
+        let unit = systemd_unit(exe, dir);
+        assert!(unit.contains(
+            "ExecStart=/Users/u/.local/bin/envoy --data-dir /Users/u/.envoy serve"
+        ));
+        assert!(unit.contains("Restart=on-failure"));
+    }
+
     use super::*;
     use envoy_core::AgentConfigStore;
     use envoy_proto::{JobResult, TaskSpec, DEFAULT_GROUP};

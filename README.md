@@ -5,6 +5,17 @@ dependencies: peers are reached through whatever transport you plug in. The
 default transport is `conduit run`'s control socket — over a Unix socket, with
 no compile-time coupling in either direction.
 
+## Install
+
+```bash
+curl -fsSL https://YOUR_HOST/envoy/install.sh | sh
+envoy status          # first run starts the local daemon
+```
+
+macOS and Linux, x86_64 and aarch64. No root and no TUN: the agent speaks over
+`control.sock`, and works standalone without conduit. Self-hosting releases and
+the full matrix are in [docs/INSTALL.md](./docs/INSTALL.md).
+
 ## The one idea
 
 **Interaction and execution are separate layers.**

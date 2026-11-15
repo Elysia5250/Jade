@@ -31,6 +31,7 @@ compile_error!("envoy currently targets Unix: the daemon speaks over a Unix sock
 #[derive(Parser, Debug)]
 #[command(
     name = "envoy",
+    version,
     about = "Envoy — detached remote-execution agent, policy gate, and MCP server"
 )]
 struct Cli {
@@ -137,6 +138,10 @@ enum Commands {
 
 #[derive(Subcommand, Debug)]
 enum DaemonCmd {
+    /// Install user-level autostart (launchd / systemd --user).
+    Install,
+    /// Remove the autostart unit.
+    Uninstall,
     /// Start the daemon in the background.
     Start,
     /// Ask the daemon to shut down.
@@ -535,6 +540,15 @@ async fn cmd_devices(ctx: &Ctx) -> Result<()> {
 
 async fn cmd_daemon(data_dir: &Path, cmd: DaemonCmd) -> Result<()> {
     match cmd {
+        DaemonCmd::Install => {
+            let exe = std::env::current_exe().context("locating the envoy binary")?;
+            println!("{}", daemon::install(&exe, data_dir)?);
+            Ok(())
+        }
+        DaemonCmd::Uninstall => {
+            println!("{}", daemon::uninstall()?);
+            Ok(())
+        }
         DaemonCmd::Start => {
             if daemon::is_running(data_dir).await {
                 println!("daemon already running");
@@ -562,6 +576,7 @@ async fn cmd_daemon(data_dir: &Path, cmd: DaemonCmd) -> Result<()> {
             bail!("the daemon ignored SIGTERM for 3s");
         }
         DaemonCmd::Status => {
+            println!("autostart: {}", daemon::autostart_line());
             if daemon::is_running(data_dir).await {
                 println!("running");
             } else {
