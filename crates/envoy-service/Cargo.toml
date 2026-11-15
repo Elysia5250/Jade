@@ -1,0 +1,15 @@
+[package]
+name = "envoy-service"
+description = "Transport-agnostic wire server and client for the standalone Envoy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+envoy-core = { path = "../envoy-core" }
+envoy-proto = { path = "../envoy-proto" }
+anyhow.workspace = true
+futures.workspace = true
+tokio.workspace = true
+tracing.workspace = true
