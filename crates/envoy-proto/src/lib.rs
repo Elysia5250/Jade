@@ -269,6 +269,14 @@ pub enum Op {
     Write { path: String, mode: Option<u32> },
     /// One directory level, sorted, no filtering.
     List { path: String },
+    /// Replace an exact snippet in a text file, atomically.
+    Edit {
+        path: String,
+        old: String,
+        new: String,
+        /// Replace every occurrence; otherwise a non-unique `old` is an error.
+        replace_all: bool,
+    },
 }
 
 impl Op {
@@ -283,6 +291,7 @@ impl Op {
             Op::Read { .. } => "read",
             Op::Write { .. } => "write",
             Op::List { .. } => "list",
+            Op::Edit { .. } => "edit",
         }
     }
 }
@@ -327,6 +336,9 @@ pub enum Reply {
     Meta { size: u64, mode: u32 },
     Data { data: Vec<u8> },
     Listing { entries: Vec<Entry> },
+    /// The file was rewritten in place; `replacements` is how many times the
+    /// snippet was replaced.
+    Edited { replacements: usize },
     /// Terminal event for Probe/Read/List/Cancel/Write. `code` is 0 on success.
     Done { code: i32, ms: u64 },
 }

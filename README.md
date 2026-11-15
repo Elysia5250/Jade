@@ -44,8 +44,8 @@ watch can live for minutes without blocking anything else.
   (`config`), audit trail.
 - `envoy-service`: `AgentServer::serve_stream` (one request per stream) and a
   client (`Remote<D>`, plus stream-level helpers). Transport traits.
-- `envoy-cli` (`envoy`): daemon (`envoy serve`), job commands, file commands,
-  and the stdio MCP server.
+- `envoy-cli` (`envoy`): daemon (`envoy serve`), job and file commands, the
+  interactive console (`envoy ui`), and the stdio MCP server.
 - `bridge/` (`envoy-bridge`): conduit adapter — **not** a workspace member, so
   `envoy` builds without `conduit` checked out.
 
@@ -70,6 +70,49 @@ envoy copy local a.bin local /tmp/b.bin
 `envoy run` is `submit` + `logs --follow`. With a single argument it runs
 through `sh -c`; multiple arguments are executed verbatim (no shell) unless
 `--shell` is passed.
+
+## Terminal console
+
+`envoy ui` is the interactive view. Its layout and vocabulary are copied from
+opencode's TUI, because that is the terminal idiom this repo already lives in:
+
+```
+ envoy ● local   3 jobs · 1 running · 0 queued   follow   opencode
+┌ jobs ──────────────────────────────┐┌ #3 · printf ... · done success ─────────┐
+│ ✓   1 0s   echo build-ok           ││ line one                                │
+│ ●   2 1s   sleep 90                ││ line two                                │
+│ ✓   3 0s   printf 'line one...'    ││ warn                                    │
+└────────────────────────────────────┘└─────────────────────────────────────────┘
+┌ command ──────────────────────────────────────────────────────────────────────┐
+│ > _                                                              tab to type │
+└───────────────────────────────────────────────────────────────────────────────┘
+ ctrl+p palette  n new  c cancel  f follow  tab focus  ctrl+x q quit
+```
+
+| Key | Action |
+|---|---|
+| `tab` / `shift+tab` | cycle focus (jobs → log → command) |
+| `j`/`k`, `↑`/`↓`, `g`/`G` | move in the job list |
+| `n` | type a command; `enter` submits, `esc` cancels |
+| `c` | cancel the selected job |
+| `f` | follow output (otherwise `pgup`/`pgdn`, `home`/`end` scroll) |
+| `r` | refresh now |
+| `ctrl+p` | command palette (new, cancel, follow, sidebar, theme, refresh, quit) |
+| `ctrl+x` then `q`/`n`/`c`/`b`/`t`/`s` | leader shortcuts, as in opencode |
+| `q` / `ctrl+c` / `ctrl+d` | quit |
+
+It talks to the same daemon over the same short RPCs — a UI exit never affects
+a running job.
+
+## MCP tools
+
+`envoy mcp serve` exposes six primitives, in the spirit of a minimal agent
+harness: `exec`, `read`, `write`, `edit`, `ls`, `job` (`list` / `status` /
+`logs` / `cancel`).
+
+Deliberately absent: `copy` (compose `read` + `write`), policy editing (CLI
+only), plans, sub-agents, and any hidden permission layer. The daemon's policy
+gate decides what may run; everything heavier is the caller's job.
 
 ## Policy and trust
 
@@ -121,8 +164,9 @@ cd bridge && cargo test         # needs ../conduit checked out
 Covered end to end: submit returning before the child exits, a dropped watcher
 not killing its job, group queueing, cancel of running and queued jobs, state
 recovery across restarts, log cursor resume with partial trailing records,
-atomic write rollback, and the daemon socket serving jobs across independent
-connections.
+ambiguous-edit refusal, atomic write rollback, the daemon socket serving jobs
+across independent connections, and a rendered TUI frame (header, job list,
+output pane, hints) via ratatui's test backend.
 
 ## Platform
 

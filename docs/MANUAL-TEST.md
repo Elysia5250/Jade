@@ -5,6 +5,7 @@
 | 界面 | 形态 | 适合 |
 |---|---|---|
 | `envoy` CLI | 终端 | 日常操作、脚本、演示 |
+| `envoy ui` | 终端 TUI（opencode 布局） | 手动看任务、跟日志、取消 |
 | `envoy mcp serve` | stdio JSON-RPC | Claude/Cursor 等 MCP 客户端 |
 | Unix socket | 二进制协议 | 自己写前端时的底层接口 |
 
@@ -46,14 +47,23 @@ $B copy  local /tmp/envoy-test/x.txt local /tmp/envoy-test/y.txt
 $B daemon stop
 ```
 
+TUI（需要真终端）：
+
+```bash
+$B ui
+# 左边 job 列表，右边输出，底部命令框，footer 键位提示
+# 按 n 输入 echo hi 回车；选中任务按 c 取消；ctrl+p 打开命令面板；ctrl+x q 退出
+```
+
 MCP：
 
 ```bash
 printf '%s\n' \
 '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
-'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"run","arguments":{"machine":"local","command":"echo from-mcp"}}}' \
+'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"exec","arguments":{"command":"echo from-mcp","wait_s":5}}}' \
 | $B mcp serve 2>/dev/null
-# => 11 个工具；text 为 "from-mcp\n\njob N exit=0"
+# => 6 个工具：exec/read/write/edit/ls/job
+#    text 为 "from-mcp\n\n[job N exit=0]"
 ```
 
 ---
@@ -178,7 +188,7 @@ envoy --on workstation cancel 3
 
 ## D. 当前不该期待的行为
 
-- **没有 GUI**：看不到仪表盘、图表、按钮。
+- **没有 GUI**：只有终端 TUI，没有浏览器/桌面窗口。
 - **没有 stdin**：任务拿不到交互输入，`stdin` 是 `/dev/null`。
 - **没有暂停/恢复**：只有 `cancel`。
 - **没有路径围栏**：相对路径落目标机 `$HOME`，绝对路径就是整机可读；"允许调用 ≈ 该用户的全部文件权限"。

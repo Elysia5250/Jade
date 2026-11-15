@@ -6,6 +6,7 @@
 
 mod daemon;
 mod mcp;
+mod tui;
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -106,6 +107,8 @@ enum Commands {
         #[arg(long)]
         mode: Option<String>,
     },
+    /// Terminal console for jobs, output and cancellation.
+    Ui,
     /// Model Context Protocol (MCP) server over stdio.
     Mcp {
         #[command(subcommand)]
@@ -226,6 +229,7 @@ async fn main() -> Result<()> {
             to_path,
             mode,
         } => cmd_copy(&data_dir, &from, &from_path, &to, &to_path, &mode).await,
+        Commands::Ui => tui::run(data_dir, on).await,
         Commands::Mcp { cmd } => mcp::cmd_mcp(data_dir, cmd).await,
     }
 }

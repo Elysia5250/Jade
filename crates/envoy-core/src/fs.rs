@@ -71,6 +71,47 @@ pub async fn write_file(path: &str, data: &[u8], mode: Option<u32>) -> Result<u6
     Ok(data.len() as u64)
 }
 
+/// Replace an exact snippet in a UTF-8 text file, atomically.
+///
+/// Refuses a non-unique match unless `replace_all` is set, so a stale snippet
+/// cannot silently rewrite several places. Preserves the file's mode.
+pub async fn edit_file(path: &str, old: &str, new: &str, replace_all: bool) -> Result<usize> {
+    if old.is_empty() {
+        anyhow::bail!("`old` must not be empty");
+    }
+    let path = resolve(path);
+    let meta = tokio::fs::metadata(&path)
+        .await
+        .with_context(|| format!("stat {}", path.display()))?;
+    let bytes = tokio::fs::read(&path)
+        .await
+        .with_context(|| format!("read {}", path.display()))?;
+    let text = String::from_utf8(bytes).map_err(|_| {
+        anyhow::anyhow!(
+            "{} is not UTF-8 text; use `write` for binary files",
+            path.display()
+        )
+    })?;
+
+    let matches = text.matches(old).count();
+    if matches == 0 {
+        anyhow::bail!("`old` not found in {}", path.display());
+    }
+    if matches > 1 && !replace_all {
+        anyhow::bail!(
+            "`old` matches {matches} times in {}; include more context or set replace_all",
+            path.display()
+        );
+    }
+    let updated = if replace_all {
+        text.replace(old, new)
+    } else {
+        text.replacen(old, new, 1)
+    };
+    write_atomic(&path, updated.as_bytes(), Some(mode_of(&meta))).await?;
+    Ok(if replace_all { matches } else { 1 })
+}
+
 /// Write through a sibling `.part` and rename into place.
 pub async fn write_atomic(path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -214,6 +255,49 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".part-"))
             .collect();
         assert!(leftovers.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn edit_replaces_one_snippet_and_preserves_mode() {
+        let dir = tmpdir("edit");
+        let path = dir.join("code.rs");
+        std::fs::write(&path, b"fn a() {}\nfn b() {}\n").unwrap();
+        set_mode(&path, 0o640);
+
+        let n = edit_file(path.to_str().unwrap(), "fn a()", "fn alpha()", false)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "fn alpha() {}\nfn b() {}\n"
+        );
+        assert_eq!(mode_of(&std::fs::metadata(&path).unwrap()) & 0o777, 0o640);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn edit_refuses_ambiguity_and_missing_snippets() {
+        let dir = tmpdir("edit-err");
+        let path = dir.join("dup.txt");
+        std::fs::write(&path, b"x\nx\n").unwrap();
+        let err = edit_file(path.to_str().unwrap(), "x", "y", false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("matches 2 times"), "{err}");
+        assert_eq!(
+            edit_file(path.to_str().unwrap(), "x", "y", true)
+                .await
+                .unwrap(),
+            2
+        );
+        let err = edit_file(path.to_str().unwrap(), "nope", "y", false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not found"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

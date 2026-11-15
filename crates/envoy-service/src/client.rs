@@ -146,6 +146,11 @@ where
                 if let Some(code) = finished {
                     return Ok((next, Some(code)));
                 }
+                if !follow {
+                    // One batch per non-follow call: the server closes the
+                    // stream right after it, which is not an error.
+                    return Ok((next, None));
+                }
             }
             Reply::Failed { error } => bail!(error),
             other => bail!("unexpected reply to a job log: {other:?}"),
@@ -195,6 +200,37 @@ where
         }
     }
     Ok((size, mode, data))
+}
+
+/// Replace an exact snippet in a remote text file. Returns the number of
+/// replacements (1 unless `replace_all`).
+pub async fn edit<S>(
+    stream: S,
+    peer: &str,
+    path: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+) -> Result<usize>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut conn = open(
+        stream,
+        peer,
+        Op::Edit {
+            path: path.to_string(),
+            old: old.to_string(),
+            new: new.to_string(),
+            replace_all,
+        },
+    )
+    .await?;
+    match next_reply(&mut conn.stream, peer).await? {
+        Reply::Edited { replacements } => Ok(replacements),
+        Reply::Failed { error } => bail!(error),
+        other => bail!("unexpected reply to an edit: {other:?}"),
+    }
 }
 
 /// Streaming write: `open`, then `send` chunks, then `finish` to commit.
@@ -355,6 +391,17 @@ impl<D: AgentDialer> Remote<D> {
         mode: Option<u32>,
     ) -> Result<u64> {
         write(self.dial(peer).await?, peer, path, data, mode).await
+    }
+
+    pub async fn edit(
+        &self,
+        peer: &str,
+        path: &str,
+        old: &str,
+        new: &str,
+        replace_all: bool,
+    ) -> Result<usize> {
+        edit(self.dial(peer).await?, peer, path, old, new, replace_all).await
     }
 
     /// Open a streaming write, for payloads too large to hold in memory.
@@ -529,6 +576,42 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+
+        // Surgical edit.
+        let edited = dir.join("edit-me.txt");
+        write(
+            serve_one(&server, "caller-a").await,
+            "caller-a",
+            edited.to_str().unwrap(),
+            b"alpha beta gamma",
+            None,
+        )
+        .await
+        .unwrap();
+        let n = edit(
+            serve_one(&server, "caller-a").await,
+            "caller-a",
+            edited.to_str().unwrap(),
+            "beta",
+            "BETA",
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(std::fs::read(&edited).unwrap(), b"alpha BETA gamma");
+        let err = edit(
+            serve_one(&server, "caller-a").await,
+            "caller-a",
+            edited.to_str().unwrap(),
+            "missing",
+            "x",
+            false,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not found"), "{err}");
 
         // Files: write + read + list.
         let target = dir.join("sub/hello.txt");

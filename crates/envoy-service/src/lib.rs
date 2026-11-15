@@ -10,7 +10,8 @@ pub mod server;
 pub mod transport;
 
 pub use client::{
-    cancel, jobs, list, logs, open, probe, read, status, submit, write, Conn, Remote, WriteStream,
+    cancel, edit, jobs, list, logs, open, probe, read, status, submit, write, Conn, Remote,
+    WriteStream,
 };
 pub use envoy_proto::{Hello, Job, JobId, JobResult, JobState, LogRecord, SubmitRequest, TaskSpec};
 pub use server::AgentServer;

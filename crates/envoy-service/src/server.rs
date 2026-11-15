@@ -205,6 +205,15 @@ where
             limit,
         } => read_op(&path, offset, limit, wr).await?,
         Op::List { path } => list_op(&path, wr).await?,
+        Op::Edit {
+            path,
+            old,
+            new,
+            replace_all,
+        } => match fs::edit_file(&path, &old, &new, replace_all).await {
+            Ok(replacements) => reply(wr, Reply::Edited { replacements }).await,
+            Err(e) => reply(wr, Reply::Failed { error: format!("{e:#}") }).await,
+        },
         Op::Write { path, mode } => serve_write(rd, wr, &path, mode).await?,
     }
     Ok(())
@@ -419,6 +428,7 @@ fn describe(op: &Op) -> (&'static str, String) {
         Op::Read { path, .. } => path.clone(),
         Op::Write { path, .. } => path.clone(),
         Op::List { path } => path.clone(),
+        Op::Edit { path, .. } => path.clone(),
     };
     (op.name(), detail)
 }

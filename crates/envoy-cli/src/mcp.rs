@@ -1,26 +1,38 @@
 //! `envoy mcp serve`: Model Context Protocol server over stdio.
 //!
-//! The MCP surface is the *interaction* layer: `submit` returns immediately,
-//! `run` is a convenience that follows until a deadline, and `job_logs` /
-//! `job_cancel` work on jobs that outlived the call that started them.
+//! The tool surface is deliberately small — six orthogonal primitives, in the
+//! spirit of a minimal agent harness:
+//!
+//! * `exec`  run a command (optionally follow it for a while)
+//! * `read`  read bytes
+//! * `write` write a whole file atomically
+//! * `edit`  replace one exact snippet atomically
+//! * `ls`    list one directory level
+//! * `job`   list / status / logs / cancel
+//!
+//! Everything heavier (copying, policy, devices, dashboards) is composed by the
+//! caller from these, or lives in the CLI. There is no plan mode, no sub-agents,
+//! and no hidden permission layer here: the daemon's policy gate decides.
 
 use crate::daemon;
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use clap::Subcommand;
-use envoy_core::{parse_mode, AgentConfigStore};
-use envoy_proto::{Job, JobState, SubmitRequest, TaskSpec, DEFAULT_GROUP, READ_LIMIT};
+use envoy_core::parse_mode;
+use envoy_proto::{Job, JobState, LogRecord, SubmitRequest, TaskSpec, DEFAULT_GROUP};
 use envoy_service::{dialer_for, AgentDialer, Remote};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-/// Per-stream cap for tool output (keeps one call from flooding the model).
+/// Per-call output cap (keeps one tool result from flooding the model).
 const CAP: usize = 256 * 1024;
-/// Default wall-clock budget for `run` before it hands back a job id.
+/// Default wall-clock budget for `exec` before it hands back a job id.
 const DEFAULT_WAIT_S: u64 = 120;
+/// Record header size in a job log: `fd` + `u32` length.
+const RECORD_HEADER: u64 = 5;
 
 #[derive(Subcommand, Debug)]
 pub enum McpCmd {
@@ -118,124 +130,68 @@ fn initialize(params: &Value) -> Value {
     })
 }
 
-fn machine_schema() -> Value {
+// ---------------------------------------------------------------- tool defs
+
+fn machine_prop() -> Value {
     json!({
         "type": "string",
+        "default": "local",
         "description": "Target machine: `local` or a conduit device name/id.",
     })
 }
 
 fn tool_defs() -> Value {
-    let machine = machine_schema();
+    let machine = machine_prop();
     json!([
         {
-            "name": "status",
-            "description": "Show this device's agent policy, daemon state and job counts.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "run",
-            "description": "Submit a shell command and follow it for up to `wait_s` seconds. If it is still running at the deadline, returns the job id so you can poll `job_logs` instead of blocking.",
+            "name": "exec",
+            "description": "Run a shell command and return its output and exit code. If it outlives `wait_s`, returns a job id instead of blocking; read it later with `job`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "machine": machine,
-                    "command": { "type": "string", "description": "Shell command to run." },
-                    "cwd": { "type": "string", "description": "Working directory on the target." },
-                    "timeout_s": { "type": "integer", "description": "Kill the job after this many seconds (default 600)." },
-                    "wait_s": { "type": "integer", "description": "How long this call follows before returning a job id (default 120)." },
+                    "command": { "type": "string", "description": "Shell command (run through `sh -c`)." },
+                    "cwd": { "type": "string", "description": "Working directory (default: the target's $HOME)." },
                     "env": {
                         "type": "object",
                         "description": "Extra environment variables.",
                         "additionalProperties": { "type": "string" }
-                    }
+                    },
+                    "timeout_s": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 600,
+                        "description": "Kill the process group after this many seconds (0 = agent default)."
+                    },
+                    "wait_s": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 120,
+                        "description": "Follow for at most this long. 0 queues and returns immediately."
+                    },
+                    "label": { "type": "string", "description": "Free-form label for listings." },
+                    "group": { "type": "string", "default": "default", "description": "Concurrency group." }
                 },
-                "required": ["machine", "command"]
-            }
-        },
-        {
-            "name": "submit",
-            "description": "Queue a shell command and return immediately with a job id. Use `job_logs` to read output later.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "machine": machine,
-                    "command": { "type": "string" },
-                    "cwd": { "type": "string" },
-                    "timeout_s": { "type": "integer" },
-                    "label": { "type": "string" },
-                    "group": { "type": "string", "description": "Concurrency group (default `default`)." },
-                    "env": {
-                        "type": "object",
-                        "additionalProperties": { "type": "string" }
-                    }
-                },
-                "required": ["machine", "command"]
-            }
-        },
-        {
-            "name": "jobs",
-            "description": "List jobs on a machine, oldest first.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "machine": machine },
-                "required": ["machine"]
-            }
-        },
-        {
-            "name": "job_status",
-            "description": "Fetch one job's state, pid, log size and exit code.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "machine": machine,
-                    "id": { "type": "integer" }
-                },
-                "required": ["machine", "id"]
-            }
-        },
-        {
-            "name": "job_logs",
-            "description": "Read a job's output from a byte cursor. Returns the next cursor so reads can be paged.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "machine": machine,
-                    "id": { "type": "integer" },
-                    "offset": { "type": "integer", "description": "Cursor from a previous call (default 0)." }
-                },
-                "required": ["machine", "id"]
-            }
-        },
-        {
-            "name": "job_cancel",
-            "description": "Cancel a queued or running job (kills its process group).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "machine": machine,
-                    "id": { "type": "integer" }
-                },
-                "required": ["machine", "id"]
+                "required": ["command"]
             }
         },
         {
             "name": "read",
-            "description": "Read a file as text (binary falls back to base64). Relative paths resolve against the target's `$HOME`.",
+            "description": "Read a file as text (binary falls back to base64). Relative paths resolve against the target's $HOME.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "machine": machine,
                     "path": { "type": "string" },
-                    "offset": { "type": "integer", "description": "Byte offset (default 0)." },
-                    "limit": { "type": "integer", "description": "Max bytes (default and cap: 4 MiB)." }
+                    "offset": { "type": "integer", "minimum": 0, "default": 0, "description": "Byte offset." },
+                    "limit": { "type": "integer", "minimum": 0, "default": 0, "description": "Max bytes (default and cap: 4 MiB)." }
                 },
-                "required": ["machine", "path"]
+                "required": ["path"]
             }
         },
         {
             "name": "write",
-            "description": "Write a text file atomically (temp file + rename).",
+            "description": "Write a whole file atomically (sibling .part + rename). Use `edit` for a small change.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -244,34 +200,55 @@ fn tool_defs() -> Value {
                     "content": { "type": "string" },
                     "mode": { "type": "string", "description": "Octal permission bits, e.g. \"644\"." }
                 },
-                "required": ["machine", "path", "content"]
+                "required": ["path", "content"]
             }
         },
         {
-            "name": "ls",
-            "description": "List one directory level.",
+            "name": "edit",
+            "description": "Replace one exact snippet in a text file, atomically. Fails if the snippet is absent or appears more than once (unless `replace_all`).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "machine": machine,
-                    "path": { "type": "string", "description": "Directory (default: `$HOME`)." }
+                    "path": { "type": "string" },
+                    "old": { "type": "string", "description": "Exact text to replace." },
+                    "new": { "type": "string", "description": "Replacement text." },
+                    "replace_all": { "type": "boolean", "default": false }
                 },
-                "required": ["machine"]
+                "required": ["path", "old", "new"]
             }
         },
         {
-            "name": "copy",
-            "description": "Copy one file between machines, streaming in 4 MiB pages.",
+            "name": "ls",
+            "description": "List one directory level, sorted, with sizes and modes.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "from": machine,
-                    "from_path": { "type": "string" },
-                    "to": machine,
-                    "to_path": { "type": "string" },
-                    "mode": { "type": "string", "description": "Octal permission bits for the destination." }
+                    "machine": machine,
+                    "path": { "type": "string", "description": "Directory (default: the target's $HOME)." }
+                }
+            }
+        },
+        {
+            "name": "job",
+            "description": "Inspect or control jobs. `list` needs no id; `status`, `logs` and `cancel` take one.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "machine": machine,
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "status", "logs", "cancel"]
+                    },
+                    "id": { "type": "integer", "minimum": 1, "description": "Required unless `action` is `list`." },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "default": 0,
+                        "description": "For `logs`: the cursor returned by a previous call."
+                    }
                 },
-                "required": ["from", "from_path", "to", "to_path"]
+                "required": ["action"]
             }
         }
     ])
@@ -281,18 +258,16 @@ async fn call(data_dir: &Path, params: &Value) -> Result<(String, bool)> {
     let name = params["name"].as_str().unwrap_or("");
     let args = &params["arguments"];
     match name {
-        "status" => status(data_dir).await,
-        "run" => run(data_dir, args).await,
-        "submit" => submit(data_dir, args).await,
-        "jobs" => jobs(data_dir, args).await,
-        "job_status" => job_status(data_dir, args).await,
-        "job_logs" => job_logs(data_dir, args).await,
-        "job_cancel" => job_cancel(data_dir, args).await,
+        "exec" => exec(data_dir, args).await,
         "read" => read(data_dir, args).await,
         "write" => write(data_dir, args).await,
+        "edit" => edit(data_dir, args).await,
         "ls" => ls(data_dir, args).await,
-        "copy" => copy(data_dir, args).await,
-        other => Ok((format!("unknown tool: {other}"), true)),
+        "job" => job(data_dir, args).await,
+        other => Ok((
+            format!("unknown tool `{other}`; available: exec, read, write, edit, ls, job"),
+            true,
+        )),
     }
 }
 
@@ -315,17 +290,11 @@ fn machine_arg(args: &Value) -> String {
         .to_string()
 }
 
-fn endpoint(v: &Value) -> String {
-    v.as_str()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("local")
-        .to_string()
-}
-
 fn job_id(args: &Value) -> Result<u64> {
     args["id"]
         .as_u64()
-        .context("missing or non-numeric `id`")
+        .filter(|id| *id > 0)
+        .context("missing `id` (required for this action)")
 }
 
 fn env_arg(args: &Value) -> Vec<(String, String)> {
@@ -339,7 +308,7 @@ fn env_arg(args: &Value) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-fn submit_request(args: &Value) -> Result<SubmitRequest> {
+fn exec_request(args: &Value) -> Result<SubmitRequest> {
     let command = args["command"]
         .as_str()
         .filter(|c| !c.trim().is_empty())
@@ -367,41 +336,59 @@ fn mode_arg(args: &Value) -> Result<Option<u32>> {
     }
 }
 
-/// Bounded output buffer that keeps stdout and stderr separable.
+/// Bounded output buffer. Keeps stdout/stderr separable and tracks how far the
+/// caller has actually consumed the job log, so a truncated result still hands
+/// back a correct resume cursor.
 struct Sink {
     out: Vec<u8>,
     err: Vec<u8>,
     truncated: bool,
+    cursor: u64,
 }
 
 impl Sink {
-    fn new() -> Self {
+    fn new(offset: u64) -> Self {
         Self {
             out: Vec::new(),
             err: Vec::new(),
             truncated: false,
+            cursor: offset,
         }
     }
 
-    fn push(&mut self, fd: u8, chunk: &[u8]) {
-        let used = self.out.len() + self.err.len();
-        if used >= CAP {
+    fn room(&self) -> usize {
+        CAP.saturating_sub(self.out.len() + self.err.len())
+    }
+
+    fn push_bytes(&mut self, fd: u8, chunk: &[u8], fully: bool) {
+        let bucket = if fd == 1 { &mut self.err } else { &mut self.out };
+        bucket.extend_from_slice(chunk);
+        if !fully {
+            self.truncated = true;
+        }
+    }
+
+    fn push_record(&mut self, record: &LogRecord) {
+        let end = record.seq + RECORD_HEADER + record.data.len() as u64;
+        let room = self.room();
+        if room == 0 {
             self.truncated = true;
             return;
         }
-        let room = CAP - used;
-        let bucket = if fd == 1 { &mut self.err } else { &mut self.out };
-        if chunk.len() > room {
-            bucket.extend_from_slice(&chunk[..room]);
-            self.truncated = true;
+        if record.data.len() <= room {
+            self.push_bytes(record.fd, &record.data, true);
+            self.cursor = end;
         } else {
-            bucket.extend_from_slice(chunk);
+            self.push_bytes(record.fd, &record.data[..room], false);
         }
     }
 
-    fn push_records(&mut self, records: &[envoy_service::LogRecord]) {
-        for r in records {
-            self.push(r.fd, &r.data);
+    fn push_records(&mut self, records: &[LogRecord]) {
+        for record in records {
+            if self.truncated {
+                return;
+            }
+            self.push_record(record);
         }
     }
 
@@ -411,10 +398,19 @@ impl Sink {
             s.push_str("\n[stderr]\n");
             s.push_str(&String::from_utf8_lossy(&self.err));
         }
-        if self.truncated {
-            s.push_str("\n[truncated]");
-        }
         s
+    }
+}
+
+fn truncation_note(sink: &Sink) -> String {
+    if sink.truncated {
+        format!(
+            "\n[truncated at {} KiB; resume with job action=logs offset={}]",
+            CAP / 1024,
+            sink.cursor
+        )
+    } else {
+        String::new()
     }
 }
 
@@ -428,12 +424,11 @@ fn fmt_job(job: &Job) -> String {
         JobState::Done { result, .. } => format!("done: {}", result.describe()),
     };
     format!(
-        "#{} {:<9} group={} owner={} label={} log={}B  {}",
+        "#{} {:<16} group={} owner={} log={}B  {}",
         job.id,
         state,
         job.group,
         job.owner,
-        job.label.clone().unwrap_or_else(|| "-".into()),
         job.log_bytes,
         job.command()
     )
@@ -441,62 +436,38 @@ fn fmt_job(job: &Job) -> String {
 
 // -------------------------------------------------------------------- tools
 
-async fn status(data_dir: &Path) -> Result<(String, bool)> {
-    let store = AgentConfigStore::open(data_dir.to_path_buf())?;
-    let running = daemon::is_running(data_dir).await;
-    let mut jobs_line = json!(null);
-    let mut running_jobs = 0;
-    let mut queued_jobs = 0;
-    if running {
-        if let Ok(remote) = remote_for(data_dir, "local").await {
-            if let Ok(jobs) = remote.jobs("local").await {
-                running_jobs = jobs
-                    .iter()
-                    .filter(|j| matches!(j.state, JobState::Running { .. }))
-                    .count();
-                queued_jobs = jobs
-                    .iter()
-                    .filter(|j| matches!(j.state, JobState::Queued { .. }))
-                    .count();
-                jobs_line = json!(jobs.len());
-            }
-        }
-    }
-    let text = serde_json::to_string_pretty(&json!({
-        "data_dir": store.root,
-        "enabled": store.config.enabled,
-        "allow": store.config.allow,
-        "max_jobs": store.config.max_jobs,
-        "daemon": if running { "running" } else { "stopped" },
-        "jobs": jobs_line,
-        "jobs_running": running_jobs,
-        "jobs_queued": queued_jobs,
-        "bridge": if daemon::bridge_socket_path(data_dir).exists() { "socket present" } else { "not running" },
-    }))?;
-    Ok((text, false))
-}
-
-async fn run(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
+async fn exec(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
     let machine = machine_arg(args);
-    let req = submit_request(args)?;
+    let req = exec_request(args)?;
     let remote = remote_for(data_dir, &machine).await?;
     let job = remote.submit(&machine, req).await?;
-    let wait_s = args["wait_s"].as_u64().unwrap_or(DEFAULT_WAIT_S).min(600);
+    let wait_s = args["wait_s"].as_u64().unwrap_or(DEFAULT_WAIT_S).min(3600);
 
-    let mut sink = Sink::new();
+    if wait_s == 0 {
+        return Ok((
+            format!(
+                "job {} queued on {machine}: {}\n[job action=logs id={} to read it]",
+                job.id,
+                job.command(),
+                job.id
+            ),
+            false,
+        ));
+    }
+
+    let mut sink = Sink::new(0);
     let followed = tokio::time::timeout(
         Duration::from_secs(wait_s),
-        remote.logs(&machine, job.id, 0, true, |records| {
-            sink.push_records(records)
-        }),
+        remote.logs(&machine, job.id, 0, true, |records| sink.push_records(records)),
     )
     .await;
 
     match followed {
         Ok(Ok((_cursor, finished))) => {
             let mut text = sink.text();
+            text.push_str(&truncation_note(&sink));
             text.push_str(&format!(
-                "\njob {} exit={}",
+                "\n[job {} exit={}]",
                 job.id,
                 finished.unwrap_or(1)
             ));
@@ -505,82 +476,14 @@ async fn run(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
         Ok(Err(e)) => Ok((format!("{e:#}"), true)),
         Err(_) => {
             let mut text = sink.text();
+            text.push_str(&truncation_note(&sink));
             text.push_str(&format!(
-                "\n[job {} still running after {}s; poll `job_logs` with id {}]",
-                job.id, wait_s, job.id
+                "\n[job {} still running after {wait_s}s; job action=logs id={}]",
+                job.id, job.id
             ));
             Ok((text, false))
         }
     }
-}
-
-async fn submit(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
-    let machine = machine_arg(args);
-    let req = submit_request(args)?;
-    let remote = remote_for(data_dir, &machine).await?;
-    let job = remote.submit(&machine, req).await?;
-    Ok((format!("job {} accepted: {}", job.id, fmt_job(&job)), false))
-}
-
-async fn jobs(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
-    let machine = machine_arg(args);
-    let remote = remote_for(data_dir, &machine).await?;
-    let jobs = remote.jobs(&machine).await?;
-    if jobs.is_empty() {
-        return Ok((format!("no jobs on {machine}"), false));
-    }
-    let mut text = String::new();
-    for job in jobs {
-        text.push_str(&fmt_job(&job));
-        text.push('\n');
-    }
-    Ok((text, false))
-}
-
-async fn job_status(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
-    let machine = machine_arg(args);
-    let id = job_id(args)?;
-    let remote = remote_for(data_dir, &machine).await?;
-    let job = remote.status(&machine, id).await?;
-    let text = serde_json::to_string_pretty(&json!({
-        "id": job.id,
-        "state": job.state.label(),
-        "result": job.state.result().map(|r| r.describe()),
-        "exit": job.state.exit_code(),
-        "pid": job.pid,
-        "group": job.group,
-        "owner": job.owner,
-        "command": job.command(),
-        "cwd": job.cwd,
-        "log_bytes": job.log_bytes,
-    }))?;
-    Ok((text, false))
-}
-
-async fn job_logs(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
-    let machine = machine_arg(args);
-    let id = job_id(args)?;
-    let offset = args["offset"].as_u64().unwrap_or(0);
-    let remote = remote_for(data_dir, &machine).await?;
-    let mut sink = Sink::new();
-    let (cursor, finished) = remote
-        .logs(&machine, id, offset, false, |records| sink.push_records(records))
-        .await?;
-    let mut text = sink.text();
-    text.push_str(&format!("\n\nnext={cursor}"));
-    match finished {
-        Some(code) => text.push_str(&format!(" exit={code}")),
-        None => text.push_str(" (still running)"),
-    }
-    Ok((text, false))
-}
-
-async fn job_cancel(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
-    let machine = machine_arg(args);
-    let id = job_id(args)?;
-    let remote = remote_for(data_dir, &machine).await?;
-    remote.cancel(&machine, id).await?;
-    Ok((format!("cancel requested for job {id} on {machine}"), false))
 }
 
 async fn read(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
@@ -590,7 +493,7 @@ async fn read(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
         return Ok(("missing `path`".into(), true));
     }
     let remote = remote_for(data_dir, &machine).await?;
-    let (_size, _mode, data) = remote
+    let (size, _mode, data) = remote
         .read(
             &machine,
             path,
@@ -602,7 +505,20 @@ async fn read(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
         Ok(text) => text,
         Err(e) => format!("[base64]\n{}", B64.encode(e.into_bytes())),
     };
-    Ok((body, false))
+    // A full-page read almost always means there is more.
+    let more = args["limit"].as_u64().unwrap_or(0) == 0 && size > envoy_proto::READ_LIMIT;
+    Ok((
+        if more {
+            format!(
+                "{body}\n\n[{} bytes total; read with offset={}]",
+                size,
+                envoy_proto::READ_LIMIT
+            )
+        } else {
+            body
+        },
+        false,
+    ))
 }
 
 async fn write(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
@@ -619,8 +535,33 @@ async fn write(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
         Err(e) => return Ok((format!("{e:#}"), true)),
     };
     let remote = remote_for(data_dir, &machine).await?;
-    let bytes = remote.write(&machine, path, content.as_bytes(), mode).await?;
-    Ok((format!("wrote {bytes} bytes to {path}"), false))
+    let bytes = remote
+        .write(&machine, path, content.as_bytes(), mode)
+        .await?;
+    Ok((format!("wrote {bytes} bytes to {path} on {machine}"), false))
+}
+
+async fn edit(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
+    let machine = machine_arg(args);
+    let path = args["path"].as_str().unwrap_or("");
+    let Some(old) = args["old"].as_str() else {
+        return Ok(("missing `old`".into(), true));
+    };
+    let Some(new) = args["new"].as_str() else {
+        return Ok(("missing `new`".into(), true));
+    };
+    let replace_all = args["replace_all"].as_bool().unwrap_or(false);
+    let remote = remote_for(data_dir, &machine).await?;
+    match remote
+        .edit(&machine, path, old, new, replace_all)
+        .await
+    {
+        Ok(n) => Ok((
+            format!("edited {path} on {machine}: {n} replacement(s)"),
+            false,
+        )),
+        Err(e) => Ok((format!("{e:#}"), true)),
+    }
 }
 
 async fn ls(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
@@ -647,44 +588,108 @@ async fn ls(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
     Ok((text, false))
 }
 
-async fn copy(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
-    let from = endpoint(&args["from"]);
-    let to = endpoint(&args["to"]);
-    let (Some(from_path), Some(to_path)) = (args["from_path"].as_str(), args["to_path"].as_str())
-    else {
-        return Ok(("missing `from_path` or `to_path`".into(), true));
-    };
-    let mode = match mode_arg(args) {
-        Ok(m) => m,
-        Err(e) => return Ok((format!("{e:#}"), true)),
-    };
-    let src = remote_for(data_dir, &from).await?;
-    let dst = remote_for(data_dir, &to).await?;
-
-    let (_, src_mode, first) = src.read(&from, from_path, 0, READ_LIMIT).await?;
-    let mut writer = dst
-        .open_write(&to, to_path, mode.or(Some(src_mode)))
-        .await?;
-    let mut total = 0u64;
-    let mut offset = 0u64;
-    let mut page = first;
-    loop {
-        total += page.len() as u64;
-        writer.send(&page).await?;
-        offset += page.len() as u64;
-        if (page.len() as u64) < READ_LIMIT {
-            break;
+async fn job(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
+    let machine = machine_arg(args);
+    let action = args["action"].as_str().unwrap_or("");
+    let remote = remote_for(data_dir, &machine).await?;
+    match action {
+        "list" => {
+            let jobs = remote.jobs(&machine).await?;
+            if jobs.is_empty() {
+                return Ok((format!("no jobs on {machine}"), false));
+            }
+            let mut text = String::new();
+            for job in jobs {
+                text.push_str(&fmt_job(&job));
+                text.push('\n');
+            }
+            Ok((text, false))
         }
-        let (_, _, next) = src.read(&from, from_path, offset, READ_LIMIT).await?;
-        if next.is_empty() {
-            break;
+        "status" => {
+            let id = job_id(args)?;
+            let job = remote.status(&machine, id).await?;
+            Ok((
+                serde_json::to_string_pretty(&json!({
+                    "id": job.id,
+                    "state": job.state.label(),
+                    "result": job.state.result().map(|r| r.describe()),
+                    "exit": job.state.exit_code(),
+                    "pid": job.pid,
+                    "group": job.group,
+                    "owner": job.owner,
+                    "command": job.command(),
+                    "cwd": job.cwd,
+                    "log_bytes": job.log_bytes,
+                }))?,
+                false,
+            ))
         }
-        page = next;
+        "logs" => {
+            let id = job_id(args)?;
+            let offset = args["offset"].as_u64().unwrap_or(0);
+            let mut sink = Sink::new(offset);
+            let (_server_cursor, finished) = remote
+                .logs(&machine, id, offset, false, |records| sink.push_records(records))
+                .await?;
+            let mut text = sink.text();
+            text.push_str(&truncation_note(&sink));
+            text.push_str(&format!("\n\nnext={}", sink.cursor));
+            match finished {
+                Some(code) => text.push_str(&format!(" exit={code}")),
+                None => text.push_str(" (running)"),
+            }
+            Ok((text, false))
+        }
+        "cancel" => {
+            let id = job_id(args)?;
+            remote.cancel(&machine, id).await?;
+            Ok((format!("cancel requested for job {id} on {machine}"), false))
+        }
+        other => Ok((
+            format!("unknown action `{other}`; use list, status, logs or cancel"),
+            true,
+        )),
     }
-    writer.finish().await?;
-    Ok((
-        format!("copied {total} bytes: {from}:{from_path} -> {to}:{to_path}"),
-        false,
-    ))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn six_primitives_exactly() {
+        let tools = tool_defs();
+        let names: Vec<&str> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["exec", "read", "write", "edit", "ls", "job"]);
+    }
+
+    #[test]
+    fn sink_reports_the_last_fully_consumed_cursor() {
+        let mut sink = Sink::new(0);
+        sink.push_records(&[
+            LogRecord {
+                seq: 0,
+                fd: 0,
+                data: b"hello".to_vec(),
+            },
+            LogRecord {
+                seq: 10,
+                fd: 1,
+                data: b"err".to_vec(),
+            },
+        ]);
+        assert_eq!(sink.cursor, 10 + RECORD_HEADER + 3);
+        assert!(!sink.truncated);
+        assert!(sink.text().contains("[stderr]"));
+
+        // Resume from that cursor yields nothing new.
+        let mut resume = Sink::new(sink.cursor);
+        resume.push_records(&[]);
+        assert_eq!(resume.cursor, sink.cursor);
+    }
+}
