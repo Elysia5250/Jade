@@ -7,8 +7,11 @@
 //! Remote targets (`--on laptop`) go through `conduit run`'s control socket.
 //! envoy never links conduit: it is an HTTP/WebSocket client of that socket.
 
+mod auth;
 mod daemon;
+mod llm;
 mod mcp;
+mod session;
 mod tui;
 
 use anyhow::{bail, Context, Result};
@@ -52,6 +55,14 @@ struct Cli {
     #[arg(long, global = true, env = "ENVOY_CWD")]
     cwd: Option<PathBuf>,
 
+    /// Continue the most recent session for this directory.
+    #[arg(short = 'c', long = "continue")]
+    continue_last: bool,
+
+    /// Resume a specific session ID.
+    #[arg(short = 's', long = "session")]
+    session: Option<String>,
+
     /// Subcommand; with none, `envoy` opens the terminal console.
     #[command(subcommand)]
     cmd: Option<Commands>,
@@ -61,6 +72,15 @@ struct Cli {
 enum Commands {
     /// Show policy, daemon state, conduit status, and job counts.
     Status,
+    /// Connect an LLM provider (API key, OAuth, or custom endpoint).
+    Login,
+    /// Manage LLM provider credentials.
+    Auth {
+        #[command(subcommand)]
+        cmd: AuthCmd,
+    },
+    /// List available models across connected providers.
+    Models,
     /// Allow listed callers to reach the agent over the fabric.
     Enable,
     /// Refuse remote calls (local calls keep working).
@@ -142,6 +162,16 @@ enum Commands {
 }
 
 #[derive(Subcommand, Debug)]
+enum AuthCmd {
+    /// Connect an LLM provider (API key, OAuth, or custom endpoint).
+    Login,
+    /// List connected providers and credentials.
+    List,
+    /// Remove stored credentials for a provider.
+    Logout { provider: Option<String> },
+}
+
+#[derive(Subcommand, Debug)]
 enum DaemonCmd {
     /// Install user-level autostart (launchd / systemd --user).
     Install,
@@ -159,7 +189,7 @@ enum DaemonCmd {
 struct TaskArgs {
     /// Working directory on the target.
     #[arg(long)]
-    cwd: Option<String>,
+    cwd: Option<PathBuf>,
     /// Extra environment variables, `K=V` (repeatable).
     #[arg(long = "env")]
     env: Vec<String>,
@@ -199,7 +229,7 @@ impl TaskArgs {
         };
         Ok(SubmitRequest {
             spec,
-            cwd: self.cwd,
+            cwd: self.cwd.map(|p| p.display().to_string()),
             env: parse_env(&self.env)?,
             label: self.label,
             group: self.group.unwrap_or_else(|| DEFAULT_GROUP.to_string()),
@@ -289,12 +319,21 @@ async fn main() -> Result<()> {
             ctx.on.clone(),
             ctx.conduit.clone(),
             ctx.cwd.clone(),
+            cli.continue_last,
+            cli.session.clone(),
         )
         .await;
     };
 
     match command {
         Commands::Status => cmd_status(&ctx).await,
+        Commands::Login => auth::cmd_auth_login(&ctx.data_dir).await,
+        Commands::Auth { cmd } => match cmd {
+            AuthCmd::Login => auth::cmd_auth_login(&ctx.data_dir).await,
+            AuthCmd::List => auth::cmd_auth_list(&ctx.data_dir).await,
+            AuthCmd::Logout { provider } => auth::cmd_auth_logout(&ctx.data_dir, provider).await,
+        },
+        Commands::Models => cmd_models(&ctx.data_dir).await,
         Commands::Enable => cmd_set_enabled(&ctx.data_dir, true),
         Commands::Disable => cmd_set_enabled(&ctx.data_dir, false),
         Commands::Allow { caller_id } => cmd_allow(&ctx.data_dir, caller_id),
@@ -342,6 +381,8 @@ async fn main() -> Result<()> {
                 ctx.on.clone(),
                 ctx.conduit.clone(),
                 ctx.cwd.clone(),
+                cli.continue_last,
+                cli.session.clone(),
             )
             .await
         }
@@ -857,6 +898,29 @@ async fn cmd_copy(
     Ok(())
 }
 
+async fn cmd_models(data_dir: &Path) -> Result<()> {
+    let models = auth::available_models(data_dir);
+    let active = auth::resolve_active_provider(data_dir).map(|(_, m)| m);
+    if models.is_empty() {
+        println!("No models available. Run `envoy login` or type `/login` in the console.");
+        return Ok(());
+    }
+    println!("{:<18} {:<30} {:<10} {}", "PROVIDER", "MODEL", "AUTH", "ACTIVE");
+    for m in models {
+        let is_active = active
+            .as_ref()
+            .is_some_and(|a| a.provider_id == m.provider_id && a.model_id == m.model_id);
+        println!(
+            "{:<18} {:<30} {:<10} {}",
+            m.provider_id,
+            m.model_id,
+            m.auth_kind,
+            if is_active { "*" } else { "" }
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod cli_tests {
     use super::*;
@@ -865,6 +929,31 @@ mod cli_tests {
     fn bare_envoy_opens_the_console() {
         let cli = Cli::try_parse_from(["envoy"]).expect("parse");
         assert!(cli.cmd.is_none(), "no subcommand should mean the TUI");
+        assert!(!cli.continue_last);
+        assert!(cli.session.is_none());
+    }
+
+    #[test]
+    fn session_and_auth_flags_parse() {
+        let cli = Cli::try_parse_from(["envoy", "-c"]).expect("parse");
+        assert!(cli.continue_last);
+
+        let cli = Cli::try_parse_from(["envoy", "--session", "sess-123"]).expect("parse");
+        assert_eq!(cli.session.as_deref(), Some("sess-123"));
+
+        let cli = Cli::try_parse_from(["envoy", "login"]).expect("parse");
+        assert!(matches!(cli.cmd, Some(Commands::Login)));
+
+        let cli = Cli::try_parse_from(["envoy", "auth", "list"]).expect("parse");
+        assert!(matches!(
+            cli.cmd,
+            Some(Commands::Auth {
+                cmd: AuthCmd::List
+            })
+        ));
+
+        let cli = Cli::try_parse_from(["envoy", "models"]).expect("parse");
+        assert!(matches!(cli.cmd, Some(Commands::Models)));
     }
 
     #[test]
@@ -880,5 +969,16 @@ mod cli_tests {
     fn cwd_flag_is_global() {
         let cli = Cli::try_parse_from(["envoy", "--cwd", "/tmp/x", "jobs"]).expect("parse");
         assert_eq!(cli.cwd.as_deref(), Some(std::path::Path::new("/tmp/x")));
+
+        let cli = Cli::try_parse_from(["envoy", "--cwd", "/tmp/x", "run", "pwd"]).expect("parse");
+        assert_eq!(cli.cwd.as_deref(), Some(std::path::Path::new("/tmp/x")));
+
+        let cli = Cli::try_parse_from(["envoy", "run", "--cwd", "/tmp/y", "pwd"]).expect("parse");
+        match cli.cmd {
+            Some(Commands::Run(args)) => {
+                assert_eq!(args.cwd.as_deref(), Some(std::path::Path::new("/tmp/y")));
+            }
+            other => panic!("expected Run, got {other:?}"),
+        }
     }
 }

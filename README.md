@@ -69,11 +69,19 @@ identity and TUN. It remains in git history up to `55944b0`.
 ```bash
 cd ~/your-project
 envoy                                  # opens the console in this directory
+envoy -c                               # continue the most recent session for this directory
+envoy login                            # or type /login inside the console (API Key / OAuth)
+envoy auth list                        # list stored credentials
+envoy models                           # list available models
 ```
 
 That is the main entry point: bare `envoy` starts the terminal console, with the
-current directory as the working directory for everything you run. Type a
-command and press enter, or `/` for the command menu.
+current directory as the working directory for everything you run. Before `/login`
+it starts in **Shell** mode (commands execute directly as detached daemon jobs);
+once connected via `/login` (or env vars like `OPENAI_API_KEY` /
+`ANTHROPIC_API_KEY`) it switches to **Agent** mode where prompts stream from
+your LLM and invoke `exec`/`read`/`write`/`edit`/`ls`/`job` on `local` or any
+`conduit` peer.
 
 Scripted use (the daemon auto-starts; jobs outlive your terminal):
 
@@ -97,40 +105,46 @@ through `sh -c`; multiple arguments are executed verbatim (no shell) unless
 
 ## Terminal console
 
-`envoy ui` is the interactive view. Its layout and vocabulary are copied from
-opencode's TUI, because that is the terminal idiom this repo already lives in:
+`envoy` / `envoy ui` follows `opencode`'s TUI layout and workflow:
 
-```
- envoy ● local   3 jobs · 1 running · 0 queued   follow   opencode
-┌ jobs ──────────────────────────────┐┌ #3 · printf ... · done success ─────────┐
-│ ✓   1 0s   echo build-ok           ││ line one                                │
-│ ●   2 1s   sleep 90                ││ line two                                │
-│ ✓   3 0s   printf 'line one...'    ││ warn                                    │
-└────────────────────────────────────┘└─────────────────────────────────────────┘
-┌ command ──────────────────────────────────────────────────────────────────────┐
-│ > _                                                              tab to type │
-└───────────────────────────────────────────────────────────────────────────────┘
- ctrl+p palette  n new  c cancel  f follow  tab focus  ctrl+x q quit
-```
+- **Inline transcript stream** (main pane): user prompt cards (`┃`), streaming
+  assistant Markdown replies (with collapsible `▸ Thinking` reasoning), and
+  collapsible tool/shell execution cards (live stdout/stderr, job `#id`,
+  elapsed time, exit code, target machine).
+- **Right sidebar**: session context (`dir`, `model`, `mode`, `target`, token
+  usage) and a live index of detached daemon jobs (`ctrl+x b` or `/sidebar`).
+- **Multiline editor**: `Shift+Enter`, `Alt+Enter`, or `Ctrl+J` inserts newlines;
+  `Tab` toggles `Agent` / `Shell` mode; `!cmd` always executes directly as a
+  shell job.
+- **`/` command menu & `/cd` autocomplete**: type `/` to open the filterable
+  command menu (`/login`, `/models`, `/cd`, `/machine`, `/sessions`, `/new`,
+  `/mode`, `/expand`, `/sidebar`, `/theme`, `/help`, `/quit`); `/cd ` offers
+  live subdirectory completion (`Tab` completes, `Enter` switches).
+- **Providers & OAuth (`/login`)**: API Keys (OpenAI, Anthropic, DeepSeek,
+  Gemini, OpenRouter, OpenCode Zen/Go), OAuth (ChatGPT Plus/Pro Browser PKCE &
+  Headless Device Flow, Anthropic Claude Pro/Max PKCE, GitHub Copilot Device
+  Flow), and custom OpenAI/Anthropic-compatible endpoints (Ollama, vLLM, relays).
+  Credentials are saved to `~/.envoy/auth.json` (`0600`).
 
 | Key | Action |
 |---|---|
-| `tab` / `shift+tab` | cycle focus (jobs → log → command) |
-| `j`/`k`, `↑`/`↓`, `g`/`G` | move in the job list |
-| `n` | type a command; `enter` submits, `esc` cancels |
-| `c` | cancel the selected job |
-| `f` | follow output (otherwise `pgup`/`pgdn`, `home`/`end` scroll) |
-| `r` | refresh now |
-| `/` | command menu with filtering: `/cd`, `/machine`, `/logs`, `/cancel`, `/follow`, `/clear`, `/theme`, `/help`, `/quit` |
-| `ctrl+p` | command palette: switch machine (only peers advertising service 16), new, cancel, follow, sidebar, theme, refresh, quit |
-| `ctrl+x` then `q`/`n`/`c`/`b`/`t`/`s` | leader shortcuts, as in opencode |
-| `q` / `ctrl+c` / `ctrl+d` | quit |
+| `enter` / `shift+enter` | submit prompt or command / insert newline (`alt+enter`, `ctrl+j` also insert newline) |
+| `!cmd` | run a shell command directly as a detached job (even in `Agent` mode) |
+| `tab` | in editor: toggle `Agent` / `Shell` mode (or complete `/` command / `/cd` dir) |
+| `shift+tab` | cycle focus (`input` → `transcript` → `sidebar`) |
+| `ctrl+o` | collapse / expand reasoning or tool/shell output cards |
+| `/` | filterable command menu (`/login`, `/models`, `/cd`, `/machine`, `/sessions`, …) |
+| `ctrl+p` | command palette (login, models, sessions, switch machine, theme, quit) |
+| `ctrl+x` then `q`/`n`/`c`/`b`/`t`/`l`/`m`/`s` | leader shortcuts (quit, new session, cancel, sidebar, theme, login, models, refresh) |
+| `pgup`/`pgdn`, `ctrl+u`/`ctrl+f`, `g`/`G` | scroll transcript / jump top or bottom |
+| `esc` / `ctrl+c` | clear input / cancel active turn or focus transcript / quit |
 
 Bare commands run in the console's working directory (`--cwd` or `/cd` to
-change it). It talks to the same daemon over the same short RPCs — a UI exit
-never affects a running job. When conduit is connected the header shows `agents/peers` (machines
-that advertise service 16 vs all live peers) and `ctrl+p` lists only the agent
-machines, so a pure VPN node is never dialled blindly.
+change it). Sessions are saved under `~/.envoy/sessions/` (`envoy -c` resumes
+the latest session for the current directory). It talks to the same daemon over
+short RPCs — a UI exit never affects a running job. When conduit is connected,
+the sidebar shows `agents/peers` and `/machine` / `ctrl+p` lists only peers
+advertising service 16.
 
 ## MCP tools
 

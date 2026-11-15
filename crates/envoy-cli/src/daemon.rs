@@ -370,7 +370,13 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let p = std::env::temp_dir().join(format!("envoy-daemon-{n}"));
+        let base = std::env::temp_dir();
+        let base = if base.to_string_lossy().len() > 60 && Path::new("/tmp").is_dir() {
+            PathBuf::from("/tmp")
+        } else {
+            base
+        };
+        let p = base.join(format!("ed-{n}"));
         std::fs::create_dir_all(&p).unwrap();
         p
     }

@@ -14,12 +14,16 @@ curl -fsSL https://raw.githubusercontent.com/Elysia5250/envoy/main/scripts/insta
 ```bash
 cd ~/your-project
 envoy                 # 打开控制台；当前目录就是工作目录
-# 输入 ls -la 回车即执行；输入 / 出命令菜单
+# 输入 / 出命令菜单（/login 登录模型或 OAuth、/cd 自动补全切目录）
+# 未登录前直接回车就是 Shell 执行；登录后为 Agent 模式，可用 !cmd 直接跑 Shell
 ```
 
 其它入口：
 
 ```bash
+envoy login           # 命令行连接 API Key / ChatGPT OAuth / Claude OAuth / Copilot / 自定义端点
+envoy auth list       # 查看已连接账号与默认模型
+envoy -c              # 继续当前目录最近一次会话
 envoy --version
 envoy status          # 首次运行会自动拉起本机守护进程
 envoy run "uname -a"
