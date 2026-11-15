@@ -9,12 +9,6 @@ pub fn socket_path(data_dir: &Path) -> PathBuf {
     data_dir.join("envoy.sock")
 }
 
-/// Where the conduit bridge listens. It is a different process with a
-/// different trust model, so it gets its own socket.
-pub fn bridge_socket_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("bridge.sock")
-}
-
 fn pid_path(data_dir: &Path) -> PathBuf {
     data_dir.join("envoy.pid")
 }

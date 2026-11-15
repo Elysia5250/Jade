@@ -23,7 +23,7 @@ use envoy_core::parse_mode;
 use envoy_proto::{Job, JobState, LogRecord, SubmitRequest, TaskSpec, DEFAULT_GROUP};
 use envoy_service::{dialer_for, AgentDialer, Remote};
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -40,13 +40,38 @@ pub enum McpCmd {
     Serve,
 }
 
-pub async fn cmd_mcp(data_dir: PathBuf, cmd: McpCmd) -> Result<()> {
+pub async fn cmd_mcp(
+    data_dir: PathBuf,
+    cmd: McpCmd,
+    conduit: Option<PathBuf>,
+) -> Result<()> {
     match cmd {
-        McpCmd::Serve => serve(data_dir).await,
+        McpCmd::Serve => serve(data_dir, conduit).await,
     }
 }
 
-async fn serve(data_dir: PathBuf) -> Result<()> {
+/// Everything the tools need to reach a machine.
+#[derive(Clone)]
+struct Mcp {
+    data_dir: PathBuf,
+    conduit: Option<PathBuf>,
+}
+
+impl Mcp {
+    async fn remote(&self, machine: &str) -> Result<Remote<AnyDialer>> {
+        if machine == "local" || machine.is_empty() {
+            daemon::ensure(&self.data_dir).await?;
+        }
+        Ok(Remote::new(dialer_for(
+            &self.data_dir,
+            machine,
+            self.conduit.clone(),
+        )))
+    }
+}
+
+async fn serve(data_dir: PathBuf, conduit: Option<PathBuf>) -> Result<()> {
+    let mcp = Mcp { data_dir, conduit };
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut out = tokio::io::stdout();
     while let Some(line) = lines.next_line().await? {
@@ -61,7 +86,7 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
                 continue;
             }
         };
-        let Some(resp) = handle_rpc(&data_dir, &msg).await? else {
+        let Some(resp) = handle_rpc(&mcp, &msg).await? else {
             continue;
         };
         reply(&mut out, resp).await?;
@@ -69,7 +94,7 @@ async fn serve(data_dir: PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn handle_rpc(data_dir: &Path, msg: &Value) -> Result<Option<Value>> {
+async fn handle_rpc(mcp: &Mcp, msg: &Value) -> Result<Option<Value>> {
     let method = msg["method"].as_str().unwrap_or("");
     if method.starts_with("notifications/") {
         return Ok(None);
@@ -81,7 +106,7 @@ async fn handle_rpc(data_dir: &Path, msg: &Value) -> Result<Option<Value>> {
         "initialize" => response(&id, initialize(&msg["params"])),
         "ping" => response(&id, json!({})),
         "tools/list" => response(&id, json!({ "tools": tool_defs() })),
-        "tools/call" => match call(data_dir, &msg["params"]).await {
+        "tools/call" => match call(mcp, &msg["params"]).await {
             Ok((text, is_error)) => response(
                 &id,
                 json!({
@@ -254,16 +279,16 @@ fn tool_defs() -> Value {
     ])
 }
 
-async fn call(data_dir: &Path, params: &Value) -> Result<(String, bool)> {
+async fn call(mcp: &Mcp, params: &Value) -> Result<(String, bool)> {
     let name = params["name"].as_str().unwrap_or("");
     let args = &params["arguments"];
     match name {
-        "exec" => exec(data_dir, args).await,
-        "read" => read(data_dir, args).await,
-        "write" => write(data_dir, args).await,
-        "edit" => edit(data_dir, args).await,
-        "ls" => ls(data_dir, args).await,
-        "job" => job(data_dir, args).await,
+        "exec" => exec(mcp, args).await,
+        "read" => read(mcp, args).await,
+        "write" => write(mcp, args).await,
+        "edit" => edit(mcp, args).await,
+        "ls" => ls(mcp, args).await,
+        "job" => job(mcp, args).await,
         other => Ok((
             format!("unknown tool `{other}`; available: exec, read, write, edit, ls, job"),
             true,
@@ -274,13 +299,6 @@ async fn call(data_dir: &Path, params: &Value) -> Result<(String, bool)> {
 // ------------------------------------------------------------------ helpers
 
 type AnyDialer = Box<dyn AgentDialer>;
-
-async fn remote_for(data_dir: &Path, machine: &str) -> Result<Remote<AnyDialer>> {
-    if machine == "local" || machine.is_empty() {
-        daemon::ensure(data_dir).await?;
-    }
-    Ok(Remote::new(dialer_for(data_dir, machine)))
-}
 
 fn machine_arg(args: &Value) -> String {
     args["machine"]
@@ -436,10 +454,10 @@ fn fmt_job(job: &Job) -> String {
 
 // -------------------------------------------------------------------- tools
 
-async fn exec(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
+async fn exec(mcp: &Mcp, args: &Value) -> Result<(String, bool)> {
     let machine = machine_arg(args);
     let req = exec_request(args)?;
-    let remote = remote_for(data_dir, &machine).await?;
+    let remote = mcp.remote(&machine).await?;
     let job = remote.submit(&machine, req).await?;
     let wait_s = args["wait_s"].as_u64().unwrap_or(DEFAULT_WAIT_S).min(3600);
 
@@ -486,13 +504,13 @@ async fn exec(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
     }
 }
 
-async fn read(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
+async fn read(mcp: &Mcp, args: &Value) -> Result<(String, bool)> {
     let machine = machine_arg(args);
     let path = args["path"].as_str().unwrap_or("");
     if path.is_empty() {
         return Ok(("missing `path`".into(), true));
     }
-    let remote = remote_for(data_dir, &machine).await?;
+    let remote = mcp.remote(&machine).await?;
     let (size, _mode, data) = remote
         .read(
             &machine,
@@ -521,7 +539,7 @@ async fn read(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
     ))
 }
 
-async fn write(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
+async fn write(mcp: &Mcp, args: &Value) -> Result<(String, bool)> {
     let machine = machine_arg(args);
     let path = args["path"].as_str().unwrap_or("");
     if path.is_empty() {
@@ -534,14 +552,14 @@ async fn write(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
         Ok(m) => m,
         Err(e) => return Ok((format!("{e:#}"), true)),
     };
-    let remote = remote_for(data_dir, &machine).await?;
+    let remote = mcp.remote(&machine).await?;
     let bytes = remote
         .write(&machine, path, content.as_bytes(), mode)
         .await?;
     Ok((format!("wrote {bytes} bytes to {path} on {machine}"), false))
 }
 
-async fn edit(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
+async fn edit(mcp: &Mcp, args: &Value) -> Result<(String, bool)> {
     let machine = machine_arg(args);
     let path = args["path"].as_str().unwrap_or("");
     let Some(old) = args["old"].as_str() else {
@@ -551,7 +569,7 @@ async fn edit(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
         return Ok(("missing `new`".into(), true));
     };
     let replace_all = args["replace_all"].as_bool().unwrap_or(false);
-    let remote = remote_for(data_dir, &machine).await?;
+    let remote = mcp.remote(&machine).await?;
     match remote
         .edit(&machine, path, old, new, replace_all)
         .await
@@ -564,10 +582,10 @@ async fn edit(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
     }
 }
 
-async fn ls(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
+async fn ls(mcp: &Mcp, args: &Value) -> Result<(String, bool)> {
     let machine = machine_arg(args);
     let path = args["path"].as_str().unwrap_or(".");
-    let remote = remote_for(data_dir, &machine).await?;
+    let remote = mcp.remote(&machine).await?;
     let entries = remote.list(&machine, path).await?;
     let mut text = String::from("KIND      SIZE  MODE  NAME\n");
     for e in entries {
@@ -588,10 +606,10 @@ async fn ls(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
     Ok((text, false))
 }
 
-async fn job(data_dir: &Path, args: &Value) -> Result<(String, bool)> {
+async fn job(mcp: &Mcp, args: &Value) -> Result<(String, bool)> {
     let machine = machine_arg(args);
     let action = args["action"].as_str().unwrap_or("");
-    let remote = remote_for(data_dir, &machine).await?;
+    let remote = mcp.remote(&machine).await?;
     match action {
         "list" => {
             let jobs = remote.jobs(&machine).await?;

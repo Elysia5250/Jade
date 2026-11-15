@@ -97,20 +97,25 @@
   - 其中 `S: AsyncRead + AsyncWrite + Unpin`，直接传入 `conduit_net::Channel` 即可完成适配。
 - 接入形态建议：实现一个 `GrainFabricService` 包装 `Arc<grain_service::SyncService>`，在 `id()` 返回 `grain_proto::SYNC_SERVICE_ID (1)`，在 `on_session()` 主动开流跑 `handle_stream`，在 `on_stream()` 被动应答 `handle_stream`。
 
-### 4.3 `envoy` 侧（已按分离式任务模型重构，适配器为独立 crate）
+### 4.3 `envoy` 侧（分离式任务模型 + 纯运行时接入 conduit）
+
+> 运行时契约以 `conduit/docs/envoy-integration.md`（同源存档：`envoy/docs/CONDUIT-INTEGRATION.md`）为准。要点：**零编译期耦合**，双方没有任何 Cargo 依赖，envoy 只是 `~/.conduit/control.sock` 的 HTTP/WS 客户端。
+
 - **交互层 / 执行层分离**（协议 v2）：
   - 执行层在守护进程内：`envoy_core::Jobs` 持有 `BTreeMap<JobId, Job>`，按 group 排队并发，作业输出写入 `~/.envoy/jobs/<id>.log`（`[fd][len][payload]` 自描述记录，天然是可断点续读的游标）。
-  - 交互层每条流只承载**一个短请求**：`Probe`、`Submit`、`Jobs`、`JobStatus`、`JobLog{id, offset, follow}`、`JobCancel`、以及 `Read`/`Write`/`List`。
-  - **断线 ≠ 取消**：`JobLog` 只是"订阅"，流关闭仅停止推送；`JobCancel` 才是显式取消（杀进程组）。这直接满足 conduit "长驻处理必须在 on_stream 中 spawn 后立即返回" 的要求。
+  - 交互层每条流只承载**一个短请求**：`Probe`、`Submit`、`Jobs`、`JobStatus`、`JobLog{id, offset, follow}`、`JobCancel`、以及 `Read`/`Write`/`List`/`Edit`。
+  - **断线 ≠ 取消**：`JobLog` 只是"订阅"，流关闭仅停止推送；`JobCancel` 才是显式取消（杀进程组）。因此一条长任务流不会阻塞任何网络循环。
 - 传输与策略边界 trait（位于 `envoy_service::transport`）：
   - `AgentDialer::open_stream(peer, service_id) -> BoxFuture<Result<BoxStream>>`
-  - `UnixDialer`（本机守护进程 socket）、`RouteDialer`（bridge 路由 socket + `[u32 BE len][device name/id]` 前导）
+  - `UnixDialer`（本机守护进程 socket）
   - `AgentHost::config(&self) -> AgentConfig`（`StoreHost` 每次请求重读 `agent.json`）
+- **conduit 运行时适配器**（`envoy_service::conduit`，纯 UDS + HTTP/WS，不依赖 `conduit-*`）：
+  - `WsByteStream`：WebSocket Binary 帧 ↔ `AsyncRead + AsyncWrite`，写侧有 256 KiB 缓冲与背压，Close 即 EOF。
+  - `ConduitClient`：`/v1/status`、`/v1/devices`、`/v1/services/16/open/{target}`、`/v1/services/16/accept`，以及 `device_for_ip`（L3 反查）。
+  - `ConduitDialer` 实现 `AgentDialer`：出站按 conduit 的解析顺序（device_id → dns_name → virtual_ip → 唯一设备名）寻址；`400/404/409/503` 的 JSON `error` 直接透传给 CLI。
+  - `spawn_accept_pool(server, client, n)`：维持 n 条空闲 `/v1/services/16/accept` 连接；收到 `{"event":"accepted","peer_device_id":...}` 文本帧后包装为 `WsByteStream` 并 `tokio::spawn(server.serve_stream(&peer_device_id, stream))`，立即补位；conduit 未启动时指数退避静默重试，不影响本机 socket。
+  - **身份来源**：`peer_device_id` 由 conduit 的 mTLS 严格认证，`agent.json` 的 allowlist 校验的就是它；本机同用户 socket 调用恒放行。
 - 服务端与客户端入口：
   - 服务端：`AgentServer::serve_stream(caller_id, stream)`（调用方应 `tokio::spawn`）
   - 客户端：`Remote<D>` 或流级函数 `open` / `submit` / `logs` / `cancel` / `read` / `write` / `list`
-- **conduit 装配层（唯一同时认识两边的地方）**：`envoy/bridge/`，独立 workspace，`exclude` 于 envoy 主 workspace：
-  - `EnvoyService` 实现 `conduit_fabric::Service`，`id() = AGENT_SERVICE_ID (16)`；`on_stream(peer, channel)` 中 `tokio::spawn(server.serve_stream(&peer.device_id, channel))` 后立即返回。
-  - `caller_id` 来自 mTLS 认证的 `PeerInfo.device_id`，因此 `agent.json` 的 allowlist 校验的是**不可伪造的设备身份**；展示名取自签名的 `DeviceCert.name`。
-  - 本机控制 socket 接受 `[u32 BE len][device name/id]`，用 `EngineHandle::device_set()` 解析目标后 `EngineHandle::open(device_id, 16)` 并双向拼接；解析/拨号失败以 `Reply::Denied` 回写，客户端能拿到真实原因。
-  - 本机（同用户 socket）调用恒放行，`enabled` 与 allowlist 只约束远程调用方。
+- **旧 `envoy/bridge/` 已弃用**：它会链接 conduit crate 并启动第二个 `Engine`，与 `conduit run` 的单实例身份/TUN 冲突；待 control.sock 路径在真实 conduit 上验证后删除。

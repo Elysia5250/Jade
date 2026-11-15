@@ -1,3 +1,13 @@
+> **已弃用（DEPRECATED）**
+>
+> conduit 已转为独立 VPN 守护进程：`conduit run` 独占设备身份、QUIC 端口与 TUN，
+> 并在 `~/.conduit/control.sock` 上暴露 HTTP/WS。再启动一个 `envoy-bridge`
+> 会抢设备身份、重复注册端点。
+>
+> 新契约见 [../docs/CONDUIT-INTEGRATION.md](../docs/CONDUIT-INTEGRATION.md)；
+> envoy 侧已实现纯运行时适配器（`envoy_service::conduit`），待真实 conduit
+> 验证通过后本目录会被删除。
+
 # envoy-bridge
 
 The assembly crate between [`conduit`](../../conduit) (network sessions) and

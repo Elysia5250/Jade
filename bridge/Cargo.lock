@@ -301,6 +301,7 @@ name = "conduit-fabric"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "conduit-core",
  "conduit-net",
  "conduit-proto",
@@ -318,6 +319,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
+ "bytes",
  "chacha20poly1305",
  "conduit-core",
  "conduit-proto",
@@ -569,7 +571,10 @@ dependencies = [
  "envoy-core",
  "envoy-proto",
  "futures",
+ "serde",
+ "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
 ]
 

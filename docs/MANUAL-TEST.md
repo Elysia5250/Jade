@@ -135,56 +135,68 @@ curl --unix-socket /tmp/envoy-test/envoy.sock http://x/ 2>&1 | head -1
 
 ---
 
-## C. 多机（需要 conduit 账号，本仓库无法代替）
+## C. 多机（需要 `conduit run` + 账号）
 
-前提（conduit 侧，两台设备都要）：
+前提：两台机器都完成 conduit 侧初始化，并且 **`conduit run` 在跑**（它独占设备密钥、
+QUIC 端口和 control.sock；不要再起第二个引擎）。
 
 ```bash
+# 两台都做
 conduit init --coord-url https://HOST:7722 --pin PIN
-conduit account create --invite CODE      # 第一台
-conduit join CODE                          # 第二台
-conduit status                             # 确认两台都在 active 设备表里
+conduit account create --invite CODE     # 第一台
+conduit join CODE                        # 第二台
+conduit run                              # 常驻
+
+# 两台都做：agent 守护进程 + 3 个空闲 accept 槽
+envoy serve
+# => envoy daemon listening on ~/.envoy/envoy.sock
+#    conduit: watching ~/.conduit/control.sock (3 accept slot(s))
 ```
 
-然后：
+发现设备（任一台）：
 
 ```bash
-# 两台都启动 bridge
-cd bridge && cargo run --release
-# => envoy-bridge listening on ~/.envoy/bridge.sock
-#    this device: laptop (91ff0e2c...)
-#    peer: workstation (3fa9c1d2...)
+envoy devices
+# => ID / NAME / DNS / VIP / STATUS / ME
+envoy status
+# => conduit: connected (...), this device workstations (3fa9...)
+#    network:  direct · tun tun0 · 1 peer(s) · vip 100.64.0.1
+#    service:  envoy online=true listeners=3
 ```
 
-目标机上放行发起方：
+目标机放行（用 `envoy devices` 里的 `device_id`）：
 
 ```bash
 envoy enable
-envoy allow workstation          # 名字，或设备 id
+envoy allow 91ff0e2c88aabb11
 ```
 
 发起方：
 
 ```bash
-envoy --on workstation run "uname -a"
-envoy --on workstation submit "cargo build --release"
-envoy --on workstation jobs
-envoy --on workstation logs 3 --follow
-envoy --on workstation cancel 3
+envoy --on laptop run "uname -a"
+envoy --on 100.64.0.2 jobs          # 也接受 virtual ip
+envoy --on laptop submit "cargo build --release"
+envoy --on laptop logs 3 --follow
+envoy --on laptop cancel 3
 ```
 
 预期失败路径（都应该是清晰报错，而不是裸 EOF）：
 
 | 场景 | 预期 |
 |---|---|
+| `conduit run` 没起 | `connecting to conduit at .../control.sock (is conduit run up?)` |
 | 目标机 `envoy disable` | `... refused: agent disabled on this device (envoy enable)` |
 | 目标机没 allow 你 | `... refused: caller <device_id> is not allowlisted here` |
-| 名字写错 | `desktop is not an active device of this account; known: ...` |
-| 两台设备同名 | `box matches 2 devices; use a device id instead; known: ...` |
-| 目标机离线 | `opening a stream to ...: no session: peer offline or unreachable` |
-| bridge 没起 | `connecting to the fabric bridge at .../bridge.sock (is envoy-bridge running?)` |
+| 名字写错 | `... refused: <name> is not an active device ... (404)` |
+| 两台设备同名 | `... refused: ... matches 2 devices ... (409)` |
+| 目标机离线 | `... refused: peer offline ... (503)` |
+| 目标机没跑 `envoy serve` | 对端 service 16 未注册，开流失败 |
 
----
+> 注意：conduit 侧的 `/v1/services/{id}/open|accept` 桥接是它的 Step 5，尚未落地。
+> 在此之前多机只能在 mock 下验证——见
+> `crates/envoy-service/tests/conduit_control.rs`（出站整链路、accept 交接与
+> allowlist、404/409 透传、status/devices 解析）。
 
 ## D. 当前不该期待的行为
 
@@ -193,4 +205,6 @@ envoy --on workstation cancel 3
 - **没有暂停/恢复**：只有 `cancel`。
 - **没有路径围栏**：相对路径落目标机 `$HOME`，绝对路径就是整机可读；"允许调用 ≈ 该用户的全部文件权限"。
 - **只有一个默认并发组**：`--group` 可以分组，但每个组的并发上限目前都落到 `max_jobs`。
-- **bridge 的端到端**只有在真实 conduit 账号下才可验证；本仓库的单测只覆盖设备名解析。
+- **L3 直连监听**（`--listen-vpn`）还没实现；目前只有 control.sock 的 WS 桥接。
+- **`envoy/bridge/` 已弃用**：它链接 conduit crate 并起第二个引擎，与 `conduit run` 冲突。
+- **control.sock 的真实端到端**要等 conduit Step 5；当前用 mock 覆盖契约。

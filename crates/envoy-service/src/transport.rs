@@ -158,56 +158,20 @@ impl AgentDialer for UnixDialer {
     }
 }
 
-/// Dials a *router* socket and names the target peer before the agent protocol
-/// starts: `[u32 BE len][peer]`. The router — the conduit bridge — resolves the
-/// name to an authenticated device and splices the stream; `envoy-service`
-/// never learns what transport that is.
+/// Build a dialer for a target name: `local` goes to this machine's daemon
+/// socket, any other name goes to `conduit run`'s control socket.
+///
+/// `conduit_socket` overrides `$CONDUIT_CONTROL_SOCK` / `~/.conduit/control.sock`.
 #[cfg(unix)]
-#[derive(Debug, Clone)]
-pub struct RouteDialer {
-    pub path: PathBuf,
-}
-
-#[cfg(unix)]
-impl RouteDialer {
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
-    }
-}
-
-#[cfg(unix)]
-impl AgentDialer for RouteDialer {
-    fn open_stream<'a>(
-        &'a self,
-        peer: &'a str,
-        _service_id: u16,
-    ) -> BoxFuture<'a, Result<BoxStream>> {
-        Box::pin(async move {
-            use tokio::io::AsyncWriteExt as _;
-            let mut stream = tokio::net::UnixStream::connect(&self.path)
-                .await
-                .with_context(|| {
-                    format!(
-                        "connecting to the fabric bridge at {} (is `envoy-bridge` running?)",
-                        self.path.display()
-                    )
-                })?;
-            let name = peer.as_bytes();
-            stream.write_all(&(name.len() as u32).to_be_bytes()).await?;
-            stream.write_all(name).await?;
-            stream.flush().await?;
-            Ok(BoxStream::new(stream))
-        })
-    }
-}
-
-/// Build a dialer for a target name: `local` goes to the daemon socket, any
-/// other name goes to the fabric bridge router.
-#[cfg(unix)]
-pub fn dialer_for(data_dir: &std::path::Path, target: &str) -> Box<dyn AgentDialer> {
+pub fn dialer_for(
+    data_dir: &std::path::Path,
+    target: &str,
+    conduit_socket: Option<PathBuf>,
+) -> Box<dyn AgentDialer> {
     if target == "local" || target.is_empty() {
         Box::new(UnixDialer::new(data_dir.join("envoy.sock")))
     } else {
-        Box::new(RouteDialer::new(data_dir.join("bridge.sock")))
+        let socket = conduit_socket.unwrap_or_else(crate::conduit::default_control_socket);
+        Box::new(crate::conduit::ConduitDialer::new(socket))
     }
 }

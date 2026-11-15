@@ -1,8 +1,9 @@
 # Envoy (`envoy/`)
 
 Detached remote execution, a policy gate, and a stdio MCP server. Zero network
-dependencies: peers are reached through whatever transport you plug in, and the
-included `conduit` bridge is the only crate that knows about one.
+dependencies: peers are reached through whatever transport you plug in. The
+default transport is `conduit run`'s control socket — over a Unix socket, with
+no compile-time coupling in either direction.
 
 ## The one idea
 
@@ -33,7 +34,7 @@ watch can live for minutes without blocking anything else.
 | Execution | `envoy-core::job` / `exec` / `log` | Job table, queueing, process groups, timeouts, cancellation, log records |
 | Policy | `envoy-core::config` | `agent.json`: enabled + caller allowlist + `max_jobs` |
 | Transport | `envoy-service::transport` | `AgentDialer` / `AgentStream` / `AgentHost`; Unix socket now, conduit later |
-| Assembly | `bridge/` (standalone crate) | Mounts the agent on a conduit session; resolves device names to authenticated ids |
+| Transport adapter | `envoy-service::conduit` | HTTP/WebSocket client of `conduit run`; no conduit crate, no second engine |
 
 ## Crates
 
@@ -42,12 +43,16 @@ watch can live for minutes without blocking anything else.
 - `envoy-core`: job table (`Jobs`), detached execution (`exec`), append-only job
   logs with resume cursors (`log`), filesystem primitives (`fs`), policy
   (`config`), audit trail.
-- `envoy-service`: `AgentServer::serve_stream` (one request per stream) and a
-  client (`Remote<D>`, plus stream-level helpers). Transport traits.
+- `envoy-service`: `AgentServer::serve_stream` (one request per stream), a
+  client (`Remote<D>`, plus stream-level helpers), transport traits, and the
+  `conduit` runtime adapter (`ConduitClient`, `ConduitDialer`, `WsByteStream`,
+  accept pool).
 - `envoy-cli` (`envoy`): daemon (`envoy serve`), job and file commands, the
   interactive console (`envoy ui`), and the stdio MCP server.
-- `bridge/` (`envoy-bridge`): conduit adapter — **not** a workspace member, so
-  `envoy` builds without `conduit` checked out.
+- `bridge/` (`envoy-bridge`): **deprecated**. It links the conduit crates and
+  starts a second engine, which conflicts with `conduit run` owning the device
+  identity and TUN. Kept only until the control-socket path has been validated
+  against a real conduit; see [docs/CONDUIT-INTEGRATION.md](./docs/CONDUIT-INTEGRATION.md).
 
 ## Quick start
 
@@ -125,41 +130,71 @@ gate decides what may run; everything heavier is the caller's job.
 - **Local** (same-user daemon socket, mode `0600`) always works: `enabled` and
   the allowlist govern *remote* callers, and a local shell can run the same
   commands anyway.
-- **Remote** callers are identified by the transport. Over the conduit bridge
-  that is the mTLS-authenticated `device_id`, so the allowlist is no longer a
-  string the caller invents:
+- **Remote** callers are identified by the transport. Over conduit that is the
+  mTLS-authenticated `device_id`, so the allowlist is not a string the caller
+  invents:
 
 ```bash
 envoy enable
-envoy allow 3fa9c1d2a0b7e451      # a device id, or the name the bridge resolves
+envoy allow 3fa9c1d2a0b7e451      # the device id from `envoy devices`
 ```
 
-## Multi-machine: the bridge
+## Multi-machine: conduit
 
-`bridge/` glues `envoy` to `conduit` (QUIC/mTLS sessions, relay fallback, mDNS).
-It is a separate workspace on purpose — neither project depends on the other.
+`conduit run` is the single network daemon on each machine: it owns the device
+key, the QUIC/relay sessions, and optionally the TUN device. It exposes all of
+that on `~/.conduit/control.sock` as HTTP/1.1 + JSON and WebSocket. **envoy is
+just a client of that socket** — no conduit crate, no second engine, no shared
+data directory.
 
 ```bash
-# terminal 1: conduit session engine + the envoy agent service (id 16)
-cd bridge && cargo run --release
+# terminal 1 (each machine): the network daemon
+conduit run
 
-# terminal 2: any device in the account, by name or id
+# terminal 2 (each machine): the agent daemon; parks 3 idle accept slots
+envoy serve
+
+# anywhere in the account
+envoy devices                    # names, dns names, virtual ips, status
 envoy --on laptop run "uname -a"
-envoy --on 3fa9c1d2a0b7e451 submit "sleep 300"
+envoy --on laptop submit "cargo build --release"
+envoy --on 100.64.0.2 logs 12 --follow
 ```
 
-The bridge prints the account's devices at startup. Its local socket accepts
-`[u32 BE length][device name or id]` and then splices the connection to that
-peer's agent service; failures are reported as an agent-protocol `Denied` reply
-so the CLI prints the reason instead of a bare EOF. See
-[bridge/README.md](./bridge/README.md).
+How it is wired:
+
+- **Outbound** — `GET /v1/services/16/open/{target}` upgrades to a WebSocket and
+  becomes a transparent byte stream carrying envoy protocol v2. Conduit resolves
+  `device_id`, `dns_name`, `virtual_ip`, or a unique device name, and answers
+  `400/404/409/503` with `{"error": "..."}` so the CLI prints the real reason.
+- **Inbound** — `envoy serve` keeps a few idle
+  `GET /v1/services/16/accept?name=envoy` connections. When a peer opens a
+  stream, conduit sends one text frame naming the mTLS-authenticated
+  `peer_device_id`, then switches to binary passthrough; envoy wraps it in
+  `WsByteStream` and calls `serve_stream(peer_device_id, stream)`.
+- **Identity** — the allowlist therefore matches a device id conduit has
+  already authenticated, not a caller-supplied string.
+- **Discovery** — `GET /v1/status` and `GET /v1/devices` drive `envoy status`
+  and `envoy devices`; `GET /v1/events` is the documented push channel.
+
+The control socket path comes from `--conduit-socket`, `CONDUIT_CONTROL_SOCK`,
+`$CONDUIT_DATA_DIR/control.sock`, or `~/.conduit/control.sock`.
+
+With TUN enabled you can additionally reach the same port over the virtual
+network. If you do, the source address must be mapped back through
+`/v1/devices` to a `device_id` before the allowlist is consulted — envoy exposes
+that as `ConduitClient::device_for_ip`.
 
 ## Test
 
 ```bash
-cargo test --workspace          # envoy only
-cd bridge && cargo test         # needs ../conduit checked out
+cargo test --workspace
 ```
+
+The control-socket contract is covered by a mock `conduit` server
+(`crates/envoy-service/tests/conduit_control.rs`): outbound upgrade and a full
+job round trip, the accept pool with the handoff metadata and allowlist refusal,
+HTTP error propagation, and `/v1/status` + `/v1/devices` parsing.
 
 Covered end to end: submit returning before the child exits, a dropped watcher
 not killing its job, group queueing, cancel of running and queued jobs, state
@@ -170,4 +205,5 @@ output pane, hints) via ratatui's test backend.
 
 ## Platform
 
-Unix only for now: the daemon and the bridge both speak over Unix sockets.
+Unix only for now: the daemon and conduit's control socket both speak over Unix
+sockets.

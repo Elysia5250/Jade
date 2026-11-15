@@ -34,14 +34,14 @@ const MAX_LINES: usize = 5000;
 
 type AnyDialer = Box<dyn AgentDialer>;
 
-pub async fn run(data_dir: PathBuf, target: String) -> Result<()> {
+pub async fn run(data_dir: PathBuf, target: String, conduit: Option<PathBuf>) -> Result<()> {
     if !stdout().is_terminal() {
         bail!("`envoy ui` needs a terminal (try `envoy jobs` for scripts)");
     }
     if target == "local" || target.is_empty() {
         daemon::ensure(&data_dir).await?;
     }
-    let remote: Remote<AnyDialer> = Remote::new(dialer_for(&data_dir, &target));
+    let remote: Remote<AnyDialer> = Remote::new(dialer_for(&data_dir, &target, conduit));
 
     let mut app = App::new(target);
     let mut tui = Tui::enter()?;
@@ -609,7 +609,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
     draw_header(frame, app, &theme, chunks[0]);
     draw_body(frame, app, &theme, chunks[1]);
     draw_editor(frame, app, &theme, chunks[2]);
-    draw_footer(frame, app, &theme, chunks[3]);
+    draw_footer(frame, &theme, chunks[3]);
 
     if app.palette.is_some() {
         draw_palette(frame, app, &theme, area);
@@ -817,9 +817,7 @@ fn draw_editor(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         }))
         .title(Span::styled(
             match &app.message {
-                Some((message, error)) => format!(
-                    " command · {message} ",
-                ),
+                Some((message, _)) => format!(" command · {message} "),
                 None => " command ".to_string(),
             },
             Style::default().fg(match &app.message {
@@ -844,7 +842,7 @@ fn draw_editor(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     frame.render_widget(Paragraph::new(line).block(block), area);
 }
 
-fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+fn draw_footer(frame: &mut Frame, theme: &Theme, area: Rect) {
     let hints = {
         Line::from(vec![
             Span::styled(" ctrl+p ", Style::default().fg(theme.accent)),

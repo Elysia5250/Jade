@@ -3,6 +3,9 @@
 //! Every command talks to the daemon over its Unix socket, so a command
 //! survives the terminal that started it: `envoy submit` returns a job id and
 //! `envoy logs -f` can reattach from anywhere.
+//!
+//! Remote targets (`--on laptop`) go through `conduit run`'s control socket.
+//! envoy never links conduit: it is an HTTP/WebSocket client of that socket.
 
 mod daemon;
 mod mcp;
@@ -14,7 +17,10 @@ use envoy_core::{parse_mode, AgentConfigStore};
 use envoy_proto::{
     EntryKind, Job, JobState, SubmitRequest, TaskSpec, AGENT_VERSION, DEFAULT_GROUP,
 };
-use envoy_service::{dialer_for, AgentDialer, AgentServer, Remote};
+use envoy_service::{
+    default_control_socket, dialer_for, spawn_accept_pool, AgentDialer, AgentServer, ConduitClient,
+    Remote,
+};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -32,9 +38,14 @@ struct Cli {
     #[arg(long, global = true, env = "ENVOY_DATA_DIR")]
     data_dir: Option<PathBuf>,
 
-    /// Target machine: `local` or a conduit device name/id.
+    /// Target machine: `local` or a conduit device name/id/ip.
     #[arg(long, global = true, default_value = "local")]
     on: String,
+
+    /// conduit control socket (default: $CONDUIT_CONTROL_SOCK or
+    /// ~/.conduit/control.sock).
+    #[arg(long, global = true, env = "CONDUIT_CONTROL_SOCK")]
+    conduit_socket: Option<PathBuf>,
 
     #[command(subcommand)]
     cmd: Commands,
@@ -42,16 +53,18 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Show this device's policy, daemon state, and job counts.
+    /// Show policy, daemon state, conduit status, and job counts.
     Status,
     /// Allow listed callers to reach the agent over the fabric.
     Enable,
     /// Refuse remote calls (local calls keep working).
     Disable,
-    /// Add a caller (device id or name) to this device's allowlist.
+    /// Add a caller (device id) to this device's allowlist.
     Allow { caller_id: String },
     /// Remove a caller from this device's allowlist.
     Deny { caller_id: String },
+    /// List the devices in this conduit account.
+    Devices,
     /// Manage the local daemon.
     Daemon {
         #[command(subcommand)]
@@ -61,6 +74,12 @@ enum Commands {
     Serve {
         #[arg(long)]
         socket: Option<PathBuf>,
+        /// Do not bridge inbound streams from conduit.
+        #[arg(long)]
+        no_conduit: bool,
+        /// Idle accept connections parked on conduit.
+        #[arg(long, default_value_t = envoy_service::DEFAULT_POOL)]
+        accept_pool: usize,
     },
     /// Queue a job and print its id (never waits for it).
     Submit(TaskArgs),
@@ -179,6 +198,50 @@ impl TaskArgs {
     }
 }
 
+/// Everything a command needs to reach a target.
+#[derive(Clone)]
+struct Ctx {
+    data_dir: PathBuf,
+    on: String,
+    conduit: Option<PathBuf>,
+}
+
+impl Ctx {
+    fn conduit_socket(&self) -> PathBuf {
+        self.conduit
+            .clone()
+            .unwrap_or_else(default_control_socket)
+    }
+
+    async fn remote(&self) -> Result<Remote<AnyDialer>> {
+        if self.on == "local" || self.on.is_empty() {
+            daemon::ensure(&self.data_dir).await?;
+        }
+        Ok(Remote::new(dialer_for(
+            &self.data_dir,
+            &self.on,
+            Some(self.conduit_socket()),
+        )))
+    }
+
+    fn remote_for(&self, target: &str) -> Remote<AnyDialer> {
+        Remote::new(dialer_for(
+            &self.data_dir,
+            target,
+            Some(self.conduit_socket()),
+        ))
+    }
+
+    /// Like [`Ctx::remote_for`], but starts the local daemon when the target is
+    /// this machine (used by commands that may touch both ends).
+    async fn remote_to(&self, target: &str) -> Result<Remote<AnyDialer>> {
+        if target == "local" || target.is_empty() {
+            daemon::ensure(&self.data_dir).await?;
+        }
+        Ok(self.remote_for(target))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -196,55 +259,63 @@ async fn main() -> Result<()> {
     let data_dir = cli
         .data_dir
         .unwrap_or_else(AgentConfigStore::default_data_dir);
-    let on = cli.on.clone();
+    let ctx = Ctx {
+        data_dir,
+        on: cli.on.clone(),
+        conduit: cli.conduit_socket.clone(),
+    };
 
     match cli.cmd {
-        Commands::Status => cmd_status(&data_dir).await,
-        Commands::Enable => cmd_set_enabled(&data_dir, true),
-        Commands::Disable => cmd_set_enabled(&data_dir, false),
-        Commands::Allow { caller_id } => cmd_allow(&data_dir, caller_id),
-        Commands::Deny { caller_id } => cmd_deny(&data_dir, &caller_id),
-        Commands::Daemon { cmd } => cmd_daemon(&data_dir, cmd).await,
-        Commands::Serve { socket } => cmd_serve(data_dir, socket).await,
-        Commands::Submit(args) => cmd_submit(&data_dir, &on, args.into_request()?).await,
-        Commands::Run(args) => cmd_run(&data_dir, &on, args.into_request()?).await,
-        Commands::Jobs => cmd_jobs(&data_dir, &on).await,
-        Commands::Logs { id, follow, offset } => {
-            cmd_logs(&data_dir, &on, id, offset, follow).await
+        Commands::Status => cmd_status(&ctx).await,
+        Commands::Enable => cmd_set_enabled(&ctx.data_dir, true),
+        Commands::Disable => cmd_set_enabled(&ctx.data_dir, false),
+        Commands::Allow { caller_id } => cmd_allow(&ctx.data_dir, caller_id),
+        Commands::Deny { caller_id } => cmd_deny(&ctx.data_dir, &caller_id),
+        Commands::Devices => cmd_devices(&ctx).await,
+        Commands::Daemon { cmd } => cmd_daemon(&ctx.data_dir, cmd).await,
+        Commands::Serve {
+            socket,
+            no_conduit,
+            accept_pool,
+        } => {
+            cmd_serve(
+                ctx.data_dir.clone(),
+                socket,
+                no_conduit,
+                accept_pool,
+                ctx.conduit_socket(),
+            )
+            .await
         }
-        Commands::Cancel { id } => cmd_cancel(&data_dir, &on, id).await,
+        Commands::Submit(args) => cmd_submit(&ctx, args.into_request()?).await,
+        Commands::Run(args) => cmd_run(&ctx, args.into_request()?).await,
+        Commands::Jobs => cmd_jobs(&ctx).await,
+        Commands::Logs { id, follow, offset } => cmd_logs(&ctx, id, offset, follow).await,
+        Commands::Cancel { id } => cmd_cancel(&ctx, id).await,
         Commands::Read {
             offset,
             limit,
             path,
-        } => cmd_read(&data_dir, &on, &path, offset, limit).await,
+        } => cmd_read(&ctx, &path, offset, limit).await,
         Commands::Write { mode, path, content } => {
-            cmd_write(&data_dir, &on, &path, content, &mode).await
+            cmd_write(&ctx, &path, content, &mode).await
         }
-        Commands::Ls { path } => cmd_ls(&data_dir, &on, &path).await,
+        Commands::Ls { path } => cmd_ls(&ctx, &path).await,
         Commands::Copy {
             from,
             from_path,
             to,
             to_path,
             mode,
-        } => cmd_copy(&data_dir, &from, &from_path, &to, &to_path, &mode).await,
-        Commands::Ui => tui::run(data_dir, on).await,
-        Commands::Mcp { cmd } => mcp::cmd_mcp(data_dir, cmd).await,
+        } => cmd_copy(&ctx, &from, &from_path, &to, &to_path, &mode).await,
+        Commands::Ui => tui::run(ctx.data_dir.clone(), ctx.on.clone(), ctx.conduit.clone()).await,
+        Commands::Mcp { cmd } => mcp::cmd_mcp(ctx.data_dir.clone(), cmd, ctx.conduit.clone()).await,
     }
 }
 
 // ---------------------------------------------------------------- plumbing
 
 type AnyDialer = Box<dyn AgentDialer>;
-
-/// Build a client for `on`, starting the local daemon on demand.
-async fn remote_for(data_dir: &Path, on: &str) -> Result<Remote<AnyDialer>> {
-    if on == "local" || on.is_empty() {
-        daemon::ensure(data_dir).await?;
-    }
-    Ok(Remote::new(dialer_for(data_dir, on)))
-}
 
 fn parse_env(pairs: &[String]) -> Result<Vec<(String, String)>> {
     let mut out = Vec::new();
@@ -317,45 +388,79 @@ fn print_jobs(jobs: &[Job]) {
 
 // ------------------------------------------------------------------- policy
 
-async fn cmd_status(data_dir: &Path) -> Result<()> {
-    {
-        let store = AgentConfigStore::open(data_dir.to_path_buf())?;
-        print_store(&store);
-        println!();
-        if daemon::is_running(&data_dir).await {
-            println!("daemon:   running ({})", daemon::socket_path(&data_dir).display());
-            let remote = Remote::new(dialer_for(&data_dir, "local"));
-            match remote.jobs("local").await {
-                Ok(jobs) => {
-                    let running = jobs
-                        .iter()
-                        .filter(|j| matches!(j.state, JobState::Running { .. }))
-                        .count();
-                    let queued = jobs
-                        .iter()
-                        .filter(|j| matches!(j.state, JobState::Queued { .. }))
-                        .count();
-                    println!(
-                        "jobs:     {} known, {running} running, {queued} queued",
-                        jobs.len()
-                    );
-                }
-                Err(e) => println!("jobs:     unavailable ({e:#})"),
+async fn cmd_status(ctx: &Ctx) -> Result<()> {
+    let store = AgentConfigStore::open(ctx.data_dir.clone())?;
+    print_store(&store);
+    println!();
+    if daemon::is_running(&ctx.data_dir).await {
+        println!(
+            "daemon:   running ({})",
+            daemon::socket_path(&ctx.data_dir).display()
+        );
+        let remote = ctx.remote_for("local");
+        match remote.jobs("local").await {
+            Ok(jobs) => {
+                let running = jobs
+                    .iter()
+                    .filter(|j| matches!(j.state, JobState::Running { .. }))
+                    .count();
+                let queued = jobs
+                    .iter()
+                    .filter(|j| matches!(j.state, JobState::Queued { .. }))
+                    .count();
+                println!(
+                    "jobs:     {} known, {running} running, {queued} queued",
+                    jobs.len()
+                );
             }
-        } else {
-            println!("daemon:   stopped ({})", daemon::socket_path(&data_dir).display());
+            Err(e) => println!("jobs:     unavailable ({e:#})"),
         }
-        if daemon::bridge_socket_path(&data_dir).exists() {
-            println!(
-                "bridge:   socket present ({})",
-                daemon::bridge_socket_path(&data_dir).display()
-            );
-        } else {
-            println!("bridge:   not running (start `envoy-bridge`)");
-        }
-        println!("protocol: v{AGENT_VERSION}");
-        Ok(())
+    } else {
+        println!(
+            "daemon:   stopped ({})",
+            daemon::socket_path(&ctx.data_dir).display()
+        );
     }
+
+    let conduit = ConduitClient::new(ctx.conduit_socket());
+    match conduit.status().await {
+        Ok(status) => {
+            println!(
+                "conduit:  connected ({}), this device {} ({})",
+                conduit.socket().display(),
+                status.device_name,
+                status.device_id
+            );
+            println!(
+                "network:  {} · tun {} · {} peer(s) · vip {}",
+                status.connection.as_deref().unwrap_or("unknown"),
+                if status.tun.enabled {
+                    status.tun.interface.as_deref().unwrap_or("up")
+                } else {
+                    "off"
+                },
+                status.peers.len(),
+                status.virtual_ip.as_deref().unwrap_or("-")
+            );
+            match status
+                .services
+                .iter()
+                .find(|s| s.service_id == envoy_proto::AGENT_SERVICE_ID)
+            {
+                Some(service) => println!(
+                    "service:  {} online={} listeners={}",
+                    service.name, service.online, service.listeners
+                ),
+                None => println!("service:  envoy not registered (start `envoy serve`)"),
+            }
+        }
+        Err(_) => println!(
+            "conduit:  not running ({})",
+            conduit.socket().display()
+        ),
+    }
+    println!("protocol: v{AGENT_VERSION}");
+    Ok(())
 }
 
 fn cmd_set_enabled(data_dir: &Path, enabled: bool) -> Result<()> {
@@ -376,6 +481,31 @@ fn cmd_deny(data_dir: &Path, caller_id: &str) -> Result<()> {
     let mut store = AgentConfigStore::open(data_dir.to_path_buf())?;
     store.deny(caller_id)?;
     print_store(&store);
+    Ok(())
+}
+
+async fn cmd_devices(ctx: &Ctx) -> Result<()> {
+    let client = ConduitClient::new(ctx.conduit_socket());
+    let reply = client.devices().await?;
+    if reply.devices.is_empty() {
+        println!("no devices in this account");
+        return Ok(());
+    }
+    println!(
+        "{:<20} {:<16} {:<16} {:<14} {:<8} {}",
+        "ID", "NAME", "DNS", "VIP", "STATUS", "ME"
+    );
+    for device in reply.devices {
+        println!(
+            "{:<20} {:<16} {:<16} {:<14} {:<8} {}",
+            device.device_id,
+            device.name,
+            device.dns_name.unwrap_or_else(|| "-".into()),
+            device.virtual_ip.unwrap_or_else(|| "-".into()),
+            device.status,
+            if device.me { "yes" } else { "" }
+        );
+    }
     Ok(())
 }
 
@@ -421,7 +551,13 @@ async fn cmd_daemon(data_dir: &Path, cmd: DaemonCmd) -> Result<()> {
     }
 }
 
-async fn cmd_serve(data_dir: PathBuf, socket: Option<PathBuf>) -> Result<()> {
+async fn cmd_serve(
+    data_dir: PathBuf,
+    socket: Option<PathBuf>,
+    no_conduit: bool,
+    accept_pool: usize,
+    conduit_socket: PathBuf,
+) -> Result<()> {
     let path = socket.unwrap_or_else(|| daemon::socket_path(&data_dir));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -441,6 +577,22 @@ async fn cmd_serve(data_dir: PathBuf, socket: Option<PathBuf>) -> Result<()> {
     tracing::info!(socket = %path.display(), "envoy daemon listening");
     println!("envoy daemon listening on {}", path.display());
 
+    let mut pool = None;
+    if no_conduit {
+        println!("conduit: disabled (--no-conduit)");
+    } else {
+        println!(
+            "conduit: watching {} ({} accept slot(s))",
+            conduit_socket.display(),
+            accept_pool
+        );
+        pool = Some(spawn_accept_pool(
+            server.clone(),
+            ConduitClient::new(conduit_socket),
+            accept_pool,
+        ));
+    }
+
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut int = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let pid_file = daemon::pid_file(&data_dir);
@@ -451,28 +603,31 @@ async fn cmd_serve(data_dir: PathBuf, socket: Option<PathBuf>) -> Result<()> {
         }
     })
     .await;
+    if let Some(pool) = pool {
+        pool.abort();
+    }
     Ok(())
 }
 
 // -------------------------------------------------------------------- jobs
 
-async fn cmd_submit(data_dir: &Path, on: &str, req: SubmitRequest) -> Result<()> {
-    let remote = remote_for(data_dir, on).await?;
-    let job = remote.submit(on, req).await?;
+async fn cmd_submit(ctx: &Ctx, req: SubmitRequest) -> Result<()> {
+    let remote = ctx.remote().await?;
+    let job = remote.submit(&ctx.on, req).await?;
     println!("{}", job.id);
-    eprintln!("queued #{} on {on}: {}", job.id, job.command());
+    eprintln!("queued #{} on {}: {}", job.id, ctx.on, job.command());
     Ok(())
 }
 
-async fn cmd_run(data_dir: &Path, on: &str, req: SubmitRequest) -> Result<()> {
-    let remote = remote_for(data_dir, on).await?;
-    let job = remote.submit(on, req).await?;
-    eprintln!("#{} {} ({on})", job.id, job.command());
+async fn cmd_run(ctx: &Ctx, req: SubmitRequest) -> Result<()> {
+    let remote = ctx.remote().await?;
+    let job = remote.submit(&ctx.on, req).await?;
+    eprintln!("#{} {} ({})", job.id, job.command(), ctx.on);
 
     let mut out = std::io::stdout();
     let mut err = std::io::stderr();
     let (_cursor, finished) = remote
-        .logs(on, job.id, 0, true, |records| {
+        .logs(&ctx.on, job.id, 0, true, |records| {
             for r in records {
                 if r.fd == 1 {
                     let _ = err.write_all(&r.data);
@@ -491,18 +646,18 @@ async fn cmd_run(data_dir: &Path, on: &str, req: SubmitRequest) -> Result<()> {
     }
 }
 
-async fn cmd_jobs(data_dir: &Path, on: &str) -> Result<()> {
-    let remote = remote_for(data_dir, on).await?;
-    print_jobs(&remote.jobs(on).await?);
+async fn cmd_jobs(ctx: &Ctx) -> Result<()> {
+    let remote = ctx.remote().await?;
+    print_jobs(&remote.jobs(&ctx.on).await?);
     Ok(())
 }
 
-async fn cmd_logs(data_dir: &Path, on: &str, id: u64, offset: u64, follow: bool) -> Result<()> {
-    let remote = remote_for(data_dir, on).await?;
+async fn cmd_logs(ctx: &Ctx, id: u64, offset: u64, follow: bool) -> Result<()> {
+    let remote = ctx.remote().await?;
     let mut out = std::io::stdout();
     let mut err = std::io::stderr();
     let (cursor, finished) = remote
-        .logs(on, id, offset, follow, |records| {
+        .logs(&ctx.on, id, offset, follow, |records| {
             for r in records {
                 if r.fd == 1 {
                     let _ = err.write_all(&r.data);
@@ -522,39 +677,33 @@ async fn cmd_logs(data_dir: &Path, on: &str, id: u64, offset: u64, follow: bool)
     Ok(())
 }
 
-async fn cmd_cancel(data_dir: &Path, on: &str, id: u64) -> Result<()> {
-    let remote = remote_for(data_dir, on).await?;
-    remote.cancel(on, id).await?;
+async fn cmd_cancel(ctx: &Ctx, id: u64) -> Result<()> {
+    let remote = ctx.remote().await?;
+    remote.cancel(&ctx.on, id).await?;
     println!("cancel requested for #{id}");
     Ok(())
 }
 
 // -------------------------------------------------------------------- files
 
-async fn cmd_read(
-    data_dir: &Path,
-    on: &str,
-    path: &str,
-    offset: u64,
-    limit: u64,
-) -> Result<()> {
-    let remote = remote_for(data_dir, on).await?;
-    let (size, mode, data) = remote.read(on, path, offset, limit).await?;
+async fn cmd_read(ctx: &Ctx, path: &str, offset: u64, limit: u64) -> Result<()> {
+    let remote = ctx.remote().await?;
+    let (size, mode, data) = remote.read(&ctx.on, path, offset, limit).await?;
     let mut out = std::io::stdout();
     out.write_all(&data)?;
     out.flush()?;
     eprintln!(
-        "{} bytes of {} (mode {:o}) from {on}",
+        "{} bytes of {} (mode {:o}) from {}",
         data.len(),
         size,
-        mode & 0o777
+        mode & 0o777,
+        ctx.on
     );
     Ok(())
 }
 
 async fn cmd_write(
-    data_dir: &Path,
-    on: &str,
+    ctx: &Ctx,
     path: &str,
     content: Option<String>,
     mode: &Option<String>,
@@ -568,15 +717,15 @@ async fn cmd_write(
         }
         Some(text) => text.as_bytes().to_vec(),
     };
-    let remote = remote_for(data_dir, on).await?;
-    let bytes = remote.write(on, path, &data, mode).await?;
-    println!("wrote {bytes} bytes to {path} on {on}");
+    let remote = ctx.remote().await?;
+    let bytes = remote.write(&ctx.on, path, &data, mode).await?;
+    println!("wrote {bytes} bytes to {path} on {}", ctx.on);
     Ok(())
 }
 
-async fn cmd_ls(data_dir: &Path, on: &str, path: &str) -> Result<()> {
-    let remote = remote_for(data_dir, on).await?;
-    let entries = remote.list(on, path).await?;
+async fn cmd_ls(ctx: &Ctx, path: &str) -> Result<()> {
+    let remote = ctx.remote().await?;
+    let entries = remote.list(&ctx.on, path).await?;
     println!("{:<8} {:>10} {:<5} NAME", "KIND", "SIZE", "MODE");
     for e in entries {
         let kind = match e.kind {
@@ -594,7 +743,7 @@ async fn cmd_ls(data_dir: &Path, on: &str, path: &str) -> Result<()> {
 const COPY_PAGE: u64 = envoy_proto::READ_LIMIT;
 
 async fn cmd_copy(
-    data_dir: &Path,
+    ctx: &Ctx,
     from: &str,
     from_path: &str,
     to: &str,
@@ -602,8 +751,8 @@ async fn cmd_copy(
     mode: &Option<String>,
 ) -> Result<()> {
     let mode = mode_option(mode)?;
-    let src = remote_for(data_dir, from).await?;
-    let dst = remote_for(data_dir, to).await?;
+    let src = ctx.remote_to(from).await?;
+    let dst = ctx.remote_to(to).await?;
 
     let (_, src_mode, first) = src.read(from, from_path, 0, COPY_PAGE).await?;
     let mut writer = dst
