@@ -126,6 +126,19 @@ impl Jobs {
         self.inner.wake.clone()
     }
 
+    /// Apply a live policy change to the default group's concurrency limit.
+    /// Lowering it never kills running jobs; it only stops starting new ones.
+    pub fn set_max_jobs(&self, max_jobs: usize) {
+        let max_jobs = max_jobs.max(1);
+        let changed = {
+            let mut t = self.inner.table.lock().unwrap();
+            t.groups.insert(DEFAULT_GROUP.to_string(), max_jobs) != Some(max_jobs)
+        };
+        if changed {
+            self.schedule();
+        }
+    }
+
     /// Enqueue a job and start it as soon as its group has a slot.
     pub fn submit(&self, req: SubmitRequest, owner: &str) -> Result<Job> {
         let SubmitRequest {
@@ -486,6 +499,29 @@ mod tests {
 
         let done_b = wait_done(&jobs, b.id).await;
         assert_eq!(done_b.state.exit_code(), Some(0));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn raising_the_limit_starts_queued_jobs() {
+        let dir = tmpdir("limit");
+        let jobs = Jobs::open(dir.clone(), 1);
+        let a = jobs.submit(shell("sleep 0.2"), "local").unwrap();
+        let b = jobs.submit(shell("echo second"), "local").unwrap();
+        assert!(matches!(jobs.get(b.id).unwrap().state, JobState::Queued { .. }));
+
+        jobs.set_max_jobs(2);
+        for _ in 0..200 {
+            if matches!(
+                jobs.get(b.id).unwrap().state,
+                JobState::Running { .. } | JobState::Done { .. }
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(wait_done(&jobs, b.id).await.state.exit_code(), Some(0));
+        assert_eq!(wait_done(&jobs, a.id).await.state.exit_code(), Some(0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

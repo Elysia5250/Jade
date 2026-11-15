@@ -139,6 +139,10 @@ where
         return Ok(());
     }
 
+    // `agent.json` is re-read per request, so a changed `max_jobs` applies
+    // without restarting the daemon.
+    inner.jobs.set_max_jobs(cfg.max_jobs);
+
     let hello = Reply::Hello(Hello {
         version: AGENT_VERSION,
         os: std::env::consts::OS.to_string(),

@@ -14,7 +14,11 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 /// How long a peer has to answer the handshake.
-const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+///
+/// Generous on purpose: a routed stream (the conduit bridge) may have to dial
+/// the peer before any byte reaches its agent, and a cold relay join is allowed
+/// to take up to 12s upstream.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// An opened request stream plus the peer's handshake.
 pub struct Conn<S> {
