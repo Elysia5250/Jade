@@ -158,6 +158,11 @@ struct Theme {
     selection: Color,
     surface: Color,
     user_bg: Color,
+    /// Full-screen background. Explicit so a transparent terminal or a
+    /// wallpaper cannot leak through as random colour bands.
+    bg: Color,
+    /// Sidebar/editor background, one step off `bg`.
+    panel: Color,
 }
 
 const THEMES: [(&str, Theme); 3] = [
@@ -167,7 +172,7 @@ const THEMES: [(&str, Theme); 3] = [
             accent: Color::Rgb(0x9d, 0x7c, 0xd8),
             secondary: Color::Rgb(0x7a, 0xa2, 0xf7),
             dim: Color::Rgb(0x80, 0x84, 0x92),
-            text: Color::Reset,
+            text: Color::Rgb(0xd6, 0xd8, 0xe0),
             ok: Color::Rgb(0x7f, 0xd8, 0x8f),
             warn: Color::Rgb(0xf2, 0xc9, 0x4c),
             bad: Color::Rgb(0xf2, 0x6b, 0x6b),
@@ -175,6 +180,8 @@ const THEMES: [(&str, Theme); 3] = [
             selection: Color::Rgb(0x2d, 0x2a, 0x3e),
             surface: Color::Rgb(0x1f, 0x20, 0x29),
             user_bg: Color::Rgb(0x25, 0x24, 0x32),
+            bg: Color::Rgb(0x16, 0x17, 0x1d),
+            panel: Color::Rgb(0x1b, 0x1c, 0x24),
         },
     ),
     (
@@ -183,7 +190,7 @@ const THEMES: [(&str, Theme); 3] = [
             accent: Color::Rgb(0x7a, 0xa2, 0xf7),
             secondary: Color::Rgb(0xbb, 0x9a, 0xf7),
             dim: Color::Rgb(0x73, 0x7a, 0xa2),
-            text: Color::Reset,
+            text: Color::Rgb(0xc0, 0xca, 0xf5),
             ok: Color::Rgb(0x9e, 0xce, 0x6a),
             warn: Color::Rgb(0xe0, 0xaf, 0x68),
             bad: Color::Rgb(0xf7, 0x76, 0x8e),
@@ -191,6 +198,8 @@ const THEMES: [(&str, Theme); 3] = [
             selection: Color::Rgb(0x28, 0x34, 0x57),
             surface: Color::Rgb(0x1e, 0x20, 0x30),
             user_bg: Color::Rgb(0x24, 0x28, 0x3b),
+            bg: Color::Rgb(0x1a, 0x1b, 0x26),
+            panel: Color::Rgb(0x1f, 0x23, 0x35),
         },
     ),
     (
@@ -199,7 +208,7 @@ const THEMES: [(&str, Theme); 3] = [
             accent: Color::Rgb(0x3b, 0x5f, 0xc4),
             secondary: Color::Rgb(0x6b, 0x46, 0xc1),
             dim: Color::Rgb(0x66, 0x6a, 0x75),
-            text: Color::Reset,
+            text: Color::Rgb(0x24, 0x26, 0x2d),
             ok: Color::Rgb(0x2f, 0x7d, 0x32),
             warn: Color::Rgb(0x9a, 0x6b, 0x00),
             bad: Color::Rgb(0xb3, 0x26, 0x1e),
@@ -207,6 +216,8 @@ const THEMES: [(&str, Theme); 3] = [
             selection: Color::Rgb(0xe4, 0xe7, 0xf2),
             surface: Color::Rgb(0xf3, 0xf4, 0xf7),
             user_bg: Color::Rgb(0xea, 0xec, 0xf4),
+            bg: Color::Rgb(0xff, 0xff, 0xff),
+            panel: Color::Rgb(0xf5, 0xf6, 0xf9),
         },
     ),
 ];
@@ -3090,6 +3101,11 @@ pub fn complete_directories(cwd: &Path, raw: &str) -> Vec<(String, String)> {
 fn draw(frame: &mut Frame, app: &mut App) {
     let theme = app.theme();
     let area = frame.area();
+    // Opaque base: every cell gets a background before any pane draws.
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.bg)),
+        area,
+    );
 
     let editor_inner_width = area.width.saturating_sub(6).max(10) as usize;
     let (visual_lines, cursor_row, cursor_col) =
@@ -3191,7 +3207,10 @@ fn draw_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
         ));
     }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg)),
+        area,
+    );
 }
 
 fn draw_body(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
@@ -3220,6 +3239,7 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(theme.bg))
         .title(Span::styled(
             if app.session.items.is_empty() {
                 " home ".to_string()
@@ -3518,6 +3538,7 @@ fn draw_sidebar(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(theme.panel))
         .title(Span::styled(" session & jobs ", Style::default().fg(theme.dim)));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -3659,6 +3680,7 @@ fn draw_editor(
         } else {
             theme.border
         }))
+        .style(Style::default().bg(theme.panel))
         .title(title);
 
     let max_rows = area.height.saturating_sub(2) as usize;
@@ -4417,7 +4439,7 @@ fn char_width(c: char) -> usize {
 }
 
 fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
-    let max_width = max_width.max(8);
+    let max = max_width.max(8);
     if text.is_empty() {
         return vec![String::new()];
     }
@@ -4426,14 +4448,30 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     let mut cur_w = 0usize;
     for ch in text.chars() {
         let w = char_width(ch);
-        if cur_w + w > max_width && !cur.is_empty() {
-            out.push(std::mem::take(&mut cur));
-            cur_w = 0;
+        if cur_w + w > max && !cur.is_empty() {
+            // Prefer a word boundary so `exit=0` never becomes `exit=\n0`.
+            if let Some(pos) = cur.rfind(' ') {
+                let tail: String = cur[pos + 1..].to_string();
+                let head = cur[..pos].trim_end().to_string();
+                if !head.is_empty() {
+                    out.push(head);
+                }
+                cur = tail.trim_start().to_string();
+                cur_w = cur.chars().map(char_width).sum();
+            } else {
+                out.push(std::mem::take(&mut cur));
+                cur_w = 0;
+            }
+        }
+        if ch == ' ' && cur.is_empty() {
+            continue;
         }
         cur.push(ch);
         cur_w += w;
     }
-    out.push(cur);
+    if !cur.is_empty() || out.is_empty() {
+        out.push(cur);
+    }
     out
 }
 
@@ -4481,9 +4519,13 @@ fn render_markdown_lines<'a>(
     theme: &Theme,
     out: &mut Vec<Line<'a>>,
 ) {
+    let lines: Vec<&str> = text.lines().collect();
     let mut in_code = false;
-    for raw in text.lines() {
+    let mut i = 0usize;
+    while i < lines.len() {
+        let raw = lines[i];
         let trimmed = raw.trim_start();
+
         if let Some(fence) = trimmed.strip_prefix("```") {
             in_code = !in_code;
             if in_code {
@@ -4497,20 +4539,22 @@ fn render_markdown_lines<'a>(
                     Style::default().fg(theme.border),
                 ));
             } else {
-                out.push(Line::styled(
-                    " └──",
-                    Style::default().fg(theme.border),
-                ));
+                out.push(Line::styled(" └──", Style::default().fg(theme.border)));
             }
+            i += 1;
             continue;
         }
         if in_code {
-            for w in wrap_text(raw, width.saturating_sub(4)) {
-                out.push(Line::from(vec![
-                    Span::styled(" │ ", Style::default().fg(theme.border)),
-                    Span::styled(w, Style::default().fg(theme.secondary)),
-                ]));
-            }
+            let shown = truncate_width(raw, width.saturating_sub(4));
+            out.push(Line::from(vec![
+                Span::styled(" │ ", Style::default().fg(theme.border)),
+                Span::styled(shown, Style::default().fg(theme.secondary)),
+            ]));
+            i += 1;
+            continue;
+        }
+        if is_table_start(&lines, i) {
+            i += render_table(&lines[i..], width, theme, out);
             continue;
         }
         if trimmed.starts_with("### ") || trimmed.starts_with("## ") || trimmed.starts_with("# ") {
@@ -4523,36 +4567,235 @@ fn render_markdown_lines<'a>(
                         .add_modifier(Modifier::BOLD),
                 ));
             }
+            i += 1;
+            continue;
+        }
+        if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+            let item = trimmed.trim_start_matches(['-', '*']).trim_start();
+            let wrapped = wrap_text(item, width.saturating_sub(4));
+            for (n, w) in wrapped.iter().enumerate() {
+                let prefix = if n == 0 { " • " } else { "   " };
+                let mut spans = vec![Span::styled(prefix, Style::default().fg(theme.accent))];
+                spans.extend(inline_spans(w, theme));
+                out.push(Line::from(spans));
+            }
+            i += 1;
             continue;
         }
         for w in wrap_text(raw, width.saturating_sub(2)) {
             out.push(Line::from(inline_spans(&format!(" {w}"), theme)));
         }
+        i += 1;
     }
+}
+
+fn is_table_start(lines: &[&str], i: usize) -> bool {
+    if i + 1 >= lines.len() {
+        return false;
+    }
+    let head = lines[i].trim();
+    let delim = lines[i + 1].trim();
+    if !head.starts_with('|') || !delim.starts_with('|') {
+        return false;
+    }
+    let cells = split_table_row(delim);
+    !cells.is_empty()
+        && cells.iter().all(|c| {
+            let core = c.trim_matches(':');
+            !core.is_empty() && core.chars().all(|ch| ch == '-')
+        })
+}
+
+fn split_table_row(line: &str) -> Vec<String> {
+    line.trim()
+        .trim_matches('|')
+        .split('|')
+        .map(|c| c.trim().to_string())
+        .collect()
+}
+
+fn truncate_width(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let w = char_width(ch);
+        if width + w > max {
+            out.push('…');
+            return out;
+        }
+        out.push(ch);
+        width += w;
+    }
+    out
+}
+
+#[derive(Clone, Copy)]
+enum Align {
+    Left,
+    Right,
+    Center,
+}
+
+fn render_table<'a>(
+    lines: &[&str],
+    width: usize,
+    theme: &Theme,
+    out: &mut Vec<Line<'a>>,
+) -> usize {
+    let header = split_table_row(lines[0]);
+    let delim = split_table_row(lines[1]);
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut consumed = 2usize;
+    while consumed < lines.len() && lines[consumed].trim().starts_with('|') {
+        rows.push(split_table_row(lines[consumed]));
+        consumed += 1;
+    }
+    let cols = header
+        .len()
+        .max(delim.len())
+        .max(rows.iter().map(Vec::len).max().unwrap_or(0));
+    if cols == 0 {
+        return consumed;
+    }
+    let aligns: Vec<Align> = (0..cols)
+        .map(|c| {
+            let d = delim.get(c).map(String::as_str).unwrap_or("---");
+            match (d.starts_with(':'), d.ends_with(':')) {
+                (true, true) => Align::Center,
+                (false, true) => Align::Right,
+                _ => Align::Left,
+            }
+        })
+        .collect();
+
+    let mut widths: Vec<usize> = (0..cols)
+        .map(|c| {
+            let mut w: usize = header
+                .get(c)
+                .map(String::as_str)
+                .unwrap_or("")
+                .chars()
+                .map(char_width)
+                .sum();
+            for row in &rows {
+                if let Some(cell) = row.get(c) {
+                    w = w.max(cell.chars().map(char_width).sum());
+                }
+            }
+            w.max(3)
+        })
+        .collect();
+
+    let budget = width.saturating_sub(cols + 3).max(cols * 3);
+    while widths.iter().sum::<usize>() > budget {
+        let Some((idx, _)) = widths.iter().enumerate().max_by_key(|(_, w)| **w) else {
+            break;
+        };
+        if widths[idx] <= 3 {
+            break;
+        }
+        widths[idx] -= 1;
+    }
+
+    let border = Style::default().fg(theme.border);
+    let mut top = String::from(" ┌");
+    for (c, w) in widths.iter().enumerate() {
+        top.push_str(&"─".repeat(*w + 2));
+        top.push(if c + 1 == cols { '┐' } else { '┬' });
+    }
+    out.push(Line::styled(top, border));
+    push_table_row(out, &header, &widths, &aligns, theme, true);
+    let mut mid = String::from(" ├");
+    for (c, w) in widths.iter().enumerate() {
+        mid.push_str(&"─".repeat(*w + 2));
+        mid.push(if c + 1 == cols { '┤' } else { '┼' });
+    }
+    out.push(Line::styled(mid, border));
+    for row in &rows {
+        push_table_row(out, row, &widths, &aligns, theme, false);
+    }
+    let mut bottom = String::from(" └");
+    for (c, w) in widths.iter().enumerate() {
+        bottom.push_str(&"─".repeat(*w + 2));
+        bottom.push(if c + 1 == cols { '┘' } else { '┴' });
+    }
+    out.push(Line::styled(bottom, border));
+    consumed
+}
+
+fn push_table_row<'a>(
+    out: &mut Vec<Line<'a>>,
+    cells: &[String],
+    widths: &[usize],
+    aligns: &[Align],
+    theme: &Theme,
+    header: bool,
+) {
+    let border = Style::default().fg(theme.border);
+    let text_style = if header {
+        Style::default()
+            .fg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text)
+    };
+    let mut spans = vec![Span::styled(" │ ", border)];
+    for (c, width) in widths.iter().enumerate() {
+        let raw = cells.get(c).map(String::as_str).unwrap_or("");
+        let shown = truncate_width(raw, *width);
+        let used: usize = shown.chars().map(char_width).sum();
+        let pad = width.saturating_sub(used);
+        let (before, after) = match aligns.get(c).copied().unwrap_or(Align::Left) {
+            Align::Left => (0, pad),
+            Align::Right => (pad, 0),
+            Align::Center => (pad / 2, pad - pad / 2),
+        };
+        spans.push(Span::styled(
+            format!("{}{}{}", " ".repeat(before), shown, " ".repeat(after)),
+            text_style,
+        ));
+        spans.push(Span::styled(
+            if c + 1 == widths.len() { " │" } else { " │ " },
+            border,
+        ));
+    }
+    out.push(Line::from(spans));
 }
 
 fn inline_spans<'a>(line: &str, theme: &Theme) -> Vec<Span<'a>> {
     let mut spans = Vec::new();
-    let mut rest = line;
-    while !rest.is_empty() {
-        if let Some(start) = rest.find('`') {
-            if start > 0 {
-                spans.push(Span::raw(rest[..start].to_string()));
+    let mut plain = String::new();
+    let mut i = 0usize;
+    while i < line.len() {
+        let rest = &line[i..];
+        let marker = if rest.starts_with('`') {
+            Some(("`", Style::default().fg(theme.secondary).bg(theme.surface)))
+        } else if rest.starts_with("**") {
+            Some(("**", Style::default().add_modifier(Modifier::BOLD)))
+        } else if rest.starts_with('*') {
+            Some(("*", Style::default().add_modifier(Modifier::ITALIC)))
+        } else {
+            None
+        };
+        if let Some((marker, style)) = marker {
+            let after = &rest[marker.len()..];
+            if let Some(end) = after.find(marker) {
+                if end > 0 {
+                    if !plain.is_empty() {
+                        spans.push(Span::raw(std::mem::take(&mut plain)));
+                    }
+                    spans.push(Span::styled(after[..end].to_string(), style));
+                    i += marker.len() + end + marker.len();
+                    continue;
+                }
             }
-            let after = &rest[start + 1..];
-            if let Some(end) = after.find('`') {
-                spans.push(Span::styled(
-                    after[..end].to_string(),
-                    Style::default().fg(theme.secondary).bg(theme.surface),
-                ));
-                rest = &after[end + 1..];
-                continue;
-            }
-            spans.push(Span::raw(rest[start..].to_string()));
-            break;
         }
-        spans.push(Span::raw(rest.to_string()));
-        break;
+        let ch = rest.chars().next().expect("non-empty");
+        plain.push(ch);
+        i += ch.len_utf8();
+    }
+    if !plain.is_empty() {
+        spans.push(Span::raw(plain));
     }
     if spans.is_empty() {
         spans.push(Span::raw(String::new()));

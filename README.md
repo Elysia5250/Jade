@@ -140,8 +140,12 @@ through `sh -c`; multiple arguments are executed verbatim (no shell) unless
 | `esc` / `ctrl+c` | clear input / cancel active turn or focus transcript / quit |
 
 Bare commands run in the console's working directory (`--cwd` or `/cd` to
-change it). Sessions are saved under `~/.envoy/sessions/` (`envoy -c` resumes
-the latest session for the current directory). It talks to the same daemon over
+change it). The agent reads `AGENTS.md` (or `ENVOY.md`) from that directory as
+project instructions, replies in the language of your message, and renders
+Markdown with real tables, lists and inline emphasis. Tool output is stripped
+of ANSI escapes before it reaches the transcript. Sessions are saved under
+`~/.envoy/sessions/` (`envoy -c` resumes the latest session for the current
+directory). It talks to the same daemon over
 short RPCs — a UI exit never affects a running job. When conduit is connected,
 the sidebar shows `agents/peers` and `/machine` / `ctrl+p` lists only peers
 advertising service 16.

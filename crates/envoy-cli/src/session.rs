@@ -121,6 +121,7 @@ impl TranscriptItem {
 
     pub fn push_output_text(&mut self, text: &str, err: bool) {
         if let TranscriptItem::Tool { output, .. } = self {
+            let text = strip_ansi(text);
             for line in text.split('\n') {
                 // Keep non-empty lines or preserve blank lines inside multi-line chunks
                 if output.len() >= MAX_OUTPUT_LINES_PER_CARD {
@@ -143,8 +144,70 @@ impl TranscriptItem {
             if output.len() >= MAX_OUTPUT_LINES_PER_CARD {
                 output.drain(..1);
             }
-            output.push(OutputLine { text: line, err });
+            output.push(OutputLine {
+                text: strip_ansi(&line),
+                err,
+            });
         }
+    }
+}
+
+/// Strip ANSI escape sequences from command output.
+///
+/// Tool output is rendered as plain text, so a colour code would either show up
+/// as garbage or leave a background colour set for the rest of the line.
+pub fn strip_ansi(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.next() {
+                // CSI: parameter/intermediate bytes, then a final byte @..~
+                Some('[') => {
+                    for next in chars.by_ref() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: terminated by BEL or ST (ESC \)
+                Some(']') => loop {
+                    match chars.next() {
+                        Some('\x07') | None => break,
+                        Some('\x1b') => {
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                        Some(_) => {}
+                    }
+                },
+                // Two-character escapes such as ESC ( B
+                Some('(') | Some(')') | Some('*') | Some('+') => {
+                    chars.next();
+                }
+                Some(_) | None => {}
+            },
+            // Carriage returns only confuse the transcript; callers trim them.
+            '\r' => {}
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod ansi_tests {
+    use super::strip_ansi;
+
+    #[test]
+    fn strips_colour_and_osc() {
+        assert_eq!(strip_ansi("\x1b[31mred\x1b[0m plain"), "red plain");
+        assert_eq!(strip_ansi("a\x1b]0;title\x07b"), "ab");
+        assert_eq!(strip_ansi("a\x1b]8;;http://x\x1b\\link"), "alink");
+        assert_eq!(strip_ansi("no codes"), "no codes");
+        assert_eq!(strip_ansi("x\r\ny"), "x\ny");
     }
 }
 
