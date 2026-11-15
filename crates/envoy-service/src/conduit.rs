@@ -45,7 +45,9 @@ const MAX_RESPONSE: usize = 4 * 1024 * 1024;
 /// Buffered bytes before a WebSocket write applies backpressure.
 const WS_WRITE_BUFFER: usize = 256 * 1024;
 /// Idle accept connections `envoy serve` keeps parked.
-pub const DEFAULT_POOL: usize = 3;
+pub const DEFAULT_POOL: usize = 4;
+/// How often a parked accept connection is pinged.
+pub const KEEPALIVE: Duration = Duration::from_secs(25);
 
 /// Resolve the control socket: explicit path, `CONDUIT_CONTROL_SOCK`,
 /// `$CONDUIT_DATA_DIR/control.sock`, else `~/.conduit/control.sock`.
@@ -102,6 +104,13 @@ pub struct Tun {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+pub struct PeerService {
+    pub service_id: u16,
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct Peer {
     pub device_id: String,
     #[serde(default)]
@@ -114,6 +123,15 @@ pub struct Peer {
     pub path: Option<String>,
     #[serde(default)]
     pub rtt_ms: Option<u64>,
+    /// Services the peer advertises over conduit's discovery channel.
+    #[serde(default)]
+    pub services: Vec<PeerService>,
+}
+
+impl Peer {
+    pub fn has_service(&self, service_id: u16) -> bool {
+        self.services.iter().any(|s| s.service_id == service_id)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -208,14 +226,20 @@ impl ConduitClient {
                     .as_ref()
                     .map(|b| String::from_utf8_lossy(b).to_string())
                     .unwrap_or_default();
-                let reason = serde_json::from_str::<serde_json::Value>(&raw)
-                    .ok()
+                let parsed = serde_json::from_str::<serde_json::Value>(&raw).ok();
+                let reason = parsed
+                    .as_ref()
                     .and_then(|v| v.get("error")?.as_str().map(str::to_string))
                     .unwrap_or_else(|| raw.trim().to_string());
+                // `code` is the stable branch key; the text is for humans.
+                let code = parsed
+                    .as_ref()
+                    .and_then(|v| v.get("code")?.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "unknown".to_string());
                 let reason = if reason.is_empty() {
-                    status.to_string()
+                    format!("{code} (HTTP {})", status.as_u16())
                 } else {
-                    format!("{} ({})", reason, status.as_u16())
+                    format!("{reason} [{code}, HTTP {}]", status.as_u16())
                 };
                 bail!("conduit refused {path}: {reason}")
             }
@@ -236,39 +260,58 @@ impl ConduitClient {
     }
 
     /// Park one accept connection and wait for conduit to hand off a peer.
+    ///
+    /// A parked connection is idle for a long time, so this pings every
+    /// [`KEEPALIVE`] and treats a failed send as "conduit is gone": the caller
+    /// reconnects instead of holding a half-open slot conduit still counts.
     pub async fn accept(&self) -> Result<Accept> {
         let path = format!(
             "/v1/services/{}/accept?name={}",
             AGENT_SERVICE_ID, SERVICE_NAME
         );
-        let mut ws = self.upgrade(&path).await?;
+        let ws = self.upgrade(&path).await?;
+        let (mut tx, mut rx) = ws.split();
+        let mut ping = tokio::time::interval(KEEPALIVE);
+        ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ping.tick().await; // the first tick fires immediately
+
         loop {
-            match ws.next().await {
-                Some(Ok(Message::Text(text))) => {
-                    let meta: Handoff = serde_json::from_str(text.as_str())
-                        .context("parsing the conduit handoff frame")?;
-                    if meta.event != "accepted" {
-                        bail!("conduit sent an unexpected handoff event: {}", meta.event);
+            tokio::select! {
+                msg = rx.next() => match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        let meta: Handoff = serde_json::from_str(text.as_str())
+                            .context("parsing the conduit handoff frame")?;
+                        if meta.event != "accepted" {
+                            bail!("conduit sent an unexpected handoff event: {}", meta.event);
+                        }
+                        if meta.peer_device_id.is_empty() {
+                            bail!("conduit handed off a peer without a device id");
+                        }
+                        let ws = tx.reunite(rx).map_err(|_| {
+                            anyhow::anyhow!("reuniting the parked accept websocket")
+                        })?;
+                        return Ok(Accept {
+                            peer_device_id: meta.peer_device_id,
+                            stream: BoxStream::new(WsByteStream::new(ws)),
+                        });
                     }
-                    if meta.peer_device_id.is_empty() {
-                        bail!("conduit handed off a peer without a device id");
+                    Some(Ok(Message::Binary(_))) => {
+                        bail!("conduit sent binary data before the handoff metadata")
                     }
-                    return Ok(Accept {
-                        peer_device_id: meta.peer_device_id,
-                        stream: BoxStream::new(WsByteStream::new(ws)),
-                    });
+                    Some(Ok(Message::Ping(payload))) => {
+                        tx.send(Message::Pong(payload)).await.ok();
+                    }
+                    Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => {}
+                    Some(Ok(Message::Close(_))) | None => {
+                        bail!("conduit closed the accept connection before a handoff")
+                    }
+                    Some(Err(e)) => return Err(e).context("waiting for a conduit handoff"),
+                },
+                _ = ping.tick() => {
+                    if tx.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        bail!("conduit stopped answering on the control socket");
+                    }
                 }
-                Some(Ok(Message::Binary(_))) => {
-                    bail!("conduit sent binary data before the handoff metadata")
-                }
-                Some(Ok(Message::Ping(payload))) => {
-                    ws.send(Message::Pong(payload)).await.ok();
-                }
-                Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => {}
-                Some(Ok(Message::Close(_))) | None => {
-                    bail!("conduit closed the accept connection before a handoff")
-                }
-                Some(Err(e)) => return Err(e).context("waiting for a conduit handoff"),
             }
         }
     }
@@ -369,21 +412,6 @@ impl ConduitClient {
             .with_context(|| format!("parsing the JSON from {path}"))
     }
 
-    /// Reverse-map a TUN peer address to a device id (`/v1/devices`).
-    ///
-    /// The contract requires this before trusting a TCP peer on the virtual
-    /// network: the address is only meaningful after it has been mapped back to
-    /// a device and checked against the allowlist.
-    pub async fn device_for_ip(&self, ip: std::net::IpAddr) -> Result<String> {
-        let reply = self.devices().await?;
-        let wanted = ip.to_string();
-        reply
-            .devices
-            .into_iter()
-            .find(|d| d.virtual_ip.as_deref() == Some(wanted.as_str()))
-            .map(|d| d.device_id)
-            .with_context(|| format!("no conduit device owns the virtual ip {ip}"))
-    }
 }
 
 fn parse_status_event(text: &str) -> Option<Status> {

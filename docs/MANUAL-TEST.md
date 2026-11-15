@@ -122,6 +122,17 @@ $B jobs | tail -1        # => done(127)，结果说明是 daemon 重启导致
 
 预期：不会出现永久 `running` 的僵尸条目，也不会让 `logs --follow` 无限挂住。
 
+### B4.5 单实例锁
+
+```bash
+$B serve &            # 第一个实例拿到 <data-dir>/envoy.lock
+sleep 1
+$B serve              # => Error: another envoy daemon already owns ... ; 第二个直接退出
+$B daemon status      # => running
+```
+
+预期：第二个实例不会删掉正在使用的 socket，也不会共享 `jobs/state.json`。
+
 ### B5 策略门禁
 
 ```bash
@@ -157,7 +168,8 @@ envoy serve
 
 ```bash
 envoy devices
-# => ID / NAME / DNS / VIP / STATUS / ME
+# => ID / NAME / DNS / VIP / STATUS / AGENT / ME
+# => AGENT=yes 表示该机器当前通告了 service 16（可被调度）
 envoy status
 # => conduit: connected (...), this device workstations (3fa9...)
 #    network:  direct · tun tun0 · 1 peer(s) · vip 100.64.0.1
@@ -188,10 +200,10 @@ envoy --on laptop cancel 3
 | `conduit run` 没起 | `connecting to conduit at .../control.sock (is conduit run up?)` |
 | 目标机 `envoy disable` | `... refused: agent disabled on this device (envoy enable)` |
 | 目标机没 allow 你 | `... refused: caller <device_id> is not allowlisted here` |
-| 名字写错 | `... refused: <name> is not an active device ... (404)` |
-| 两台设备同名 | `... refused: ... matches 2 devices ... (409)` |
-| 目标机离线 | `... refused: peer offline ... (503)` |
-| 目标机没跑 `envoy serve` | 对端 service 16 未注册，开流失败 |
+| 名字写错 | `... refused: device not found: X [device_not_found, HTTP 404]` |
+| 两台设备同名 | `... refused: ambiguous device name 'X' ... [ambiguous_target, HTTP 409]` |
+| 目标机离线 | `... refused: ... [peer_offline, HTTP 503]` |
+| 目标机没跑 `envoy serve` | `... refused: <name> does not advertise service 16 [service_not_registered, HTTP 503]`（约 1–3 秒内生效，依赖 discovery） |
 
 TUI 多机切换（conduit 已连接时）：
 
@@ -213,6 +225,6 @@ envoy ui
 - **没有暂停/恢复**：只有 `cancel`。
 - **没有路径围栏**：相对路径落目标机 `$HOME`，绝对路径就是整机可读；"允许调用 ≈ 该用户的全部文件权限"。
 - **只有一个默认并发组**：`--group` 可以分组，但每个组的并发上限目前都落到 `max_jobs`。
-- **L3 直连监听**（`--listen-vpn`）还没实现；目前只有 control.sock 的 WS 桥接。
+- **L3 直连不做**：契约已把 agent 通道收敛到 `control.sock` 的 WS 桥；TUN 只给用户自己的工具。
 - **`envoy/bridge/` 已弃用**：它链接 conduit crate 并起第二个引擎，与 `conduit run` 冲突。
 - **TUI 的机器列表来自 `/v1/devices` + `/v1/events`**；conduit 没起时只显示 `local`。

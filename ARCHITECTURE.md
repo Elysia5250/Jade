@@ -111,9 +111,10 @@
   - `AgentHost::config(&self) -> AgentConfig`（`StoreHost` 每次请求重读 `agent.json`）
 - **conduit 运行时适配器**（`envoy_service::conduit`，纯 UDS + HTTP/WS，不依赖 `conduit-*`）：
   - `WsByteStream`：WebSocket Binary 帧 ↔ `AsyncRead + AsyncWrite`，写侧有 256 KiB 缓冲与背压，Close 即 EOF。
-  - `ConduitClient`：`/v1/status`、`/v1/devices`、`/v1/events`（watch 推送，驱动 TUI 的在线机器与 service 监听数）、`/v1/services/16/open/{target}`、`/v1/services/16/accept`，以及 `device_for_ip`（L3 反查）。
-  - `ConduitDialer` 实现 `AgentDialer`：出站按 conduit 的解析顺序（device_id → dns_name → virtual_ip → 唯一设备名）寻址；`400/404/409/503` 的 JSON `error` 直接透传给 CLI。
-  - `spawn_accept_pool(server, client, n)`：维持 n 条空闲 `/v1/services/16/accept` 连接；收到 `{"event":"accepted","peer_device_id":...}` 文本帧后包装为 `WsByteStream` 并 `tokio::spawn(server.serve_stream(&peer_device_id, stream))`，立即补位；conduit 未启动时指数退避静默重试，不影响本机 socket。
+  - `ConduitClient`：`/v1/status`、`/v1/devices`、`/v1/events`（watch 推送，驱动 TUI 的 agents/peers 与 service 监听数）、`/v1/services/16/open/{target}`、`/v1/services/16/accept`。不做 L3 反查：agent 通道只走 WS 桥。
+  - `ConduitDialer` 实现 `AgentDialer`：出站按 conduit 的解析顺序（device_id → dns_name → virtual_ip → 唯一设备名）寻址；`error` 与稳定的 `code`（`device_not_found` / `ambiguous_target` / `peer_offline` / `service_not_registered` …）一起透传给 CLI。
+  - `spawn_accept_pool(server, client, n)`：维持 n 条空闲 `/v1/services/16/accept` 连接，每 25s 发一次 WS Ping（半开检测，失败即重连）；收到 `{"event":"accepted","peer_device_id":...}` 文本帧后包装为 `WsByteStream` 并 `tokio::spawn(server.serve_stream(&peer_device_id, stream))`，立即补位；conduit 未启动时指数退避静默重试，不影响本机 socket。
+  - 对端能力来自 `peer.services`（conduit 的 DISCOVERY 通道）：TUI/`envoy devices` 只把通告了 16 的机器当作可调度目标，纯 VPN 节点不会被盲试。
   - **身份来源**：`peer_device_id` 由 conduit 的 mTLS 严格认证，`agent.json` 的 allowlist 校验的就是它；本机同用户 socket 调用恒放行。
 - 服务端与客户端入口：
   - 服务端：`AgentServer::serve_stream(caller_id, stream)`（调用方应 `tokio::spawn`）

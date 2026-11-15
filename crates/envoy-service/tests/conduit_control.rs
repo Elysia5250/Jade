@@ -327,7 +327,12 @@ async fn reads_status_and_devices_over_plain_http() {
                             "dns_name":"workstation","virtual_ip":"100.64.0.1",
                             "tun":{"enabled":true,"interface":"tun0","cidr":"100.64.0.0/10"},
                             "connection":"direct",
-                            "peers":[{"device_id":"91ff","name":"laptop","virtual_ip":"100.64.0.2","path":"direct","rtt_ms":14}],
+                            "peers":[
+                              {"device_id":"91ff","name":"laptop","virtual_ip":"100.64.0.2","path":"direct","rtt_ms":14,
+                               "services":[{"service_id":16,"name":"envoy"}]},
+                              {"device_id":"77aa","name":"router","virtual_ip":"100.64.0.3","path":"direct","rtt_ms":3,
+                               "services":[]}
+                            ],
                             "services":[{"service_id":16,"name":"envoy","online":true,"listeners":3}]}"#,
                     )
                     .await;
@@ -344,12 +349,14 @@ async fn reads_status_and_devices_over_plain_http() {
 
     let status = client.status().await.unwrap();
     assert!(status.tun.enabled);
-    assert_eq!(status.peers.len(), 1);
+    assert_eq!(status.peers.len(), 2);
     assert_eq!(status.services[0].service_id, 16);
     assert!(status.services[0].online);
 
-    let ip: std::net::IpAddr = "100.64.0.2".parse().unwrap();
-    assert_eq!(client.device_for_ip(ip).await.unwrap(), "91ff");
+    // Agent-capable vs pure VPN node is decided from advertised services.
+    assert!(status.peers[0].has_service(16));
+    assert!(!status.peers[1].has_service(16));
+    assert_eq!(status.peers[0].services[0].name, "envoy");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -366,7 +373,8 @@ async fn watches_live_status_events() {
         let mut ws = upgrade(stream, &headers).await;
         ws.send(Message::text(
             r#"{"type":"status","status":{"device_id":"me","device_name":"workstation",
-                "tun":{"enabled":false},"peers":[{"device_id":"a","name":"laptop"}],
+                "tun":{"enabled":false},"peers":[{"device_id":"a","name":"laptop","path":"direct",
+                 "services":[{"service_id":16,"name":"envoy"}]}],
                 "services":[{"service_id":16,"name":"envoy","online":true,"listeners":1}]}}"#,
         ))
         .await

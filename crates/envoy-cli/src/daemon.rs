@@ -28,6 +28,44 @@ pub async fn is_running(data_dir: &Path) -> bool {
         .is_ok()
 }
 
+/// One daemon per data directory. `flock` is advisory, but every envoy entry
+/// point goes through this file, so in practice it is the single-instance gate:
+/// without it a second `envoy serve` would unlink the live socket, bind its
+/// own, and both processes would write the same `jobs/state.json`.
+pub struct InstanceLock {
+    _file: std::fs::File,
+}
+
+impl InstanceLock {
+    pub fn acquire(data_dir: &Path) -> Result<Self> {
+        std::fs::create_dir_all(data_dir)?;
+        let path = data_dir.join("envoy.lock");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if rc != 0 {
+                bail!(
+                    "another envoy daemon already owns {} (socket {}); stop it with `envoy daemon stop`",
+                    data_dir.display(),
+                    socket_path(data_dir).display()
+                );
+            }
+        }
+        use std::io::Write as _;
+        let _ = file.set_len(0);
+        let _ = writeln!(file, "{}", std::process::id());
+        Ok(Self { _file: file })
+    }
+}
+
 /// Connect to the daemon, starting it detached if it is not up yet.
 pub async fn ensure(data_dir: &Path) -> Result<()> {
     if is_running(data_dir).await {

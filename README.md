@@ -101,14 +101,14 @@ opencode's TUI, because that is the terminal idiom this repo already lives in:
 | `c` | cancel the selected job |
 | `f` | follow output (otherwise `pgup`/`pgdn`, `home`/`end` scroll) |
 | `r` | refresh now |
-| `ctrl+p` | command palette: switch machine (from `/v1/devices`), new, cancel, follow, sidebar, theme, refresh, quit |
+| `ctrl+p` | command palette: switch machine (only peers advertising service 16), new, cancel, follow, sidebar, theme, refresh, quit |
 | `ctrl+x` then `q`/`n`/`c`/`b`/`t`/`s` | leader shortcuts, as in opencode |
 | `q` / `ctrl+c` / `ctrl+d` | quit |
 
 It talks to the same daemon over the same short RPCs — a UI exit never affects
-a running job. When conduit is connected the header shows the live peer count
-and `ctrl+p` lists the account's other machines, so switching target is two
-keystrokes.
+a running job. When conduit is connected the header shows `agents/peers` (machines
+that advertise service 16 vs all live peers) and `ctrl+p` lists only the agent
+machines, so a pure VPN node is never dialled blindly.
 
 ## MCP tools
 
@@ -131,6 +131,11 @@ gate decides what may run; everything heavier is the caller's job.
 - **Local** (same-user daemon socket, mode `0600`) always works: `enabled` and
   the allowlist govern *remote* callers, and a local shell can run the same
   commands anyway.
+- **One daemon per data directory**: `envoy serve` takes an exclusive `flock`
+  on `<data-dir>/envoy.lock` before touching the socket, so a second instance
+  fails fast instead of unlisting the live socket and sharing `jobs/state.json`.
+- `envoy serve --local-only` skips the conduit accept pool (alias:
+  `--no-conduit`).
 - **Remote** callers are identified by the transport. Over conduit that is the
   mTLS-authenticated `device_id`, so the allowlist is not a string the caller
   invents:
@@ -176,9 +181,14 @@ How it is wired:
 - **Identity** — the allowlist therefore matches a device id conduit has
   already authenticated, not a caller-supplied string.
 - **Discovery** — `GET /v1/status` and `GET /v1/devices` drive `envoy status`
-  and `envoy devices`. `GET /v1/events` feeds the TUI's live peer count and its
-  machine picker (peer online/offline, RTT, virtual ip, and `service 16`
-  listener counts).
+  and `envoy devices` (its `AGENT` column is "advertises service 16").
+  `GET /v1/events` feeds the TUI's live `agents/peers` count and its machine
+  picker. A peer that does not advertise 16 is filtered out instead of being
+  dialled and failing.
+- **Refusals** are structured: `{"error": "...", "code": "..."}` with stable
+  codes (`device_not_found`, `ambiguous_target`, `peer_offline`,
+  `service_not_registered`, ...), rendered as
+  `... refused: <reason> [<code>, HTTP <status>]`.
 
 The control socket path comes from `--conduit-socket`, `CONDUIT_CONTROL_SOCK`,
 `$CONDUIT_DATA_DIR/control.sock`, or `~/.conduit/control.sock`.
@@ -189,10 +199,11 @@ This path has been exercised end to end against the real thing: local
 over the WebSocket bridge — including the mTLS caller id in the job owner and
 the allowlist refusal path.
 
-With TUN enabled you can additionally reach the same port over the virtual
-network. If you do, the source address must be mapped back through
-`/v1/devices` to a `device_id` before the allowlist is consulted — envoy exposes
-that as `ConduitClient::device_for_ip`.
+**Agent traffic never uses L3.** conduit's `100.64.0.0/10` + `*.conduit` is for
+your own tools (ssh, curl, databases, grain); the agent protocol stays on the
+WebSocket bridge, where every stream carries an mTLS-authenticated device id.
+That is also why `envoy` has no `--listen-vpn` and no IP→device reverse
+mapping.
 
 ## Test
 

@@ -74,9 +74,9 @@ enum Commands {
     Serve {
         #[arg(long)]
         socket: Option<PathBuf>,
-        /// Do not bridge inbound streams from conduit.
-        #[arg(long)]
-        no_conduit: bool,
+        /// Local use only: do not expose service 16 to conduit.
+        #[arg(long, alias = "no-conduit")]
+        local_only: bool,
         /// Idle accept connections parked on conduit.
         #[arg(long, default_value_t = envoy_service::DEFAULT_POOL)]
         accept_pool: usize,
@@ -275,13 +275,13 @@ async fn main() -> Result<()> {
         Commands::Daemon { cmd } => cmd_daemon(&ctx.data_dir, cmd).await,
         Commands::Serve {
             socket,
-            no_conduit,
+            local_only,
             accept_pool,
         } => {
             cmd_serve(
                 ctx.data_dir.clone(),
                 socket,
-                no_conduit,
+                local_only,
                 accept_pool,
                 ctx.conduit_socket(),
             )
@@ -491,18 +491,40 @@ async fn cmd_devices(ctx: &Ctx) -> Result<()> {
         println!("no devices in this account");
         return Ok(());
     }
+    // Online is "has a live session"; agent is "advertises service 16".
+    let live: Vec<(String, bool)> = client
+        .status()
+        .await
+        .map(|status| {
+            status
+                .peers
+                .into_iter()
+                .map(|peer| {
+                    let agent = peer.has_service(envoy_proto::AGENT_SERVICE_ID);
+                    (peer.device_id, agent)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     println!(
-        "{:<20} {:<16} {:<16} {:<14} {:<8} {}",
-        "ID", "NAME", "DNS", "VIP", "STATUS", "ME"
+        "{:<20} {:<16} {:<16} {:<14} {:<8} {:<8} {}",
+        "ID", "NAME", "DNS", "VIP", "STATUS", "AGENT", "ME"
     );
     for device in reply.devices {
+        let agent = match live.iter().find(|(id, _)| id == &device.device_id) {
+            Some((_, true)) => "yes",
+            Some((_, false)) => "no",
+            None => "offline",
+        };
         println!(
-            "{:<20} {:<16} {:<16} {:<14} {:<8} {}",
+            "{:<20} {:<16} {:<16} {:<14} {:<8} {:<8} {}",
             device.device_id,
             device.name,
             device.dns_name.unwrap_or_else(|| "-".into()),
             device.virtual_ip.unwrap_or_else(|| "-".into()),
             device.status,
+            agent,
             if device.me { "yes" } else { "" }
         );
     }
@@ -554,10 +576,13 @@ async fn cmd_daemon(data_dir: &Path, cmd: DaemonCmd) -> Result<()> {
 async fn cmd_serve(
     data_dir: PathBuf,
     socket: Option<PathBuf>,
-    no_conduit: bool,
+    local_only: bool,
     accept_pool: usize,
     conduit_socket: PathBuf,
 ) -> Result<()> {
+    // Serialize instances before touching the socket: a second daemon would
+    // otherwise unlink the live one and share the job store with it.
+    let _lock = daemon::InstanceLock::acquire(&data_dir)?;
     let path = socket.unwrap_or_else(|| daemon::socket_path(&data_dir));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
@@ -578,8 +603,8 @@ async fn cmd_serve(
     println!("envoy daemon listening on {}", path.display());
 
     let mut pool = None;
-    if no_conduit {
-        println!("conduit: disabled (--no-conduit)");
+    if local_only {
+        println!("conduit: disabled (--local-only)");
     } else {
         println!(
             "conduit: watching {} ({} accept slot(s))",

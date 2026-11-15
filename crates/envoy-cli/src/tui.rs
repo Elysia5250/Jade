@@ -11,7 +11,7 @@
 use crate::daemon;
 use anyhow::{bail, Result};
 use envoy_proto::{Job, JobId, JobState, LogRecord, SubmitRequest, TaskSpec, DEFAULT_GROUP};
-use envoy_service::{default_control_socket, dialer_for, AgentDialer, ConduitClient, Device, Remote, Status};
+use envoy_service::{default_control_socket, dialer_for, AgentDialer, ConduitClient, Remote, Status};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::execute;
@@ -47,9 +47,6 @@ pub async fn run(data_dir: PathBuf, target: String, conduit: Option<PathBuf>) ->
 
     let mut app = App::new(data_dir.clone(), target, conduit.clone());
     let client = ConduitClient::new(conduit.clone().unwrap_or_else(default_control_socket));
-    if let Ok(devices) = client.devices().await {
-        app.devices = devices.devices;
-    }
     if let Ok(rx) = client.watch().await {
         app.watch = Some(rx);
     }
@@ -228,7 +225,6 @@ struct App {
     data_dir: PathBuf,
     target: String,
     conduit: Option<PathBuf>,
-    devices: Vec<Device>,
     status: Option<Status>,
     watch: Option<watch::Receiver<Option<Status>>>,
     jobs: Vec<Job>,
@@ -260,7 +256,6 @@ impl App {
             data_dir,
             target,
             conduit,
-            devices: Vec::new(),
             status: None,
             watch: None,
             jobs: Vec::new(),
@@ -386,23 +381,24 @@ impl App {
     /// reach for most once conduit is connected.
     fn palette_items(&self) -> Vec<(String, Command)> {
         let mut items = Vec::new();
-        for device in &self.devices {
-            if device.device_id == self.own_device_id() {
+        // Only machines that advertise the agent service are offered; a pure
+        // VPN node would fail with `service_not_registered`, so do not send
+        // the user there blindly.
+        for peer in self
+            .status
+            .as_ref()
+            .map(|s| s.peers.as_slice())
+            .unwrap_or(&[])
+        {
+            if peer.device_id == self.own_device_id() {
                 continue;
             }
-            let online = self
-                .status
-                .as_ref()
-                .map(|s| s.peers.iter().any(|p| p.device_id == device.device_id))
-                .unwrap_or(false);
+            if !peer.has_service(envoy_proto::AGENT_SERVICE_ID) {
+                continue;
+            }
             items.push((
-                format!(
-                    "Switch to {} ({}){}",
-                    device.name,
-                    device.device_id,
-                    if online { "" } else { " · offline" }
-                ),
-                Command::Switch(device.device_id.clone()),
+                format!("Switch to {} ({})", peer.name, peer.device_id),
+                Command::Switch(peer.device_id.clone()),
             ));
         }
         if self.target != "local" {
@@ -742,7 +738,14 @@ fn draw_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         ),
         Span::styled(
             match &app.status {
-                Some(status) => format!(" {} peer(s) ", status.peers.len()),
+                Some(status) => {
+                    let agents = status
+                        .peers
+                        .iter()
+                        .filter(|p| p.has_service(envoy_proto::AGENT_SERVICE_ID))
+                        .count();
+                    format!(" {agents}/{} agents ", status.peers.len())
+                }
                 None => " no conduit ".to_string(),
             },
             Style::default().fg(theme.dim),
@@ -1169,37 +1172,34 @@ mod tests {
         app.status = Some(Status {
             device_id: "me".into(),
             device_name: "workstation".into(),
-            peers: vec![envoy_service::conduit::Peer {
-                device_id: "other".into(),
-                name: "laptop".into(),
-                ..Default::default()
-            }],
+            peers: vec![
+                envoy_service::conduit::Peer {
+                    device_id: "other".into(),
+                    name: "laptop".into(),
+                    services: vec![envoy_service::conduit::PeerService {
+                        service_id: 16,
+                        name: "envoy".into(),
+                    }],
+                    ..Default::default()
+                },
+                envoy_service::conduit::Peer {
+                    device_id: "vpn".into(),
+                    name: "router".into(),
+                    ..Default::default()
+                },
+            ],
             ..Default::default()
         });
-        app.devices = vec![
-            Device {
-                device_id: "me".into(),
-                name: "workstation".into(),
-                dns_name: None,
-                virtual_ip: None,
-                status: "active".into(),
-                me: true,
-            },
-            Device {
-                device_id: "other".into(),
-                name: "laptop".into(),
-                dns_name: None,
-                virtual_ip: None,
-                status: "active".into(),
-                me: false,
-            },
-        ];
 
         let items = app.palette_items();
         assert!(
             items.iter().any(|(label, _)| label.contains("laptop")),
-            "peer should be offered: {:?}",
+            "agent peer should be offered: {:?}",
             items.iter().map(|(label, _)| label).collect::<Vec<_>>()
+        );
+        assert!(
+            !items.iter().any(|(label, _)| label.contains("router")),
+            "a peer without service 16 must not be offered"
         );
         assert!(
             !items.iter().any(|(label, _)| label.contains("workstation")),

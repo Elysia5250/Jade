@@ -24,7 +24,7 @@
 
 | 项目 | 约定值 | 说明 |
 | :--- | :--- | :--- |
-| 控制套接字默认路径 | `$CONDUIT_DATA_DIR/control.sock`，否则 `$HOME/.conduit/control.sock` | `envoy` 应支持通过 `--conduit-socket <PATH>` 或环境变量 `CONDUIT_CONTROL_SOCK` 覆盖 |
+| 控制套接字默认路径 | `$CONDUIT_DATA_DIR/control.sock`，否则 `$HOME/.conduit/control.sock` | 稳定契约；`conduit socket-path` 直接打印该路径，客户端也可用 `--conduit-socket <PATH>` / `CONDUIT_CONTROL_SOCK` 覆盖 |
 | 跨权限访问 | `conduit run` 若以 `sudo` 启动 TUN，会将 `control.sock` 属主/权限保持为原用户可读写（`0660`） | `envoy serve` 与 `envoy` CLI 始终以普通用户运行，无需 root |
 | 注册服务号 | `AGENT_SERVICE_ID = 16` | `conduit` 保留 `1..=15` 给核心能力，`16..=1023` 为注册应用服务段 |
 | 传输层协议 | Unix Domain Socket 上的 **HTTP/1.1 + JSON** 与 **WebSocket（RFC 6455）** | 复用标准 HTTP/WS 协议，无自定义二进制信封 |
@@ -56,7 +56,13 @@
       "dns_name": "laptop",
       "virtual_ip": "100.64.0.2",
       "path": "direct",
-      "rtt_ms": 14
+      "rtt_ms": 14,
+      "services": [
+        {
+          "service_id": 16,
+          "name": "envoy"
+        }
+      ]
     }
   ],
   "services": [
@@ -70,7 +76,9 @@
 }
 ```
 
-> 字段兼容性：`dns_name`、`virtual_ip` 在尚未分配或离线/旧数据时可能为 `null`；`tun` 在 `--no-tun` 模式下 `enabled` 为 `false`。
+> 字段兼容性：
+> - `dns_name`、`virtual_ip` 在尚未分配或离线/旧数据时可能为 `null`；`tun` 在 `--no-tun` 模式下 `enabled` 为 `false`。
+> - `peers[].services` 为对端通过 `conduit` 核心发现通道（`service::DISCOVERY = 4`）实时通告的**远端在线插件列表**（对端离线或未挂接任何插件时为 `[]`；旧版本节点兼容缺省为 `[]`）。主控 Agent 可据此直接区分“只开 VPN 的纯组网节点”与“已挂接 `envoy`（`service_id = 16`）的可调度节点”。
 
 ### 3.2 `GET /v1/devices`
 返回账号下全部已验证证书设备（含离线/已吊销设备）：
@@ -129,11 +137,14 @@
   3. 精确匹配 `virtual_ip`（如 `100.64.0.2`）
   4. 唯一匹配 `DeviceCert.name`（忽略大小写）
 - **升级失败（非 `101` HTTP 错误响应约定）**：
-  - 所有非 `101` 错误响应**保证**携带 `Content-Type: application/json` 与显式 `Content-Length` 响应头（不使用无 body 响应，也不使用 chunked 编码），响应体为 `{"error": "..."}`，以确保 `tungstenite` 等 WS 客户端能稳定读取到结构化报错信息：
-  - `400 Bad Request`：非法 `service_id`（如 `0` 或核心保留段 `1..=15`）或空目标
-  - `404 Not Found`：找不到该目标设备（或已被吊销）
-  - `409 Conflict`：设备名不唯一，需改用 `device_id` 或 `dns_name`
-  - `503 Service Unavailable`：对端离线、拨号失败或开流超时
+  - 所有非 `101` 错误响应**保证**携带 `Content-Type: application/json` 与显式 `Content-Length` 响应头（不使用无 body 响应，也不使用 chunked 编码），响应体为 `{"error": "...", "code": "..."}`：`code` 稳定、供客户端分支处理，`error` 只用于展示。
+  - `400 invalid_service`：非法 `service_id`（`0` 或核心保留段 `1..=15`）
+  - `400 empty_target`：目标为空
+  - `404 device_not_found`：找不到该目标设备（或已被吊销）
+  - `409 ambiguous_target`：设备名不唯一，需改用 `device_id` 或 `dns_name`
+  - `503 peer_offline`：无活跃会话、拨号失败或开流超时
+  - `503 service_not_registered`：对端在线、且**已发送过 DISCOVERY**，但其通告列表没有该 `service_id`（例如纯 VPN 节点）
+- **前置拒绝的边界**：`service_not_registered` 只在“已有活跃会话 + 收到过对端 DISCOVERY”时给出。旧版本对端从不发送发现帧，不能被误拒；无活跃会话时不前置拒绝，仍交给 `EngineHandle::open` 按需拨号，失败映射为 `peer_offline`。
 - **升级成功（`101 Switching Protocols`）**：
   - 响应头附带：`X-Conduit-Peer-Id`、`X-Conduit-Peer-Name`、以及可选的 `X-Conduit-Peer-Ip`；
   - 升级后即为**纯净的全双工透明字节流**，双向透传 `envoy-proto` v2 帧（`Op` / `Reply` / `ClientMsg`），无需任何前缀帧。
@@ -141,7 +152,10 @@
 ### 4.2 入站接单（`envoy serve` 侧 — Accept Pool 模型）
 
 - **请求**：`GET /v1/services/16/accept?name=envoy`（WebSocket Upgrade）
-- **连接即注册**：只要 `envoy serve` 至少维持 1 条已升级的 `/v1/services/16/accept` 连接，`conduit` 即认为本地 `service_id = 16` 在线（并在 `/v1/status` 的 `services` 中体现）。
+- **注册 ≠ 空闲容量**：`services[].online` 表示“已注册”，`services[].listeners` 只表示当前空闲连接数。两者分离后，`/v1/events` 与 `peers[].services` 不会因为并发高峰而抖动。
+- **宽限期（20 秒）**：最后一个空闲连接被交接消耗后，注册与对端通告继续保留 `DRAIN_GRACE = 20s`，给 `envoy` 补池的时间；宽限期内仍无连接才真正下线。
+- **有界等待（2 秒）**：宽限期内到达的入站流会暂存在每服务最多 32 条的队列里等新连接，最多等 `PENDING_WAIT = 2s`，超时才关闭。并发突刺不再被静默丢弃。
+- **断开立即下线**：`/accept` WebSocket 断开（进程退出、崩溃、CONDUIT 重启）会立刻撤销注册与通告，不享受宽限期，避免把流量调度到已死的节点。
 - **推荐池大小**：`envoy serve` 维持 **2~4 条**空闲等待连接（类似 `accept` 队列），断线后按指数退避自动重连；每当一条连接被分配给入站流，立刻补充一条新的连接。
 - **交接协议（非常关键）**：
   1. 当远端设备向本机发起 `service_id = 16` 的流时，`conduit` 从空闲池取出一条 `/v1/services/16/accept` WebSocket 连接；
@@ -159,7 +173,7 @@
      ```
   3. 从**下一帧开始**，该 WebSocket 连接进入**纯净全双工二进制透传模式**，直接桥接对端的 `conduit_net::Channel`；
   4. `envoy serve` 收到 `Message::Text` 解析出 `peer_device_id`（由 `conduit` mTLS 严格认证，不可伪造）后，包装剩余二进制流为 `WsByteStream`，`tokio::spawn(agent_server.serve_stream(&peer_device_id, stream))` 并立刻补齐 accept 池。
-- **异常处理**：如果远端开流时本地没有任何挂起的 `/v1/services/16/accept`，`conduit` 会立即关闭该入站 `Channel`（不阻塞网元循环，远端会干净地收到 EOF / 连接被拒）。
+- **异常处理**：如果远端开流时本地没有空闲连接，`conduit` 会在宽限期内最多等待 2 秒；等不到才关闭该入站 `Channel`（不阻塞网元循环，远端最终收到 EOF）。
 
 ```text
 envoy --on laptop                 conduit (local)              conduit (laptop)             envoy serve (laptop)
@@ -175,40 +189,81 @@ envoy --on laptop                 conduit (local)              conduit (laptop) 
 
 ---
 
-## 5. 方式二：L3 虚拟内网直连（TUN + `*.conduit` DNS）
+## 5. L3 虚拟内网（TUN + `*.conduit`）——不属于 Agent 契约
 
-当 `conduit` 开启 TUN 模式且 `/v1/status` 中 `tun.enabled == true` 时，`envoy` 也可以像普通局域网服务一样直接使用 TCP/HTTP/gRPC 走 `100.64.0.0/10` 网段互通（适合大文件高吞吐传输或第三方工具直连）：
+`100.64.0.0/10` 与 `*.conduit` 的定位是让**用户自己的工具**（ssh、curl、数据库、浏览器、grain 同步）像局域网服务一样互通。
 
-1. **服务端绑定**：`envoy serve` 可以查询 `/v1/status` 获取本机 `virtual_ip`，仅绑定 `<self_virtual_ip>:<port>`（例如 `100.64.0.2:7420`），避免监听在物理局域网网卡上。
-2. **目标寻址**：`envoy --on <target>` 可先查询 `GET /v1/devices` 找到目标的 `virtual_ip`，或直接连接 `<dns_name>.conduit:<port>`。
-3. **身份校验规则（必读）**：
-   - `conduit` 的 TUN 数据面在入口处强制校验 **源 IP 防伪**：从对端 `peer_device_id` 的会话收到的 IP 包，其源 IP 必须等于该设备被分配的 `virtual_ip`，否则直接丢弃；
-   - 因此在 TUN 内网中，TCP 连接的 `peer_addr().ip()` 可信地对应唯一的活跃设备；
-   - `envoy` 在接收直连 TCP 时，**必须**通过本地缓存的 `/v1/devices`（或 `/v1/events`）把 `peer_addr().ip()` 反查回 `device_id`，再送入 `AgentConfig.allowlist` 鉴权（切勿跳过 `allowlist` 直接放行）。
+**Agent 通信只走 `control.sock` 的 WebSocket 桥（`service_id = 16`）**，不使用 L3：
+
+1. **身份绑定等级不同**：WS 桥的 `peer_device_id` 是随每条流、由 mTLS 会话同步认证的身份；L3 只能依赖 TUN 源 IP 防伪 + 应用侧缓存反查，是旁路映射，授权关键路径上多一次可竞态的一致性假设。
+2. **可用性**：WS 桥在 `--no-tun`、容器内、无 sudo/root 环境都能用，只有一条代码路径、一种失败模式。
+3. **启动时序**：`envoy serve` 启动时 VIP 可能尚未分配或刚变更，绑定 `<self_virtual_ip>:<port>` 并不总是可行。
+
+因此 `envoy` **不实现** `--listen-vpn`，也不对 Agent RPC 做 `peer_addr().ip() -> device_id` 反查。`/v1/devices`、`/v1/status` 中的 `virtual_ip` 只用于用户工具寻址与展示。
 
 ---
 
-## 6. 给 `envoy` 仓库的实现清单
+## 6. `envoy` 远端工具链插件架构：并发模型与同机共生设计（#4 架构约定）
+
+面向“**主控端跑单个 AI Agent，同时操纵多台机器**”的定位，远端机器不需要运行完整 LLM/推理循环，也**不应把工具执行塞进 `conduit` 进程**（`conduit run` 开启 TUN 时可能以 `sudo`/`CAP_NET_ADMIN` 运行，而工作区命令/文件操作必须限制在普通用户权限内）。
+
+### 6.1 一机单实例双入口共生模型（解决“被控机也装了 `envoy`”）
+
+不拆出互不相干的第二个后台 daemon，而是在每台跑 `envoy` 的机器上维持**唯一一个常驻后台 `envoy serve`**，同时对外暴露两个入口并共享同一份状态：
+
+```text
+                      ┌─── 本地入口：~/.envoy/envoy.sock （供本机 envoy ui / mcp / cli 使用）
+唯一后台：envoy serve ─┤
+                      └─── 远程入口：conduit /v1/services/16/accept （供主控 Agent 跨机调度）
+                             │
+                             ▼
+                  共享同一个 AgentServer + Allowlist + Job 持久化存储
+```
+
+这样可实现三种角色自由切换且互不冲突：
+1. **互为主从的开发机**：两台电脑都装标准 `envoy`；在 A 机本地用 `envoy ui` 起任务、或用 B 机远程调度 A 机，看到的是同一份 `job` 目录和历史日志，不会各自锁库或互相不可见。
+2. **安全隔离（装了 ≠ 被控）**：即使某台机器运行着完整 `envoy`，只要本机 `allowlist` 未信任主控机的 `device_id`（或显式启用 `--local-only`），就不会放行远程操作。
+3. **无头纯被控节点（可选轻量化）**：对于只想作为被控机器的服务器，无需新造协议：
+   - **运行时开关**：提供 `envoy serve --worker-only`（只连接 `control.sock` 注册 `service 16` 接单，不提供/不提示交互式前端或 MCP）；
+   - **编译期可选裁剪（按需）**：若追求极小二进制体积，可通过 Cargo feature 把 `tui` / `mcp` 设为可选，无头服务器仅编译 `envoy-core + envoy-service + worker` 入口。
+
+### 6.2 多路并发保障（瞬时突刺有界等待，不静默丢弃）
+
+并发由传输层、桥接池、执行层三层协同完成：
+1. **传输层（`conduit-net::Multiplexer`）**：单条 QUIC/Relay 会话内置多路复用，支持任意数量独立 `Channel`（每条流独立 2 MiB 背压队列 + 小帧优先调度），同一控制端并发对同一目标开多条操作流不会队头阻塞。
+2. **桥接层（`conduit-cli` Accept 池）**：`envoy serve` 维持 **2~4 条**挂起 `GET /v1/services/16/accept` WebSocket 连接；每当一条远端 `/v1/services/16/open/{target}` 到达，`conduit` 的 `ServiceRegistry` 立即弹出一根空闲 WS 发送 `"accepted"` 交接帧，`envoy serve` 当即 `tokio::spawn` 处理并异步补回空闲池。瞬时超过池深度的流在 20 秒注册宽限内最多等待 2 秒，不会静默丢弃。
+3. **执行层（`envoy`）**：长耗时操作转后台 `Job` 落盘异步执行；单控 Agent 可同一时刻向 N 台机器并行下发 `exec`/`read`/`edit` 并同时订阅多路 `Job` 日志流。
+
+### 6.3 远端服务发现消费（单控 Agent 调度）
+
+- 每个对端只要连上就会收到一帧 DISCOVERY（**列表为空也会发 `seq=0, []`**），因此“在线但没装插件”和“旧版本从不发发现帧”在协议上可区分；
+- 订阅 `GET /v1/events` 后，主控端过滤 `status.peers[]` 中 `path != null` 且 `services` 包含 `service_id == 16` 的节点，即可识别哪些机器当前已挂载 `envoy`；`path == null` 表示离线（此时 `services` 为空，不代表没装）；
+- 因此主控 Agent 与 `envoy ui` 目标切换器无需向纯 VPN 节点盲试 `/v1/services/16/open/{target}`。
+
+---
+
+## 7. 给 `envoy` 仓库的实现清单
 
 > **当前进度同步**：
-> - `conduit` 侧已完成以下全部运行时接口，**可随时与 `envoy` 真机联调**：
+> - `conduit` 侧核心能力与联调进度：
 >   - **Step 1–2（已完成）**：QUIC/Relay 数据报与并发 Eager Mesh 底座
 >   - **Step 3（已完成）**：`conduit-coord` IPAM（`100.64.0.0/10` + 唯一 `dns_name`）与状态字段输出
 >   - **Step 4（已完成）**：`conduit-vpn`（Linux/macOS TUN 与 `*.conduit` 本地 DNS，支持 `--no-tun`）
 >   - **Step 5（已完成）**：`control.sock` 上的 `/v1/events` 实时推送与 `/v1/services/{id}/open|accept` 双向桥接（所有非 `101` 错误均保证携带 `Content-Length` + JSON `{"error": "..."}`）
->   - **Step 6（待做）**：`conduit tui`（纯 `control.sock` 前端）
-> - `envoy` 侧可直接接入 `/v1/events` 实时推送在线机器与 `service 16` 的 `listeners` 数量，并与 `conduit run` 进行端到端联调：
+>   - **Step 6（已完成）**：跨节点 `peers[].services` 实时发现、`conduit run --detach`、以及 OpenCode 风格 `conduit tui`
+> - `envoy` 侧可直接接入 `/v1/events` 实时推送在线机器（含远端 `peers[].services`）与本机 `service 16` 的 `listeners` 数量，并与 `conduit run` 进行端到端联调：
 
 1. **在 `envoy-service` 新增 `conduit` 运行时适配器（纯 UDS + WS，不引入 `conduit-*` 依赖）**：
    - 新增 `WsByteStream`（`AsyncRead + AsyncWrite` 封装 WebSocket Binary 帧）。
    - 新增 `ConduitClient`（连接 `CONDUIT_CONTROL_SOCK` / `~/.conduit/control.sock`）：
-     - `devices()` / `status()` / `subscribe_events()`
+     - `devices()` / `status()` / `subscribe_events()`（解析本机 `services` 及远端 `peers[].services`，`#[serde(default)]` 兼容缺省空数组）
      - `ConduitDialer`（实现 `AgentDialer`）：默认走 `GET /v1/services/16/open/{peer}`；可选支持 L3 模式（通过 `devices()` 解析 `virtual_ip` 直连 `<ip>:<port>`）。
    - 修改 `envoy_service::dialer_for`：除 `local` 外使用 `ConduitDialer`（或在迁移期保留 `ENVOY_BRIDGE_SOCK` 兼容 `RouteDialer`）。
-2. **在 `envoy-cli` 的 `envoy serve` 接入入站桥接**：
+2. **在 `envoy-cli` 的 `envoy serve` 接入入站桥接与角色开关**：
    - 后台常驻任务连接 `control.sock` 的 `GET /v1/services/16/accept?name=envoy`，维持 2~4 条等待连接，断线指数退避重连（`conduit` 未启动时静默等待重试，不影响本地 `envoy.sock` 正常使用）。
    - 收到 `"event": "accepted"` 文本帧后，读取 `peer_device_id` 并 `tokio::spawn(server.serve_stream(&peer_device_id, ws_byte_stream))`。
    - 若同时启用 L3 TCP 监听（可选 `--listen-vpn <port>`），对接入连接按 `remote_ip -> device_id` 反查后再调用 `AgentServer::serve_stream(&device_id, tcp_stream)`。
+   - 按需提供 `--worker-only`（仅注册 `service 16` 被控接单）与 `--local-only`（不向外暴露 `service 16`，仅本地使用）选项。
 3. **测试与清理**：
-   - 在 `envoy-service` 中使用本地 `tokio::net::UnixListener` + `axum`/`tokio-tungstenite` 编写 Mock `control.sock` 集成测试，覆盖：`/v1/services/16/open/{peer}` 正常与 `404/409/503` 错误传播、`/v1/services/16/accept` 身份交接与 `allowlist` 拦截、流关闭取消 `JobLog` 推送等场景。
+   - 在 `envoy-service` 中使用本地 `tokio::net::UnixListener` + `axum`/`tokio-tungstenite` 编写 Mock `control.sock` 集成测试，覆盖：`/v1/services/16/open/{peer}` 正常与 `404/409/503` 错误传播、`/v1/services/16/accept` 身份交接与 `allowlist` 拦截、`peers[].services` 发现解析、流关闭取消 `JobLog` 推送等场景。
    - 迁移验证完成后，移除或归档不再使用的 `envoy/bridge/`。
