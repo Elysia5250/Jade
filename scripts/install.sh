@@ -10,7 +10,7 @@
 # its daemon on first use (no service manager required).
 set -eu
 
-DEFAULT_BASE="https://github.com/elysia/envoy/releases/download"
+DEFAULT_BASE="https://github.com/Elysia5250/envoy/releases/download"
 
 BASE="${ENVOY_RELEASE_BASE:-$DEFAULT_BASE}"
 VERSION="${ENVOY_VERSION:-}"

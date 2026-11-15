@@ -76,7 +76,7 @@ dist/v0.1.0/envoy-v0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
 curl -fsSL https://YOUR_HOST/envoy/install.sh | sh -s -- --base-url https://YOUR_HOST/envoy/releases
 ```
 
-安装器里的默认地址是 `https://github.com/elysia/envoy/releases/download`；仓库挪地方就改
+安装器里的默认地址是 `https://github.com/Elysia5250/envoy/releases/download`；仓库挪地方就改
 `scripts/install.sh` 顶部的 `DEFAULT_BASE`，或始终传 `--base-url`。
 
 ## 从源码安装
