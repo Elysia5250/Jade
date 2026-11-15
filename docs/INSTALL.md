@@ -12,10 +12,17 @@ curl -fsSL https://raw.githubusercontent.com/Elysia5250/envoy/main/scripts/insta
 安装完成后**新开一个 shell**，`envoy` 就能直接用了：
 
 ```bash
+cd ~/your-project
+envoy                 # 打开控制台；当前目录就是工作目录
+# 输入 ls -la 回车即执行；输入 / 出命令菜单
+```
+
+其它入口：
+
+```bash
 envoy --version
 envoy status          # 首次运行会自动拉起本机守护进程
 envoy run "uname -a"
-envoy ui
 ```
 
 默认解析 `Elysia5250/envoy` 的最新 GitHub Release。装固定版本或换仓库：

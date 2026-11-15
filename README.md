@@ -66,7 +66,16 @@ identity and TUN. It remains in git history up to `55944b0`.
 
 ## Quick start
 
-The daemon auto-starts on first use; jobs outlive your terminal.
+```bash
+cd ~/your-project
+envoy                                  # opens the console in this directory
+```
+
+That is the main entry point: bare `envoy` starts the terminal console, with the
+current directory as the working directory for everything you run. Type a
+command and press enter, or `/` for the command menu.
+
+Scripted use (the daemon auto-starts; jobs outlive your terminal):
 
 ```bash
 envoy run "make -j8 && echo built"     # queue, follow, exit with its code
@@ -112,12 +121,14 @@ opencode's TUI, because that is the terminal idiom this repo already lives in:
 | `c` | cancel the selected job |
 | `f` | follow output (otherwise `pgup`/`pgdn`, `home`/`end` scroll) |
 | `r` | refresh now |
+| `/` | command menu with filtering: `/cd`, `/machine`, `/logs`, `/cancel`, `/follow`, `/clear`, `/theme`, `/help`, `/quit` |
 | `ctrl+p` | command palette: switch machine (only peers advertising service 16), new, cancel, follow, sidebar, theme, refresh, quit |
 | `ctrl+x` then `q`/`n`/`c`/`b`/`t`/`s` | leader shortcuts, as in opencode |
 | `q` / `ctrl+c` / `ctrl+d` | quit |
 
-It talks to the same daemon over the same short RPCs — a UI exit never affects
-a running job. When conduit is connected the header shows `agents/peers` (machines
+Bare commands run in the console's working directory (`--cwd` or `/cd` to
+change it). It talks to the same daemon over the same short RPCs — a UI exit
+never affects a running job. When conduit is connected the header shows `agents/peers` (machines
 that advertise service 16 vs all live peers) and `ctrl+p` lists only the agent
 machines, so a pure VPN node is never dialled blindly.
 

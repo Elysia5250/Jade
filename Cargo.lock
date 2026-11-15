@@ -304,7 +304,7 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "envoy-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "envoy-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "envoy-proto",
@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "envoy-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "postcard",
@@ -345,7 +345,7 @@ dependencies = [
 
 [[package]]
 name = "envoy-service"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "envoy-core",

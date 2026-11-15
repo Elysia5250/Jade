@@ -48,8 +48,13 @@ struct Cli {
     #[arg(long, global = true, env = "CONDUIT_CONTROL_SOCK")]
     conduit_socket: Option<PathBuf>,
 
+    /// Working directory for the TUI and local jobs (default: cwd).
+    #[arg(long, global = true, env = "ENVOY_CWD")]
+    cwd: Option<PathBuf>,
+
+    /// Subcommand; with none, `envoy` opens the terminal console.
     #[command(subcommand)]
-    cmd: Commands,
+    cmd: Option<Commands>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -209,6 +214,7 @@ struct Ctx {
     data_dir: PathBuf,
     on: String,
     conduit: Option<PathBuf>,
+    cwd: PathBuf,
 }
 
 impl Ctx {
@@ -250,7 +256,7 @@ impl Ctx {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let is_mcp = matches!(cli.cmd, Commands::Mcp { .. });
+    let is_mcp = matches!(cli.cmd.as_ref(), Some(Commands::Mcp { .. }));
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("envoy_cli=info,envoy_service=info"));
     let builder = tracing_subscriber::fmt().with_env_filter(filter);
@@ -264,13 +270,30 @@ async fn main() -> Result<()> {
     let data_dir = cli
         .data_dir
         .unwrap_or_else(AgentConfigStore::default_data_dir);
+    let cwd = cli
+        .cwd
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let ctx = Ctx {
         data_dir,
         on: cli.on.clone(),
         conduit: cli.conduit_socket.clone(),
+        cwd,
     };
 
-    match cli.cmd {
+    let Some(command) = cli.cmd else {
+        // Bare `envoy` is the opencode-style entry point: open the console in
+        // the current directory.
+        return tui::run(
+            ctx.data_dir.clone(),
+            ctx.on.clone(),
+            ctx.conduit.clone(),
+            ctx.cwd.clone(),
+        )
+        .await;
+    };
+
+    match command {
         Commands::Status => cmd_status(&ctx).await,
         Commands::Enable => cmd_set_enabled(&ctx.data_dir, true),
         Commands::Disable => cmd_set_enabled(&ctx.data_dir, false),
@@ -313,7 +336,15 @@ async fn main() -> Result<()> {
             to_path,
             mode,
         } => cmd_copy(&ctx, &from, &from_path, &to, &to_path, &mode).await,
-        Commands::Ui => tui::run(ctx.data_dir.clone(), ctx.on.clone(), ctx.conduit.clone()).await,
+        Commands::Ui => {
+            tui::run(
+                ctx.data_dir.clone(),
+                ctx.on.clone(),
+                ctx.conduit.clone(),
+                ctx.cwd.clone(),
+            )
+            .await
+        }
         Commands::Mcp { cmd } => mcp::cmd_mcp(ctx.data_dir.clone(), cmd, ctx.conduit.clone()).await,
     }
 }
@@ -651,7 +682,11 @@ async fn cmd_serve(
 
 // -------------------------------------------------------------------- jobs
 
-async fn cmd_submit(ctx: &Ctx, req: SubmitRequest) -> Result<()> {
+async fn cmd_submit(ctx: &Ctx, mut req: SubmitRequest) -> Result<()> {
+    // A local agent should behave like the shell you are standing in.
+    if req.cwd.is_none() && ctx.on == "local" {
+        req.cwd = Some(ctx.cwd.display().to_string());
+    }
     let remote = ctx.remote().await?;
     let job = remote.submit(&ctx.on, req).await?;
     println!("{}", job.id);
@@ -659,7 +694,10 @@ async fn cmd_submit(ctx: &Ctx, req: SubmitRequest) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_run(ctx: &Ctx, req: SubmitRequest) -> Result<()> {
+async fn cmd_run(ctx: &Ctx, mut req: SubmitRequest) -> Result<()> {
+    if req.cwd.is_none() && ctx.on == "local" {
+        req.cwd = Some(ctx.cwd.display().to_string());
+    }
     let remote = ctx.remote().await?;
     let job = remote.submit(&ctx.on, req).await?;
     eprintln!("#{} {} ({})", job.id, job.command(), ctx.on);
@@ -817,4 +855,30 @@ async fn cmd_copy(
     writer.finish().await?;
     println!("copied {total} bytes: {from}:{from_path} -> {to}:{to_path}");
     Ok(())
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn bare_envoy_opens_the_console() {
+        let cli = Cli::try_parse_from(["envoy"]).expect("parse");
+        assert!(cli.cmd.is_none(), "no subcommand should mean the TUI");
+    }
+
+    #[test]
+    fn subcommands_still_parse() {
+        let cli = Cli::try_parse_from(["envoy", "jobs"]).expect("parse");
+        assert!(matches!(cli.cmd, Some(Commands::Jobs)));
+        let cli = Cli::try_parse_from(["envoy", "--on", "laptop", "run", "echo hi"]).expect("parse");
+        assert!(matches!(cli.cmd, Some(Commands::Run(_))));
+        assert_eq!(cli.on, "laptop");
+    }
+
+    #[test]
+    fn cwd_flag_is_global() {
+        let cli = Cli::try_parse_from(["envoy", "--cwd", "/tmp/x", "jobs"]).expect("parse");
+        assert_eq!(cli.cwd.as_deref(), Some(std::path::Path::new("/tmp/x")));
+    }
 }
