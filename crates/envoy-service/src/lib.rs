@@ -17,8 +17,8 @@ pub use client::{
 pub use envoy_proto::{Hello, Job, JobId, JobResult, JobState, LogRecord, SubmitRequest, TaskSpec};
 pub use server::AgentServer;
 pub use conduit::{
-    default_control_socket, spawn_accept_pool, ConduitClient, ConduitDialer, Device, Status,
-    WsByteStream, DEFAULT_POOL,
+    default_control_socket, spawn_accept_pool, ConduitClient, ConduitDialer, Device, DevicesReply,
+    Status, WsByteStream, DEFAULT_POOL,
 };
 pub use transport::{AgentDialer, AgentHost, AgentStream, BoxStream, StaticHost, StoreHost};
 

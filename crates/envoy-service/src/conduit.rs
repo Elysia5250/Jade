@@ -273,6 +273,60 @@ impl ConduitClient {
         }
     }
 
+    /// Subscribe to `GET /v1/events`.
+    ///
+    /// Returns the initial snapshot plus a watch channel fed by every later
+    /// push (peer online/offline, RTT, virtual ip, and `service 16` listener
+    /// counts). The channel closes when conduit goes away.
+    pub async fn watch(&self) -> Result<tokio::sync::watch::Receiver<Option<Status>>> {
+        let mut ws = self.upgrade("/v1/events").await?;
+        let initial = loop {
+            match ws.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    if let Some(status) = parse_status_event(text.as_str()) {
+                        break status;
+                    }
+                }
+                Some(Ok(Message::Ping(payload))) => {
+                    ws.send(Message::Pong(payload)).await.ok();
+                }
+                Some(Ok(Message::Binary(_)))
+                | Some(Ok(Message::Pong(_)))
+                | Some(Ok(Message::Frame(_))) => {}
+                Some(Ok(Message::Close(_))) | None => {
+                    bail!("conduit closed /v1/events before the first snapshot")
+                }
+                Some(Err(e)) => return Err(e).context("reading the first /v1/events frame"),
+            }
+        };
+
+        let (tx, rx) = tokio::sync::watch::channel(Some(initial));
+        tokio::spawn(async move {
+            loop {
+                match ws.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Some(status) = parse_status_event(text.as_str()) {
+                            if tx.send(Some(status)).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        ws.send(Message::Pong(payload)).await.ok();
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => {
+                        debug!(error = %e, "/v1/events stream ended");
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            let _ = tx.send(None);
+        });
+        Ok(rx)
+    }
+
     /// `GET /v1/devices`.
     pub async fn devices(&self) -> Result<DevicesReply> {
         self.get_json("/v1/devices").await
@@ -330,6 +384,14 @@ impl ConduitClient {
             .map(|d| d.device_id)
             .with_context(|| format!("no conduit device owns the virtual ip {ip}"))
     }
+}
+
+fn parse_status_event(text: &str) -> Option<Status> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    if value.get("type")?.as_str()? != "status" {
+        return None;
+    }
+    serde_json::from_value(value.get("status")?.clone()).ok()
 }
 
 #[derive(Debug, Deserialize)]
@@ -689,6 +751,17 @@ mod tests {
         let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n";
         let response = parse_http_response(raw).unwrap();
         assert_eq!(response.body, b"{}");
+    }
+
+    #[test]
+    fn parses_status_events_and_ignores_other_types() {
+        let text = r#"{"type":"status","status":{"device_id":"a","device_name":"workstation","tun":{"enabled":true},"peers":[{"device_id":"b","name":"laptop"}],"services":[{"service_id":16,"name":"envoy","online":true,"listeners":3}]}}"#;
+        let status = parse_status_event(text).expect("status frame");
+        assert_eq!(status.device_id, "a");
+        assert_eq!(status.peers[0].name, "laptop");
+        assert_eq!(status.services[0].listeners, 3);
+        assert!(parse_status_event(r#"{"type":"other"}"#).is_none());
+        assert!(parse_status_event("not json").is_none());
     }
 
     #[test]

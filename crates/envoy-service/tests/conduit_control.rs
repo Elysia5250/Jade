@@ -353,3 +353,57 @@ async fn reads_status_and_devices_over_plain_http() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn watches_live_status_events() {
+    let dir = tmpdir("events");
+    let socket = dir.join("control.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("events connection");
+        let (path, headers) = read_request(&mut stream).await;
+        assert_eq!(path, "/v1/events");
+        let mut ws = upgrade(stream, &headers).await;
+        ws.send(Message::text(
+            r#"{"type":"status","status":{"device_id":"me","device_name":"workstation",
+                "tun":{"enabled":false},"peers":[{"device_id":"a","name":"laptop"}],
+                "services":[{"service_id":16,"name":"envoy","online":true,"listeners":1}]}}"#,
+        ))
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        ws.send(Message::text(
+            r#"{"type":"status","status":{"device_id":"me","device_name":"workstation",
+                "tun":{"enabled":false},"peers":[{"device_id":"a","name":"laptop"},{"device_id":"b","name":"server"}],
+                "services":[{"service_id":16,"name":"envoy","online":true,"listeners":3}]}}"#,
+        ))
+        .await
+        .unwrap();
+        // Keep the socket open until the receiver has seen both frames.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    });
+
+    let client = ConduitClient::new(socket.clone());
+    let rx = client.watch().await.expect("initial snapshot");
+    {
+        let status = rx.borrow();
+        let status = status.as_ref().expect("seeded");
+        assert_eq!(status.device_id, "me");
+        assert_eq!(status.peers.len(), 1);
+        assert_eq!(status.services[0].listeners, 1);
+    }
+
+    let mut seen_two = false;
+    for _ in 0..100 {
+        if let Some(status) = rx.borrow().clone() {
+            if status.peers.len() == 2 {
+                assert_eq!(status.services[0].listeners, 3);
+                seen_two = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(seen_two, "the second push never arrived");
+    let _ = std::fs::remove_dir_all(&dir);
+}

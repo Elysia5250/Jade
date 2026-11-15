@@ -103,7 +103,7 @@
 
 ### 3.3 `GET /v1/events`（WebSocket 实时推送）
 - 客户端通过 `control.sock` 升级到 WebSocket；
-- 连接成功后**立即收到一条初始快照**，之后每当节点列表、直连/中继状态、RTT、虚拟 IP 或本地服务注册状态变化时收到推送帧（`Message::Text` JSON）：
+- 连接成功后**立即收到一条初始快照**，之后每当节点列表、直连/中继状态、RTT、虚拟 IP 或本地服务注册状态（包括 `services[].listeners` / `online` 增减）变化时立即收到推送帧（`Message::Text` JSON）：
 
 ```json
 {
@@ -128,8 +128,9 @@
   2. 精确匹配 `dns_name`（忽略大小写，允许带或不带 `.conduit` 后缀）
   3. 精确匹配 `virtual_ip`（如 `100.64.0.2`）
   4. 唯一匹配 `DeviceCert.name`（忽略大小写）
-- **升级失败（直接返回 HTTP 错误与 JSON `{"error": "..."}`，方便 CLI 直接打印原因）**：
-  - `400 Bad Request`：非法 `service_id`（如 `0`）或空目标
+- **升级失败（非 `101` HTTP 错误响应约定）**：
+  - 所有非 `101` 错误响应**保证**携带 `Content-Type: application/json` 与显式 `Content-Length` 响应头（不使用无 body 响应，也不使用 chunked 编码），响应体为 `{"error": "..."}`，以确保 `tungstenite` 等 WS 客户端能稳定读取到结构化报错信息：
+  - `400 Bad Request`：非法 `service_id`（如 `0` 或核心保留段 `1..=15`）或空目标
   - `404 Not Found`：找不到该目标设备（或已被吊销）
   - `409 Conflict`：设备名不唯一，需改用 `device_id` 或 `dns_name`
   - `503 Service Unavailable`：对端离线、拨号失败或开流超时
@@ -190,12 +191,13 @@ envoy --on laptop                 conduit (local)              conduit (laptop) 
 ## 6. 给 `envoy` 仓库的实现清单
 
 > **当前进度同步**：
-> - `conduit` 侧已完成底层数据报与并发 Mesh 底座（Step 1–2），接下来将按顺序落地：
->   - **Step 3**：`conduit-coord` IPAM（`100.64.0.0/10` + 唯一 `dns_name`）与状态字段输出
->   - **Step 4**：`conduit-vpn`（Linux/macOS TUN 与 `*.conduit` 本地 DNS）
->   - **Step 5**：`control.sock` 上的 `/v1/events` 与 `/v1/services/{id}/open|accept` 桥接
->   - **Step 6**：`conduit tui`
-> - `envoy` 侧**无需等待 `conduit` 全部落完**，现在就可以先基于本契约完成自身适配与本地 Mock UDS 测试：
+> - `conduit` 侧已完成以下全部运行时接口，**可随时与 `envoy` 真机联调**：
+>   - **Step 1–2（已完成）**：QUIC/Relay 数据报与并发 Eager Mesh 底座
+>   - **Step 3（已完成）**：`conduit-coord` IPAM（`100.64.0.0/10` + 唯一 `dns_name`）与状态字段输出
+>   - **Step 4（已完成）**：`conduit-vpn`（Linux/macOS TUN 与 `*.conduit` 本地 DNS，支持 `--no-tun`）
+>   - **Step 5（已完成）**：`control.sock` 上的 `/v1/events` 实时推送与 `/v1/services/{id}/open|accept` 双向桥接（所有非 `101` 错误均保证携带 `Content-Length` + JSON `{"error": "..."}`）
+>   - **Step 6（待做）**：`conduit tui`（纯 `control.sock` 前端）
+> - `envoy` 侧可直接接入 `/v1/events` 实时推送在线机器与 `service 16` 的 `listeners` 数量，并与 `conduit run` 进行端到端联调：
 
 1. **在 `envoy-service` 新增 `conduit` 运行时适配器（纯 UDS + WS，不引入 `conduit-*` 依赖）**：
    - 新增 `WsByteStream`（`AsyncRead + AsyncWrite` 封装 WebSocket Binary 帧）。

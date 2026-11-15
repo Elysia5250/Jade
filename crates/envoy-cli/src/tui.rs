@@ -11,7 +11,7 @@
 use crate::daemon;
 use anyhow::{bail, Result};
 use envoy_proto::{Job, JobId, JobState, LogRecord, SubmitRequest, TaskSpec, DEFAULT_GROUP};
-use envoy_service::{dialer_for, AgentDialer, Remote};
+use envoy_service::{default_control_socket, dialer_for, AgentDialer, ConduitClient, Device, Remote, Status};
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::execute;
@@ -26,6 +26,7 @@ use ratatui::{Frame, Terminal};
 use std::io::{stdout, IsTerminal, Stdout};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::watch;
 
 /// How long a leader prefix stays armed.
 const LEADER_TIMEOUT: Duration = Duration::from_secs(2);
@@ -41,9 +42,18 @@ pub async fn run(data_dir: PathBuf, target: String, conduit: Option<PathBuf>) ->
     if target == "local" || target.is_empty() {
         daemon::ensure(&data_dir).await?;
     }
-    let remote: Remote<AnyDialer> = Remote::new(dialer_for(&data_dir, &target, conduit));
+    let mut remote: Remote<AnyDialer> =
+        Remote::new(dialer_for(&data_dir, &target, conduit.clone()));
 
-    let mut app = App::new(target);
+    let mut app = App::new(data_dir.clone(), target, conduit.clone());
+    let client = ConduitClient::new(conduit.clone().unwrap_or_else(default_control_socket));
+    if let Ok(devices) = client.devices().await {
+        app.devices = devices.devices;
+    }
+    if let Ok(rx) = client.watch().await {
+        app.watch = Some(rx);
+    }
+
     let mut tui = Tui::enter()?;
     app.refresh(&remote).await;
 
@@ -59,6 +69,18 @@ pub async fn run(data_dir: PathBuf, target: String, conduit: Option<PathBuf>) ->
                     Action::Submit(req) => app.submit(&remote, req).await,
                     Action::Cancel(id) => app.cancel(&remote, id).await,
                     Action::Refresh => app.refresh(&remote).await,
+                    Action::Switch(target) => {
+                        app.switch_to(target);
+                        if app.target == "local" {
+                            daemon::ensure(&app.data_dir).await?;
+                        }
+                        remote = Remote::new(dialer_for(
+                            &app.data_dir,
+                            &app.target,
+                            app.conduit.clone(),
+                        ));
+                        app.refresh(&remote).await;
+                    }
                 }
             }
         }
@@ -128,9 +150,10 @@ enum Action {
     Refresh,
     Submit(SubmitRequest),
     Cancel(JobId),
+    Switch(String),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Command {
     NewJob,
     CancelJob,
@@ -138,6 +161,7 @@ enum Command {
     ToggleSidebar,
     NextTheme,
     Refresh,
+    Switch(String),
     Quit,
 }
 
@@ -201,7 +225,12 @@ impl LogBuffer {
 }
 
 struct App {
+    data_dir: PathBuf,
     target: String,
+    conduit: Option<PathBuf>,
+    devices: Vec<Device>,
+    status: Option<Status>,
+    watch: Option<watch::Receiver<Option<Status>>>,
     jobs: Vec<Job>,
     selected: usize,
     focus: Focus,
@@ -226,9 +255,14 @@ struct App {
 }
 
 impl App {
-    fn new(target: String) -> Self {
+    fn new(data_dir: PathBuf, target: String, conduit: Option<PathBuf>) -> Self {
         Self {
+            data_dir,
             target,
+            conduit,
+            devices: Vec::new(),
+            status: None,
+            watch: None,
             jobs: Vec::new(),
             selected: 0,
             focus: Focus::Jobs,
@@ -267,6 +301,11 @@ impl App {
 
     async fn refresh(&mut self, remote: &Remote<AnyDialer>) {
         self.last_refresh = Instant::now();
+        if let Some(watch) = &self.watch {
+            if let Some(status) = watch.borrow().clone() {
+                self.status = Some(status);
+            }
+        }
         let target = self.target.clone();
 
         match remote.jobs(&target).await {
@@ -343,16 +382,61 @@ impl App {
         self.refresh(remote).await;
     }
 
-    fn palette_items(&self) -> Vec<(&'static str, Command)> {
-        vec![
-            ("New job", Command::NewJob),
-            ("Cancel selected job", Command::CancelJob),
-            ("Toggle follow", Command::ToggleFollow),
-            ("Toggle sidebar", Command::ToggleSidebar),
-            ("Switch theme", Command::NextTheme),
-            ("Refresh", Command::Refresh),
-            ("Quit", Command::Quit),
-        ]
+    /// Palette entries. Machines come first: switching target is the thing you
+    /// reach for most once conduit is connected.
+    fn palette_items(&self) -> Vec<(String, Command)> {
+        let mut items = Vec::new();
+        for device in &self.devices {
+            if device.device_id == self.own_device_id() {
+                continue;
+            }
+            let online = self
+                .status
+                .as_ref()
+                .map(|s| s.peers.iter().any(|p| p.device_id == device.device_id))
+                .unwrap_or(false);
+            items.push((
+                format!(
+                    "Switch to {} ({}){}",
+                    device.name,
+                    device.device_id,
+                    if online { "" } else { " · offline" }
+                ),
+                Command::Switch(device.device_id.clone()),
+            ));
+        }
+        if self.target != "local" {
+            items.push(("Switch to local".to_string(), Command::Switch("local".into())));
+        }
+        items.extend([
+            ("New job".to_string(), Command::NewJob),
+            ("Cancel selected job".to_string(), Command::CancelJob),
+            ("Toggle follow".to_string(), Command::ToggleFollow),
+            ("Toggle sidebar".to_string(), Command::ToggleSidebar),
+            ("Switch theme".to_string(), Command::NextTheme),
+            ("Refresh".to_string(), Command::Refresh),
+            ("Quit".to_string(), Command::Quit),
+        ]);
+        items
+    }
+
+    fn own_device_id(&self) -> String {
+        self.status
+            .as_ref()
+            .map(|s| s.device_id.clone())
+            .unwrap_or_default()
+    }
+
+    fn switch_to(&mut self, target: String) {
+        self.target = target.clone();
+        self.jobs.clear();
+        self.selected = 0;
+        self.log.clear();
+        self.log_job = None;
+        self.log_cursor = 0;
+        self.log_finished = None;
+        self.log_scroll = 0;
+        self.message = Some((format!("target: {target}"), false));
     }
 
     fn run_command(&mut self, command: Command) -> Action {
@@ -379,6 +463,7 @@ impl App {
                 Action::None
             }
             Command::Refresh => Action::Refresh,
+            Command::Switch(target) => Action::Switch(target),
             Command::Quit => Action::Quit,
         }
     }
@@ -399,7 +484,7 @@ impl App {
                     palette.selected = (palette.selected + 1).min(items.len() - 1)
                 }
                 KeyCode::Enter => {
-                    let command = items[palette.selected].1;
+                    let command = items[palette.selected].1.clone();
                     self.palette = None;
                     return self.run_command(command);
                 }
@@ -653,6 +738,13 @@ fn draw_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Span::styled(format!(" {} ", app.target), Style::default().fg(theme.dim)),
         Span::styled(
             format!(" {} jobs · {running} running · {queued} queued ", app.jobs.len()),
+            Style::default().fg(theme.dim),
+        ),
+        Span::styled(
+            match &app.status {
+                Some(status) => format!(" {} peer(s) ", status.peers.len()),
+                None => " no conduit ".to_string(),
+            },
             Style::default().fg(theme.dim),
         ),
         Span::styled(
@@ -1000,7 +1092,7 @@ mod tests {
 
     #[test]
     fn leader_requires_the_prefix() {
-        let mut app = App::new("local".into());
+        let mut app = App::new(PathBuf::from("/tmp"), "local".into(), None);
         let leader = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
         assert!(matches!(app.handle_key(leader), Action::None));
         let quit = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
@@ -1009,7 +1101,7 @@ mod tests {
 
     #[test]
     fn typing_only_happens_in_the_input_focus() {
-        let mut app = App::new("local".into());
+        let mut app = App::new(PathBuf::from("/tmp"), "local".into(), None);
         // `n` focuses the editor instead of inserting.
         app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
         assert_eq!(app.focus, Focus::Input);
@@ -1024,7 +1116,7 @@ mod tests {
 
     #[test]
     fn palette_enter_runs_the_selected_command() {
-        let mut app = App::new("local".into());
+        let mut app = App::new(PathBuf::from("/tmp"), "local".into(), None);
         app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
         assert!(app.palette.is_some());
         for _ in 0..6 {
@@ -1041,7 +1133,7 @@ mod tests {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
 
-        let mut app = App::new("local".into());
+        let mut app = App::new(PathBuf::from("/tmp"), "local".into(), None);
         app.connected = true;
         app.jobs = vec![
             job(
@@ -1072,8 +1164,58 @@ mod tests {
     }
 
     #[test]
+    fn palette_lists_other_machines_and_switches_target() {
+        let mut app = App::new(PathBuf::from("/tmp"), "local".into(), None);
+        app.status = Some(Status {
+            device_id: "me".into(),
+            device_name: "workstation".into(),
+            peers: vec![envoy_service::conduit::Peer {
+                device_id: "other".into(),
+                name: "laptop".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        app.devices = vec![
+            Device {
+                device_id: "me".into(),
+                name: "workstation".into(),
+                dns_name: None,
+                virtual_ip: None,
+                status: "active".into(),
+                me: true,
+            },
+            Device {
+                device_id: "other".into(),
+                name: "laptop".into(),
+                dns_name: None,
+                virtual_ip: None,
+                status: "active".into(),
+                me: false,
+            },
+        ];
+
+        let items = app.palette_items();
+        assert!(
+            items.iter().any(|(label, _)| label.contains("laptop")),
+            "peer should be offered: {:?}",
+            items.iter().map(|(label, _)| label).collect::<Vec<_>>()
+        );
+        assert!(
+            !items.iter().any(|(label, _)| label.contains("workstation")),
+            "this device must not be a target"
+        );
+
+        app.jobs = vec![job(1, JobState::Running { since_ms: now_ms() })];
+        app.switch_to("other".into());
+        assert_eq!(app.target, "other");
+        assert!(app.jobs.is_empty(), "switching must drop the old job list");
+        assert_eq!(app.log_cursor, 0);
+    }
+
+    #[test]
     fn selection_survives_refresh_order() {
-        let mut app = App::new("local".into());
+        let mut app = App::new(PathBuf::from("/tmp"), "local".into(), None);
         app.jobs = vec![
             job(1, JobState::Done {
                 at_ms: now_ms(),

@@ -111,11 +111,11 @@
   - `AgentHost::config(&self) -> AgentConfig`（`StoreHost` 每次请求重读 `agent.json`）
 - **conduit 运行时适配器**（`envoy_service::conduit`，纯 UDS + HTTP/WS，不依赖 `conduit-*`）：
   - `WsByteStream`：WebSocket Binary 帧 ↔ `AsyncRead + AsyncWrite`，写侧有 256 KiB 缓冲与背压，Close 即 EOF。
-  - `ConduitClient`：`/v1/status`、`/v1/devices`、`/v1/services/16/open/{target}`、`/v1/services/16/accept`，以及 `device_for_ip`（L3 反查）。
+  - `ConduitClient`：`/v1/status`、`/v1/devices`、`/v1/events`（watch 推送，驱动 TUI 的在线机器与 service 监听数）、`/v1/services/16/open/{target}`、`/v1/services/16/accept`，以及 `device_for_ip`（L3 反查）。
   - `ConduitDialer` 实现 `AgentDialer`：出站按 conduit 的解析顺序（device_id → dns_name → virtual_ip → 唯一设备名）寻址；`400/404/409/503` 的 JSON `error` 直接透传给 CLI。
   - `spawn_accept_pool(server, client, n)`：维持 n 条空闲 `/v1/services/16/accept` 连接；收到 `{"event":"accepted","peer_device_id":...}` 文本帧后包装为 `WsByteStream` 并 `tokio::spawn(server.serve_stream(&peer_device_id, stream))`，立即补位；conduit 未启动时指数退避静默重试，不影响本机 socket。
   - **身份来源**：`peer_device_id` 由 conduit 的 mTLS 严格认证，`agent.json` 的 allowlist 校验的就是它；本机同用户 socket 调用恒放行。
 - 服务端与客户端入口：
   - 服务端：`AgentServer::serve_stream(caller_id, stream)`（调用方应 `tokio::spawn`）
   - 客户端：`Remote<D>` 或流级函数 `open` / `submit` / `logs` / `cancel` / `read` / `write` / `list`
-- **旧 `envoy/bridge/` 已弃用**：它会链接 conduit crate 并启动第二个 `Engine`，与 `conduit run` 的单实例身份/TUN 冲突；待 control.sock 路径在真实 conduit 上验证后删除。
+- **旧 `envoy/bridge/` 已移除**：它会链接 conduit crate 并启动第二个 `Engine`，与 `conduit run` 的单实例身份/TUN 冲突。control.sock 路径已在本地 coord + 两台设备上真机验证。

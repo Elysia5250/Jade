@@ -193,10 +193,18 @@ envoy --on laptop cancel 3
 | 目标机离线 | `... refused: peer offline ... (503)` |
 | 目标机没跑 `envoy serve` | 对端 service 16 未注册，开流失败 |
 
-> 注意：conduit 侧的 `/v1/services/{id}/open|accept` 桥接是它的 Step 5，尚未落地。
-> 在此之前多机只能在 mock 下验证——见
-> `crates/envoy-service/tests/conduit_control.rs`（出站整链路、accept 交接与
-> allowlist、404/409 透传、status/devices 解析）。
+TUI 多机切换（conduit 已连接时）：
+
+```bash
+envoy ui
+# header 显示 "2 peer(s)"；ctrl+p → "Switch to laptop (…)" 回车即切目标
+# 切换后左下 job 列表清空，后续命令都发往新目标
+```
+
+> conduit 的 `/v1/services/{id}/open|accept` 与 `/v1/events` 已落地，本清单已在
+> 本地 coord + 两台设备上真机跑通。`crates/envoy-service/tests/conduit_control.rs`
+> 另外用 mock 覆盖出站整链路、accept 交接与 allowlist、404/409 透传、
+> status/devices 解析。
 
 ## D. 当前不该期待的行为
 
@@ -207,4 +215,4 @@ envoy --on laptop cancel 3
 - **只有一个默认并发组**：`--group` 可以分组，但每个组的并发上限目前都落到 `max_jobs`。
 - **L3 直连监听**（`--listen-vpn`）还没实现；目前只有 control.sock 的 WS 桥接。
 - **`envoy/bridge/` 已弃用**：它链接 conduit crate 并起第二个引擎，与 `conduit run` 冲突。
-- **control.sock 的真实端到端**要等 conduit Step 5；当前用 mock 覆盖契约。
+- **TUI 的机器列表来自 `/v1/devices` + `/v1/events`**；conduit 没起时只显示 `local`。

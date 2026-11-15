@@ -49,10 +49,9 @@ watch can live for minutes without blocking anything else.
   accept pool).
 - `envoy-cli` (`envoy`): daemon (`envoy serve`), job and file commands, the
   interactive console (`envoy ui`), and the stdio MCP server.
-- `bridge/` (`envoy-bridge`): **deprecated**. It links the conduit crates and
-  starts a second engine, which conflicts with `conduit run` owning the device
-  identity and TUN. Kept only until the control-socket path has been validated
-  against a real conduit; see [docs/CONDUIT-INTEGRATION.md](./docs/CONDUIT-INTEGRATION.md).
+The old `bridge/` crate (which linked the conduit crates and started a second
+engine) has been removed — it conflicts with `conduit run` owning the device
+identity and TUN. It remains in git history up to `55944b0`.
 
 ## Quick start
 
@@ -102,12 +101,14 @@ opencode's TUI, because that is the terminal idiom this repo already lives in:
 | `c` | cancel the selected job |
 | `f` | follow output (otherwise `pgup`/`pgdn`, `home`/`end` scroll) |
 | `r` | refresh now |
-| `ctrl+p` | command palette (new, cancel, follow, sidebar, theme, refresh, quit) |
+| `ctrl+p` | command palette: switch machine (from `/v1/devices`), new, cancel, follow, sidebar, theme, refresh, quit |
 | `ctrl+x` then `q`/`n`/`c`/`b`/`t`/`s` | leader shortcuts, as in opencode |
 | `q` / `ctrl+c` / `ctrl+d` | quit |
 
 It talks to the same daemon over the same short RPCs — a UI exit never affects
-a running job.
+a running job. When conduit is connected the header shows the live peer count
+and `ctrl+p` lists the account's other machines, so switching target is two
+keystrokes.
 
 ## MCP tools
 
@@ -175,10 +176,18 @@ How it is wired:
 - **Identity** — the allowlist therefore matches a device id conduit has
   already authenticated, not a caller-supplied string.
 - **Discovery** — `GET /v1/status` and `GET /v1/devices` drive `envoy status`
-  and `envoy devices`; `GET /v1/events` is the documented push channel.
+  and `envoy devices`. `GET /v1/events` feeds the TUI's live peer count and its
+  machine picker (peer online/offline, RTT, virtual ip, and `service 16`
+  listener counts).
 
 The control socket path comes from `--conduit-socket`, `CONDUIT_CONTROL_SOCK`,
 `$CONDUIT_DATA_DIR/control.sock`, or `~/.conduit/control.sock`.
+
+This path has been exercised end to end against the real thing: local
+`conduit-coord`, two devices joined into one account, two `conduit run
+--no-tun` daemons, two `envoy serve` instances, then `envoy --on <device> run`
+over the WebSocket bridge — including the mTLS caller id in the job owner and
+the allowlist refusal path.
 
 With TUN enabled you can additionally reach the same port over the virtual
 network. If you do, the source address must be mapped back through
@@ -194,7 +203,9 @@ cargo test --workspace
 The control-socket contract is covered by a mock `conduit` server
 (`crates/envoy-service/tests/conduit_control.rs`): outbound upgrade and a full
 job round trip, the accept pool with the handoff metadata and allowlist refusal,
-HTTP error propagation, and `/v1/status` + `/v1/devices` parsing.
+HTTP error propagation, and `/v1/status` + `/v1/devices` parsing. The real
+bridge is exercised manually with two local devices; see
+[docs/MANUAL-TEST.md](./docs/MANUAL-TEST.md#c-多机需要-conduit-run--账号).
 
 Covered end to end: submit returning before the child exits, a dropped watcher
 not killing its job, group queueing, cancel of running and queued jobs, state

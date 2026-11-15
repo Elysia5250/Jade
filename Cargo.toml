@@ -6,9 +6,6 @@ members = [
     "crates/envoy-service",
     "crates/envoy-cli",
 ]
-# The conduit bridge is a standalone crate: it depends on conduit, and neither
-# project may depend on the other. See bridge/README.md.
-exclude = ["bridge"]
 
 [workspace.package]
 version = "0.1.0"
