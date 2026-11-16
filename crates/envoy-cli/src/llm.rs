@@ -85,6 +85,10 @@ pub enum AgentEvent {
         messages: Vec<ChatMessage>,
         input_tokens: u64,
         output_tokens: u64,
+        /// Prompt size of the last model call. This is the context window fill,
+        /// not the sum of every step in the turn.
+        #[serde(default)]
+        context_tokens: u64,
     },
     TurnError(String),
 }
@@ -157,11 +161,12 @@ pub async fn run_agent_turn(cfg: TurnConfig, tx: mpsc::UnboundedSender<AgentEven
         model: model_label.clone(),
     });
     match execute_turn(cfg, &tx).await {
-        Ok((messages, input_tokens, output_tokens)) => {
+        Ok((messages, input_tokens, output_tokens, context_tokens)) => {
             let _ = tx.send(AgentEvent::TurnDone {
                 messages,
                 input_tokens,
                 output_tokens,
+                context_tokens,
             });
         }
         Err(e) => {
@@ -173,7 +178,7 @@ pub async fn run_agent_turn(cfg: TurnConfig, tx: mpsc::UnboundedSender<AgentEven
 async fn execute_turn(
     cfg: TurnConfig,
     tx: &mpsc::UnboundedSender<AgentEvent>,
-) -> Result<(Vec<ChatMessage>, u64, u64)> {
+) -> Result<(Vec<ChatMessage>, u64, u64, u64)> {
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(20))
         .build()?;
@@ -182,6 +187,8 @@ async fn execute_turn(
     let mut messages = cfg.history.clone();
     let mut total_in = 0u64;
     let mut total_out = 0u64;
+    #[allow(unused_assignments)]
+    let mut context_tokens = 0u64;
 
     if cfg.target == "local" || cfg.target.is_empty() {
         daemon::ensure(&cfg.data_dir).await?;
@@ -219,6 +226,7 @@ async fn execute_turn(
 
         total_in += reply.input_tokens;
         total_out += reply.output_tokens;
+        context_tokens = reply.input_tokens;
 
         let tool_calls = reply.tool_calls.clone();
         messages.push(ChatMessage {
@@ -235,7 +243,7 @@ async fn execute_turn(
         });
 
         if tool_calls.is_empty() {
-            return Ok((messages, total_in, total_out));
+            return Ok((messages, total_in, total_out, context_tokens));
         }
 
         for tc in tool_calls {

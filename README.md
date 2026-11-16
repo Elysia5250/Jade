@@ -105,18 +105,21 @@ through `sh -c`; multiple arguments are executed verbatim (no shell) unless
 
 ## Terminal console
 
-`envoy` / `envoy ui` follows `opencode`'s TUI layout and workflow:
+`envoy` / `envoy ui` is a quiet console. The transcript and the prompt are
+the screen. One status line is the only chrome.
 
-- **Home splash**: centered block-letter `envoy` wordmark, model/login hint,
-  and a prompt panel with a status line (`Build · model · target`).
+- **Status line**: mode (`agent` or `shell`), workspace, and — once a model is
+  connected — the model id plus how full its context window is (`50k/200k`
+  with an eight-cell bar). A remote target appears only when it is not
+  `local`. `offline` appears only when the daemon is unreachable. Shortcut
+  hints stay off the screen; `/help` and `ctrl+p` still list them.
 - **Inline transcript stream**: user prompts on a `▌` bar, streaming assistant
   Markdown replies, and tool/shell execution cards. `▸ Thinking` and tool
   output are collapsed by default; `ctrl+o` expands everything.
-- **Right sidebar** (hidden by default): session context (`dir`, `model`,
-  `mode`, `target`, token usage) and a live index of detached daemon jobs
-  (`ctrl+x b` or `/sidebar`).
+- **Right sidebar** (hidden by default): a live index of detached daemon jobs
+  (`ctrl+x b` or `/sidebar`). Session facts already live on the status line.
 - **Prompt panel**: `Shift+Enter` or `Ctrl+J` inserts a newline; `Tab` toggles
-  `Build` / `Shell` mode; `!cmd` always executes directly as a shell job.
+  `agent` / `shell` mode; `!cmd` always executes directly as a shell job.
 - **`/` command menu & `/cd` autocomplete**: type `/` to open the filterable
   command menu (`/login`, `/models`, `/cd`, `/machine`, `/sessions`, `/new`,
   `/mode`, `/expand`, `/sidebar`, `/theme`, `/help`, `/quit`); `/cd ` offers
@@ -161,8 +164,8 @@ of ANSI escapes before it reaches the transcript. Sessions are saved under
 `~/.envoy/sessions/` (`envoy -c` resumes the latest session for the current
 directory). It talks to the same daemon over
 short RPCs — a UI exit never affects a running job. When conduit is connected,
-the sidebar shows `agents/peers` and `/machine` / `ctrl+p` lists only peers
-advertising service 16.
+`/machine` and `ctrl+p` list only peers advertising service 16. The status
+line names the target when it is not `local`.
 
 ## MCP tools
 

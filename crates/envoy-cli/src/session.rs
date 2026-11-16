@@ -233,6 +233,9 @@ pub struct Session {
     pub input_tokens: u64,
     #[serde(default)]
     pub output_tokens: u64,
+    /// Last model call's prompt size. Drives the context-window meter.
+    #[serde(default)]
+    pub prompt_tokens: u64,
     #[serde(default)]
     pub next_item_id: u64,
     /// Last agent event applied to `items`; attach replays from here.
@@ -256,6 +259,7 @@ impl Session {
             updated_ms: now,
             input_tokens: 0,
             output_tokens: 0,
+            prompt_tokens: 0,
             next_item_id: 1,
             event_seq: 0,
             items: Vec::new(),
@@ -428,6 +432,7 @@ mod tests {
             }],
             input_tokens: 3,
             output_tokens: 4,
+            context_tokens: 3,
         };
         let bytes = postcard::to_stdvec(&event).unwrap();
         let back: crate::llm::AgentEvent = postcard::from_bytes(&bytes).unwrap();
@@ -436,10 +441,11 @@ mod tests {
                 messages,
                 input_tokens,
                 output_tokens,
+                context_tokens,
             } => {
                 assert_eq!(messages.len(), 1);
                 assert_eq!(messages[0].content, "hi");
-                assert_eq!((input_tokens, output_tokens), (3, 4));
+                assert_eq!((input_tokens, output_tokens, context_tokens), (3, 4, 3));
             }
             other => panic!("unexpected event: {other:?}"),
         }

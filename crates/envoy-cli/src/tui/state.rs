@@ -1,581 +1,8 @@
-//! `envoy`: opencode-style terminal console for Envoy.
-//!
-//! Layout & interaction mirror `opencode`:
-//! - Opens directly in the current directory with the prompt editor focused.
-//! - Home is a centered block-letter wordmark, model/login hint and a prompt
-//!   panel whose status row shows mode, model and target.
-//! - Main pane is an inline transcript stream of user prompts, streaming
-//!   assistant replies, and tool/shell cards. Reasoning and tool output are
-//!   collapsed by default; `ctrl+o` expands them.
-//! - The right sidebar (hidden by default) shows session context and detached
-//!   daemon jobs.
-//! - Turns live in the daemon; the console attaches to an event stream and
-//!   survives a lost connection instead of holding the turn in-process.
-//! - `/` opens the filterable command menu (`/login`, `/models`, `/cd` with
-//!   directory autocomplete, `/machine`, `/sessions`, `/new`, `/mode`, etc.).
-//! - `/login` provides an interactive wizard for API Keys, OAuth (ChatGPT
-//!   Plus/Pro PKCE & Device Flow, Anthropic Claude OAuth, GitHub Copilot
-//!   Device Flow), and custom OpenAI/Anthropic-compatible endpoints.
-
-use crate::auth::{
-    anthropic_authorize_url, available_models, bind_openai_callback_listener,
-    effective_providers, exchange_anthropic_code, exchange_openai_code, extract_query_param,
-    fetch_openai_models, generate_pkce, load_prefs, open_browser,
-    poll_github_copilot_device, poll_openai_device_auth, random_state, record_provider_login,
-    remove_provider, resolve_active_provider, save_prefs, set_active_model, slugify_provider_id,
-    start_github_copilot_device, start_openai_device_auth, wait_openai_browser_callback,
-    AuthMethodKind, AvailableModel, Credential, ModelRef, ProviderProtocol, StoredProvider,
-    BUILTIN_PROVIDERS,
-};
-use crate::daemon;
-use crate::llm::{AgentEvent, AskOption};
-use crate::runtime::{self, AgentReq, AgentResp, SendMode};
-use crate::session::{
-    delete_session, latest_session_for_cwd, list_sessions, load_session, save_session, CardStatus,
-    Session, SessionSummary, TranscriptItem,
-};
-use anyhow::{bail, Result};
-use envoy_proto::{Job, JobId, JobState, LogRecord, SubmitRequest, TaskSpec, DEFAULT_GROUP};
-use envoy_service::{default_control_socket, dialer_for, AgentDialer, ConduitClient, Remote, Status};
-use ratatui::backend::CrosstermBackend;
-use ratatui::crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-};
-use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
-use ratatui::{Frame, Terminal};
-use std::collections::{HashMap, VecDeque};
-use std::io::{stdout, IsTerminal, Stdout};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{mpsc, oneshot, watch};
-use tokio::task::JoinHandle;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-
-const LEADER_TIMEOUT: Duration = Duration::from_secs(2);
-
-type AnyDialer = Box<dyn AgentDialer>;
-
-pub async fn run(
-    data_dir: PathBuf,
-    target: String,
-    conduit: Option<PathBuf>,
-    cwd: PathBuf,
-    continue_last: bool,
-    session_id: Option<String>,
-) -> Result<()> {
-    if !stdout().is_terminal() {
-        bail!("`envoy` opens a console; use a subcommand for scripts (envoy jobs)");
-    }
-    if target == "local" || target.is_empty() {
-        daemon::ensure(&data_dir).await?;
-    }
-    let mut remote: Remote<AnyDialer> =
-        Remote::new(dialer_for(&data_dir, &target, conduit.clone()));
-
-    let mut app = App::new(data_dir.clone(), target.clone(), conduit.clone(), cwd.clone());
-    if let Some(id) = session_id {
-        if let Ok(loaded) = load_session(&data_dir, &id) {
-            app.load_existing_session(loaded);
-        }
-    } else if continue_last {
-        if let Some(loaded) = latest_session_for_cwd(&data_dir, &cwd) {
-            app.load_existing_session(loaded);
-        }
-    }
-
-    let client = ConduitClient::new(conduit.clone().unwrap_or_else(default_control_socket));
-    if let Ok(rx) = client.watch().await {
-        app.watch = Some(rx);
-    }
-
-    // The turn lives in the daemon; the console attaches to its stream.
-    app.spawn_agent_attach();
-
-    let mut tui = Tui::enter()?;
-    app.refresh(&remote).await;
-
-    loop {
-        while event::poll(Duration::ZERO)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                match app.handle_key(key) {
-                    Action::Quit => {
-                        app.persist_session();
-                        return Ok(());
-                    }
-                    Action::None => {}
-                    Action::SubmitShell(req) => app.submit_shell(&remote, req).await,
-                    Action::SubmitAgent(prompt) => app.submit_agent(prompt),
-                    Action::SubmitAgentFollowup(prompt) => app.queue_followup(prompt),
-                    Action::Cancel => app.cancel_active(&remote).await,
-                    Action::CancelJob(id) => app.cancel_job(&remote, id).await,
-                    Action::Refresh => app.refresh(&remote).await,
-                    Action::Switch(target) => {
-                        app.switch_to(target);
-                        if app.target == "local" {
-                            daemon::ensure(&app.data_dir).await?;
-                        }
-                        remote = Remote::new(dialer_for(
-                            &app.data_dir,
-                            &app.target,
-                            app.conduit.clone(),
-                        ));
-                        app.refresh(&remote).await;
-                    }
-                    Action::AttachJob(job) => app.attach_job_card(&remote, job).await,
-                }
-            }
-        }
-
-        app.drain_agent_events();
-        app.drain_ui_notices();
-        app.drain_login_events();
-        app.drain_model_events();
-
-        if app.agent_stream.is_none() && Instant::now() >= app.agent_retry_at {
-            app.spawn_agent_attach();
-        }
-
-        if app.last_refresh.elapsed() >= app.interval {
-            app.refresh(&remote).await;
-        }
-        app.poll_shell_cards(&remote).await;
-
-        let app_ref = &mut app;
-        tui.terminal.draw(|frame| draw(frame, app_ref))?;
-        tokio::time::sleep(Duration::from_millis(33)).await;
-    }
-}
-
-// --------------------------------------------------------------------- themes
-
-#[derive(Clone, Copy)]
-struct Theme {
-    accent: Color,
-    secondary: Color,
-    dim: Color,
-    text: Color,
-    ok: Color,
-    warn: Color,
-    bad: Color,
-    border: Color,
-    selection: Color,
-    surface: Color,
-    /// Full-screen background. Explicit so a transparent terminal or a
-    /// wallpaper cannot leak through as random colour bands.
-    bg: Color,
-    /// Sidebar/editor background, one step off `bg`.
-    panel: Color,
-}
-
-const THEMES: [(&str, Theme); 3] = [
-    (
-        "opencode",
-        Theme {
-            accent: Color::Rgb(0x9d, 0x7c, 0xd8),
-            secondary: Color::Rgb(0x7a, 0xa2, 0xf7),
-            dim: Color::Rgb(0x80, 0x84, 0x92),
-            text: Color::Rgb(0xd6, 0xd8, 0xe0),
-            ok: Color::Rgb(0x7f, 0xd8, 0x8f),
-            warn: Color::Rgb(0xf2, 0xc9, 0x4c),
-            bad: Color::Rgb(0xf2, 0x6b, 0x6b),
-            border: Color::Rgb(0x45, 0x47, 0x56),
-            selection: Color::Rgb(0x2d, 0x2a, 0x3e),
-            surface: Color::Rgb(0x1f, 0x20, 0x29),
-            bg: Color::Rgb(0x16, 0x17, 0x1d),
-            panel: Color::Rgb(0x1b, 0x1c, 0x24),
-        },
-    ),
-    (
-        "tokyonight",
-        Theme {
-            accent: Color::Rgb(0x7a, 0xa2, 0xf7),
-            secondary: Color::Rgb(0xbb, 0x9a, 0xf7),
-            dim: Color::Rgb(0x73, 0x7a, 0xa2),
-            text: Color::Rgb(0xc0, 0xca, 0xf5),
-            ok: Color::Rgb(0x9e, 0xce, 0x6a),
-            warn: Color::Rgb(0xe0, 0xaf, 0x68),
-            bad: Color::Rgb(0xf7, 0x76, 0x8e),
-            border: Color::Rgb(0x3b, 0x42, 0x61),
-            selection: Color::Rgb(0x28, 0x34, 0x57),
-            surface: Color::Rgb(0x1e, 0x20, 0x30),
-            bg: Color::Rgb(0x1a, 0x1b, 0x26),
-            panel: Color::Rgb(0x1f, 0x23, 0x35),
-        },
-    ),
-    (
-        "light",
-        Theme {
-            accent: Color::Rgb(0x3b, 0x5f, 0xc4),
-            secondary: Color::Rgb(0x6b, 0x46, 0xc1),
-            dim: Color::Rgb(0x66, 0x6a, 0x75),
-            text: Color::Rgb(0x24, 0x26, 0x2d),
-            ok: Color::Rgb(0x2f, 0x7d, 0x32),
-            warn: Color::Rgb(0x9a, 0x6b, 0x00),
-            bad: Color::Rgb(0xb3, 0x26, 0x1e),
-            border: Color::Rgb(0xb5, 0xb8, 0xc2),
-            selection: Color::Rgb(0xe4, 0xe7, 0xf2),
-            surface: Color::Rgb(0xf3, 0xf4, 0xf7),
-            bg: Color::Rgb(0xff, 0xff, 0xff),
-            panel: Color::Rgb(0xf5, 0xf6, 0xf9),
-        },
-    ),
-];
-
-// ----------------------------------------------------------------------- enums
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Focus {
-    Input,
-    Transcript,
-    Sidebar,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InputMode {
-    Agent,
-    Shell,
-}
-
-impl InputMode {
-    fn label(self) -> &'static str {
-        match self {
-            InputMode::Agent => "Agent",
-            InputMode::Shell => "Shell",
-        }
-    }
-}
-
-enum Action {
-    None,
-    Quit,
-    Refresh,
-    SubmitShell(SubmitRequest),
-    SubmitAgent(String),
-    SubmitAgentFollowup(String),
-    Cancel,
-    CancelJob(JobId),
-    Switch(String),
-    AttachJob(Job),
-}
-
-#[derive(Clone)]
-enum Command {
-    FocusInput,
-    OpenLogin,
-    OpenModels,
-    OpenSessions,
-    NewSession,
-    ToggleMode,
-    ToggleExpand,
-    Cancel,
-    ToggleSidebar,
-    NextTheme,
-    Refresh,
-    Switch(String),
-    Quit,
-}
-
-struct Picker {
-    title: String,
-    query: String,
-    items: Vec<(String, Command)>,
-    selected: usize,
-}
-
-struct SlashCommand {
-    name: &'static str,
-    aliases: &'static [&'static str],
-    args: &'static str,
-    about: &'static str,
-}
-
-const SLASH_COMMANDS: &[SlashCommand] = &[
-    SlashCommand {
-        name: "login",
-        aliases: &["connect"],
-        args: "",
-        about: "configure API Key or OAuth subscription",
-    },
-    SlashCommand {
-        name: "models",
-        aliases: &["model"],
-        args: "[id]",
-        about: "switch active LLM model",
-    },
-    SlashCommand {
-        name: "logout",
-        aliases: &[],
-        args: "[provider]",
-        about: "remove a saved provider credential",
-    },
-    SlashCommand {
-        name: "mode",
-        aliases: &[],
-        args: "",
-        about: "switch between Agent and Shell mode",
-    },
-    SlashCommand {
-        name: "cd",
-        aliases: &[],
-        args: "<dir>",
-        about: "change working directory (with path completion)",
-    },
-    SlashCommand {
-        name: "machine",
-        aliases: &["machines"],
-        args: "[name]",
-        about: "switch target machine (local or conduit peer)",
-    },
-    SlashCommand {
-        name: "new",
-        aliases: &[],
-        args: "",
-        about: "start a new session",
-    },
-    SlashCommand {
-        name: "sessions",
-        aliases: &["resume"],
-        args: "",
-        about: "list or switch saved sessions",
-    },
-    SlashCommand {
-        name: "expand",
-        aliases: &[],
-        args: "",
-        about: "expand or collapse tool output cards",
-    },
-    SlashCommand {
-        name: "sidebar",
-        aliases: &[],
-        args: "",
-        about: "toggle the right sidebar",
-    },
-    SlashCommand {
-        name: "cancel",
-        aliases: &[],
-        args: "",
-        about: "cancel active turn or selected job",
-    },
-    SlashCommand {
-        name: "clear",
-        aliases: &[],
-        args: "",
-        about: "clear current transcript",
-    },
-    SlashCommand {
-        name: "theme",
-        aliases: &["themes"],
-        args: "",
-        about: "switch colour theme",
-    },
-    SlashCommand {
-        name: "help",
-        aliases: &[],
-        args: "",
-        about: "show key bindings & commands",
-    },
-    SlashCommand {
-        name: "quit",
-        aliases: &["exit", "q"],
-        args: "",
-        about: "exit envoy",
-    },
-];
-
-// ------------------------------------------------------------------ /login modal
-
-enum LoginEvent {
-    Success(StoredProvider, Option<String>),
-    Error(String),
-    OpenAiDeviceStarted {
-        verification_url: String,
-        user_code: String,
-    },
-    GitHubDeviceStarted {
-        verification_uri: String,
-        user_code: String,
-    },
-}
-
-enum LoginModal {
-    SelectProvider {
-        filter: String,
-        selected: usize,
-    },
-    SelectMethod {
-        provider_idx: usize,
-        selected: usize,
-    },
-    ApiKeyForm {
-        provider_idx: usize,
-        key: String,
-        base_url: String,
-        model: String,
-        focus_field: usize,
-        reveal: bool,
-        error: Option<String>,
-    },
-    CustomForm {
-        protocol_idx: usize,
-        name: String,
-        base_url: String,
-        key: String,
-        model: String,
-        focus_field: usize,
-        error: Option<String>,
-    },
-    OAuthBrowser {
-        provider_name: String,
-        url: String,
-        redirect_uri: String,
-        verifier: String,
-        pasted: String,
-        status: String,
-        busy: bool,
-        error: Option<String>,
-    },
-    OAuthCodePaste {
-        provider_name: String,
-        url: String,
-        verifier: String,
-        state: String,
-        console: bool,
-        code_input: String,
-        busy: bool,
-        error: Option<String>,
-    },
-    OAuthDevice {
-        provider_name: String,
-        verification_uri: String,
-        user_code: String,
-        status: String,
-        error: Option<String>,
-    },
-}
-
-struct ModelsModal {
-    filter: String,
-    selected: usize,
-    models: Vec<AvailableModel>,
-    fetching: bool,
-}
-
-struct SessionsModal {
-    sessions: Vec<SessionSummary>,
-    selected: usize,
-}
-
-enum Modal {
-    Picker(Picker),
-    Login(LoginModal),
-    Models(ModelsModal),
-    Sessions(SessionsModal),
-}
-
-// ------------------------------------------------------------------ live shell watch
-
-struct ShellWatch {
-    item_id: u64,
-    job_id: JobId,
-    cursor: u64,
-    partial_out: Vec<u8>,
-    partial_err: Vec<u8>,
-    started: Instant,
-}
-
-// ------------------------------------------------------------------ App
-
-enum UiNotice {
-    /// A send failed because the daemon went away; put the items back in the
-    /// outbox so the next attach can deliver them.
-    Requeue(Vec<(String, SendMode)>),
-    /// The daemon returned a recalled follow-up (or had none).
-    Recalled(Option<String>),
-}
-
-struct PendingAsk {
-    id: u64,
-    question: String,
-    options: Vec<AskOption>,
-    recommended: usize,
-    selected: usize,
-    deadline: Instant,
-}
-
-struct App {
-    data_dir: PathBuf,
-    conduit: Option<PathBuf>,
-    target: String,
-    status: Option<Status>,
-    watch: Option<watch::Receiver<Option<Status>>>,
-    jobs: Vec<Job>,
-    job_selected: usize,
-
-    session: Session,
-    focus: Focus,
-    mode: InputMode,
-    show_sidebar: bool,
-    follow: bool,
-    transcript_scroll: u16,
-    transcript_height: u16,
-    transcript_max_scroll: u16,
-    selected_card: Option<usize>,
-
-    input: String,
-    input_cursor: usize,
-    history: Vec<String>,
-    history_pos: Option<usize>,
-    menu_selected: usize,
-
-    modal: Option<Modal>,
-    theme: usize,
-    leader_at: Option<Instant>,
-    toast: Option<(String, bool, Instant)>,
-    connected: bool,
-    interval: Duration,
-    last_refresh: Instant,
-
-    // Active agent turn
-    agent_running: bool,
-    agent_stream: Option<mpsc::UnboundedReceiver<AgentResp>>,
-    agent_retry_at: Instant,
-    agent_offline: bool,
-    /// True after the daemon has sent the attach snapshot. Until then sends
-    /// are held in the outbox so they cannot race the session creation.
-    agent_ready: bool,
-    pending_ask: Option<PendingAsk>,
-    queued: VecDeque<String>,
-    outbox: VecDeque<(String, SendMode)>,
-    notice_tx: mpsc::UnboundedSender<UiNotice>,
-    notice_rx: mpsc::UnboundedReceiver<UiNotice>,
-    active_assistant_id: Option<u64>,
-    active_tool_items: HashMap<String, u64>,
-
-    // Active shell cards being tailed
-    shell_watches: Vec<ShellWatch>,
-
-    // Active /login background flow
-    login_rx: Option<mpsc::UnboundedReceiver<LoginEvent>>,
-    login_task: Option<JoinHandle<()>>,
-    login_cancel: Option<oneshot::Sender<()>>,
-
-    // Remote /models fetch
-    models_rx: Option<oneshot::Receiver<Vec<String>>>,
-}
+//! Console state: input, sessions, login, and the agent event stream.
+use super::*;
 
 impl App {
-    fn new(data_dir: PathBuf, target: String, conduit: Option<PathBuf>, cwd: PathBuf) -> Self {
+    pub(super) fn new(data_dir: PathBuf, target: String, conduit: Option<PathBuf>, cwd: PathBuf) -> Self {
         let prefs = load_prefs(&data_dir);
         let has_provider = resolve_active_provider(&data_dir).is_some();
         let mode = if has_provider {
@@ -634,11 +61,11 @@ impl App {
         }
     }
 
-    fn theme(&self) -> Theme {
+    pub(super) fn theme(&self) -> Theme {
         THEMES[self.theme].1
     }
 
-    fn load_existing_session(&mut self, loaded: Session) {
+    pub(super) fn load_existing_session(&mut self, loaded: Session) {
         self.persist_session();
         if loaded.cwd.is_dir() {
             self.session_cwd_set(loaded.cwd.clone());
@@ -649,7 +76,7 @@ impl App {
         self.reset_agent_view();
     }
 
-    fn reset_agent_view(&mut self) {
+    pub(super) fn reset_agent_view(&mut self) {
         self.agent_running = false;
         self.active_assistant_id = None;
         self.active_tool_items.clear();
@@ -663,7 +90,7 @@ impl App {
 
     /// Connect (or reconnect) to the daemon session. The replay cursor comes
     /// from the last event applied to the local transcript.
-    fn spawn_agent_attach(&mut self) {
+    pub(super) fn spawn_agent_attach(&mut self) {
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(runtime::attach(
             self.data_dir.clone(),
@@ -682,7 +109,7 @@ impl App {
     /// Rebuild the in-flight view after an attach. Events before the cursor
     /// are not replayed, so find the open assistant/tool items in the
     /// persisted transcript.
-    fn resume_active_view(&mut self) {
+    pub(super) fn resume_active_view(&mut self) {
         self.active_assistant_id = self
             .session
             .items
@@ -706,26 +133,26 @@ impl App {
         }
     }
 
-    fn session_cwd_set(&mut self, cwd: PathBuf) {
+    pub(super) fn session_cwd_set(&mut self, cwd: PathBuf) {
         self.session.cwd = cwd;
     }
 
-    fn persist_session(&self) {
+    pub(super) fn persist_session(&self) {
         let _ = save_session(&self.data_dir, &self.session);
     }
 
-    fn save_ui_prefs(&self) {
+    pub(super) fn save_ui_prefs(&self) {
         let mut prefs = load_prefs(&self.data_dir);
         prefs.theme = self.theme;
         prefs.show_sidebar = self.show_sidebar;
         let _ = save_prefs(&self.data_dir, &prefs);
     }
 
-    fn set_toast(&mut self, msg: impl Into<String>, err: bool) {
+    pub(super) fn set_toast(&mut self, msg: impl Into<String>, err: bool) {
         self.toast = Some((msg.into(), err, Instant::now()));
     }
 
-    fn active_toast(&self) -> Option<(&str, bool)> {
+    pub(super) fn active_toast(&self) -> Option<(&str, bool)> {
         let (msg, err, at) = self.toast.as_ref()?;
         if at.elapsed() < Duration::from_secs(6) {
             Some((msg.as_str(), *err))
@@ -734,7 +161,7 @@ impl App {
         }
     }
 
-    fn push_notice(&mut self, text: impl Into<String>, is_error: bool) {
+    pub(super) fn push_notice(&mut self, text: impl Into<String>, is_error: bool) {
         let id = self.session.alloc_id();
         self.session.items.push(TranscriptItem::Notice {
             id,
@@ -745,18 +172,18 @@ impl App {
         self.follow = true;
     }
 
-    fn cwd_label(&self) -> String {
+    pub(super) fn cwd_label(&self) -> String {
         collapse_home(&self.session.cwd)
     }
 
-    fn own_device_id(&self) -> String {
+    pub(super) fn own_device_id(&self) -> String {
         self.status
             .as_ref()
             .map(|s| s.device_id.clone())
             .unwrap_or_default()
     }
 
-    async fn refresh(&mut self, remote: &Remote<AnyDialer>) {
+    pub(super) async fn refresh(&mut self, remote: &Remote<AnyDialer>) {
         self.last_refresh = Instant::now();
         if let Some(watch) = &self.watch {
             if let Some(status) = watch.borrow().clone() {
@@ -783,7 +210,7 @@ impl App {
         }
     }
 
-    async fn submit_shell(&mut self, remote: &Remote<AnyDialer>, req: SubmitRequest) {
+    pub(super) async fn submit_shell(&mut self, remote: &Remote<AnyDialer>, req: SubmitRequest) {
         let command = req.spec.display();
         self.session.maybe_set_title_from(&format!("$ {command}"));
         let user_id = self.session.alloc_id();
@@ -832,7 +259,7 @@ impl App {
         }
     }
 
-    async fn attach_job_card(&mut self, remote: &Remote<AnyDialer>, job: Job) {
+    pub(super) async fn attach_job_card(&mut self, remote: &Remote<AnyDialer>, job: Job) {
         // If this job already has a card in the transcript, uncollapse and jump to it.
         if let Some(pos) = self.session.items.iter().position(|it| {
             matches!(it, TranscriptItem::Tool { job_id: Some(id), .. } if *id == job.id)
@@ -882,7 +309,7 @@ impl App {
         self.follow = true;
     }
 
-    async fn poll_shell_cards(&mut self, remote: &Remote<AnyDialer>) {
+    pub(super) async fn poll_shell_cards(&mut self, remote: &Remote<AnyDialer>) {
         if self.shell_watches.is_empty() {
             return;
         }
@@ -898,7 +325,7 @@ impl App {
         self.shell_watches = still_running;
     }
 
-    async fn poll_one_watch(
+    pub(super) async fn poll_one_watch(
         remote: &Remote<AnyDialer>,
         target: &str,
         session: &mut Session,
@@ -976,7 +403,7 @@ impl App {
 
     /// Send while connected, otherwise hold the prompt until an attach
     /// succeeds so a daemon restart does not eat what the user typed.
-    fn send_agent(&mut self, text: String, mode: SendMode) {
+    pub(super) fn send_agent(&mut self, text: String, mode: SendMode) {
         if !self.agent_ready || self.agent_offline || self.agent_stream.is_none() {
             self.outbox.push_back((text, mode));
             if self.agent_offline || self.agent_stream.is_none() {
@@ -987,7 +414,7 @@ impl App {
         self.dispatch_agent(vec![(text, mode)]);
     }
 
-    fn dispatch_agent(&self, items: Vec<(String, SendMode)>) {
+    pub(super) fn dispatch_agent(&self, items: Vec<(String, SendMode)>) {
         if items.is_empty() {
             return;
         }
@@ -1015,7 +442,7 @@ impl App {
         });
     }
 
-    fn flush_outbox(&mut self) {
+    pub(super) fn flush_outbox(&mut self) {
         if self.outbox.is_empty() {
             return;
         }
@@ -1023,13 +450,13 @@ impl App {
         self.dispatch_agent(items);
     }
 
-    fn remove_outbox(&mut self, text: &str) {
+    pub(super) fn remove_outbox(&mut self, text: &str) {
         if let Some(pos) = self.outbox.iter().rposition(|(t, _)| t == text) {
             self.outbox.remove(pos);
         }
     }
 
-    fn recall_queued(&self) {
+    pub(super) fn recall_queued(&self) {
         if self.agent_offline || self.agent_stream.is_none() {
             return;
         }
@@ -1045,7 +472,7 @@ impl App {
         });
     }
 
-    fn drain_ui_notices(&mut self) {
+    pub(super) fn drain_ui_notices(&mut self) {
         let mut notices = Vec::new();
         while let Ok(notice) = self.notice_rx.try_recv() {
             notices.push(notice);
@@ -1074,7 +501,7 @@ impl App {
         }
     }
 
-    fn start_agent_turn(&mut self, prompt: String) {
+    pub(super) fn start_agent_turn(&mut self, prompt: String) {
         self.follow = true;
         if !self.agent_offline && self.agent_stream.is_some() {
             self.agent_running = true;
@@ -1082,7 +509,7 @@ impl App {
         self.send_agent(prompt, SendMode::Prompt);
     }
 
-    fn drain_agent_events(&mut self) {
+    pub(super) fn drain_agent_events(&mut self) {
         let mut disconnected = false;
         loop {
             let message = {
@@ -1141,7 +568,7 @@ impl App {
         }
     }
 
-    fn apply_event(&mut self, seq: u64, event: AgentEvent) {
+    pub(super) fn apply_event(&mut self, seq: u64, event: AgentEvent) {
         self.session.event_seq = seq;
         match event {
             AgentEvent::SessionReset => {
@@ -1315,6 +742,7 @@ impl App {
                 messages,
                 input_tokens,
                 output_tokens,
+                context_tokens,
             } => {
                 if let Some(id) = self.active_assistant_id {
                     if let Some(TranscriptItem::Assistant { done, .. }) =
@@ -1326,6 +754,9 @@ impl App {
                 self.session.messages = messages;
                 self.session.input_tokens += input_tokens;
                 self.session.output_tokens += output_tokens;
+                if context_tokens > 0 {
+                    self.session.prompt_tokens = context_tokens;
+                }
                 self.session.touch();
                 self.persist_session();
                 self.agent_running = false;
@@ -1356,7 +787,7 @@ impl App {
 
     /// Enter while idle starts a turn; while running it steers the loop with
     /// the user's exact words at the next tool boundary.
-    fn submit_agent(&mut self, prompt: String) {
+    pub(super) fn submit_agent(&mut self, prompt: String) {
         let was_running = self.agent_running;
         // Always `Prompt`: the daemon starts a turn when idle and steers the
         // live one otherwise. Keeping the decision on the server side means a
@@ -1368,13 +799,13 @@ impl App {
     }
 
     /// Alt+Enter: deliver after the current run finishes.
-    fn queue_followup(&mut self, prompt: String) {
+    pub(super) fn queue_followup(&mut self, prompt: String) {
         self.send_agent(prompt.clone(), SendMode::FollowUp);
         self.queued.push_back(prompt);
         self.set_toast("follow-up queued", false);
     }
 
-    fn answer_ask(&self, ask_id: u64, label: String) {
+    pub(super) fn answer_ask(&self, ask_id: u64, label: String) {
         let data_dir = self.data_dir.clone();
         let id = self.session.id.clone();
         tokio::spawn(async move {
@@ -1390,7 +821,7 @@ impl App {
         });
     }
 
-    fn handle_ask_key(&mut self, key: KeyEvent) -> Action {
+    pub(super) fn handle_ask_key(&mut self, key: KeyEvent) -> Action {
         let Some(mut ask) = self.pending_ask.take() else {
             return Action::None;
         };
@@ -1423,7 +854,7 @@ impl App {
         Action::None
     }
 
-    fn interrupt_agent(&self) {
+    pub(super) fn interrupt_agent(&self) {
         let data_dir = self.data_dir.clone();
         let id = self.session.id.clone();
         tokio::spawn(async move {
@@ -1431,7 +862,7 @@ impl App {
         });
     }
 
-    async fn cancel_active(&mut self, remote: &Remote<AnyDialer>) {
+    pub(super) async fn cancel_active(&mut self, remote: &Remote<AnyDialer>) {
         if self.agent_running {
             self.interrupt_agent();
             self.agent_running = false;
@@ -1475,7 +906,7 @@ impl App {
         }
     }
 
-    async fn cancel_job(&mut self, remote: &Remote<AnyDialer>, id: JobId) {
+    pub(super) async fn cancel_job(&mut self, remote: &Remote<AnyDialer>, id: JobId) {
         match remote.cancel(&self.target, id).await {
             Ok(()) => self.set_toast(format!("cancel requested for #{id}"), false),
             Err(e) => self.set_toast(format!("{e:#}"), true),
@@ -1483,7 +914,7 @@ impl App {
         self.refresh(remote).await;
     }
 
-    fn switch_to(&mut self, target: String) {
+    pub(super) fn switch_to(&mut self, target: String) {
         self.target = target.clone();
         self.session.target = target.clone();
         self.jobs.clear();
@@ -1495,7 +926,7 @@ impl App {
     // ------------------------------------------------------------------ slash & autocomplete
 
     /// Returns either matching slash commands OR `/cd` directory completions.
-    fn slash_query(&self) -> Option<&str> {
+    pub(super) fn slash_query(&self) -> Option<&str> {
         if !self.input.starts_with('/') || self.input.contains('\n') {
             return None;
         }
@@ -1506,7 +937,7 @@ impl App {
         Some(rest)
     }
 
-    fn filtered_slash(&self) -> Vec<&'static SlashCommand> {
+    pub(super) fn filtered_slash(&self) -> Vec<&'static SlashCommand> {
         let Some(query) = self.slash_query() else {
             return Vec::new();
         };
@@ -1521,14 +952,14 @@ impl App {
             .collect()
     }
 
-    fn cd_query(&self) -> Option<&str> {
+    pub(super) fn cd_query(&self) -> Option<&str> {
         if self.input.contains('\n') {
             return None;
         }
         self.input.strip_prefix("/cd ")
     }
 
-    fn cd_completions(&self) -> Vec<(String, String)> {
+    pub(super) fn cd_completions(&self) -> Vec<(String, String)> {
         let Some(raw) = self.cd_query() else {
             return Vec::new();
         };
@@ -1537,7 +968,7 @@ impl App {
 
     // ------------------------------------------------------------------ /login flow
 
-    fn open_login_modal(&mut self) {
+    pub(super) fn open_login_modal(&mut self) {
         self.cancel_login_bg();
         self.modal = Some(Modal::Login(LoginModal::SelectProvider {
             filter: String::new(),
@@ -1545,7 +976,7 @@ impl App {
         }));
     }
 
-    fn filtered_login_providers(&self, filter: &str) -> Vec<(usize, &'static crate::auth::BuiltinProvider)> {
+    pub(super) fn filtered_login_providers(&self, filter: &str) -> Vec<(usize, &'static crate::auth::BuiltinProvider)> {
         let q = filter.trim().to_ascii_lowercase();
         BUILTIN_PROVIDERS
             .iter()
@@ -1559,7 +990,7 @@ impl App {
             .collect()
     }
 
-    fn cancel_login_bg(&mut self) {
+    pub(super) fn cancel_login_bg(&mut self) {
         if let Some(tx) = self.login_cancel.take() {
             let _ = tx.send(());
         }
@@ -1569,7 +1000,7 @@ impl App {
         self.login_rx = None;
     }
 
-    fn start_login_method(&mut self, provider_idx: usize, method_idx: usize) {
+    pub(super) fn start_login_method(&mut self, provider_idx: usize, method_idx: usize) {
         let prov = &BUILTIN_PROVIDERS[provider_idx];
         let method = prov.methods[method_idx];
         match method.kind {
@@ -1772,7 +1203,7 @@ impl App {
         }
     }
 
-    fn drain_login_events(&mut self) {
+    pub(super) fn drain_login_events(&mut self) {
         let Some(mut rx) = self.login_rx.take() else {
             return;
         };
@@ -1863,7 +1294,7 @@ impl App {
         }
     }
 
-    fn open_models_modal(&mut self) {
+    pub(super) fn open_models_modal(&mut self) {
         let models = available_models(&self.data_dir);
         if models.is_empty() {
             self.set_toast("no providers connected — run /login first", true);
@@ -1894,7 +1325,7 @@ impl App {
         }));
     }
 
-    fn drain_model_events(&mut self) {
+    pub(super) fn drain_model_events(&mut self) {
         let Some(mut rx) = self.models_rx.take() else {
             return;
         };
@@ -1927,7 +1358,7 @@ impl App {
         }
     }
 
-    fn open_sessions_modal(&mut self) {
+    pub(super) fn open_sessions_modal(&mut self) {
         self.persist_session();
         let sessions = list_sessions(&self.data_dir);
         self.modal = Some(Modal::Sessions(SessionsModal {
@@ -1938,7 +1369,7 @@ impl App {
 
     // ------------------------------------------------------------------ command & palette
 
-    fn open_picker(&mut self, title: &str, items: Vec<(String, Command)>) {
+    pub(super) fn open_picker(&mut self, title: &str, items: Vec<(String, Command)>) {
         self.modal = Some(Modal::Picker(Picker {
             title: title.to_string(),
             query: String::new(),
@@ -1947,7 +1378,7 @@ impl App {
         }));
     }
 
-    fn machine_items(&self) -> Vec<(String, Command)> {
+    pub(super) fn machine_items(&self) -> Vec<(String, Command)> {
         let mut items = Vec::new();
         for peer in self
             .status
@@ -1977,7 +1408,7 @@ impl App {
         items
     }
 
-    fn command_items(&self) -> Vec<(String, Command)> {
+    pub(super) fn command_items(&self) -> Vec<(String, Command)> {
         let mut items = vec![
             (
                 "Connect provider / Login (API Key or OAuth)".to_string(),
@@ -2032,7 +1463,7 @@ impl App {
         items
     }
 
-    fn run_command(&mut self, command: Command) -> Action {
+    pub(super) fn run_command(&mut self, command: Command) -> Action {
         match command {
             Command::FocusInput => {
                 self.focus = Focus::Input;
@@ -2090,7 +1521,7 @@ impl App {
         }
     }
 
-    fn toggle_expand_cards(&mut self) {
+    pub(super) fn toggle_expand_cards(&mut self) {
         if let Some(idx) = self.selected_card {
             if let Some(item) = self.session.items.get_mut(idx) {
                 match item {
@@ -2129,7 +1560,7 @@ impl App {
         self.persist_session();
     }
 
-    fn run_slash(&mut self, text: &str) -> Action {
+    pub(super) fn run_slash(&mut self, text: &str) -> Action {
         let body = text.trim_start_matches('/').trim();
         let (name, arg) = match body.split_once(char::is_whitespace) {
             Some((name, arg)) => (name, arg.trim()),
@@ -2270,7 +1701,7 @@ impl App {
 
     // ------------------------------------------------------------------ key handling
 
-    fn handle_key(&mut self, key: KeyEvent) -> Action {
+    pub(super) fn handle_key(&mut self, key: KeyEvent) -> Action {
         if self.modal.is_some() {
             return self.handle_modal_key(key);
         }
@@ -2498,7 +1929,7 @@ impl App {
         }
     }
 
-    fn handle_input_key(&mut self, key: KeyEvent) -> Action {
+    pub(super) fn handle_input_key(&mut self, key: KeyEvent) -> Action {
         // 1. `/cd <dir>` directory completion popup
         let cd_dirs = self.cd_completions();
         if !cd_dirs.is_empty() {
@@ -2757,7 +2188,7 @@ impl App {
         }
     }
 
-    fn handle_modal_key(&mut self, key: KeyEvent) -> Action {
+    pub(super) fn handle_modal_key(&mut self, key: KeyEvent) -> Action {
         let Some(modal) = self.modal.take() else {
             return Action::None;
         };
@@ -2895,7 +2326,7 @@ impl App {
         }
     }
 
-    fn handle_login_key(&mut self, login: LoginModal, key: KeyEvent) {
+    pub(super) fn handle_login_key(&mut self, login: LoginModal, key: KeyEvent) {
         if key.code == KeyCode::Esc {
             self.cancel_login_bg();
             return;
@@ -3309,14 +2740,14 @@ impl App {
 
     // ------------------------------------------------------------------ editor cursor helpers
 
-    fn insert_char(&mut self, c: char) {
+    pub(super) fn insert_char(&mut self, c: char) {
         let at = self.byte_index(self.input_cursor);
         self.input.insert(at, c);
         self.input_cursor += 1;
         self.menu_selected = 0;
     }
 
-    fn delete_before_cursor(&mut self) {
+    pub(super) fn delete_before_cursor(&mut self) {
         if self.input_cursor == 0 {
             return;
         }
@@ -3326,7 +2757,7 @@ impl App {
         self.menu_selected = 0;
     }
 
-    fn delete_at_cursor(&mut self) {
+    pub(super) fn delete_at_cursor(&mut self) {
         if self.input_cursor >= self.input.chars().count() {
             return;
         }
@@ -3335,7 +2766,7 @@ impl App {
         self.menu_selected = 0;
     }
 
-    fn byte_index(&self, chars: usize) -> usize {
+    pub(super) fn byte_index(&self, chars: usize) -> usize {
         self.input
             .char_indices()
             .nth(chars)
@@ -3343,7 +2774,7 @@ impl App {
             .unwrap_or(self.input.len())
     }
 
-    fn line_start_char(&self, cursor: usize) -> usize {
+    pub(super) fn line_start_char(&self, cursor: usize) -> usize {
         let chars: Vec<char> = self.input.chars().collect();
         let mut i = cursor.min(chars.len());
         while i > 0 && chars[i - 1] != '\n' {
@@ -3352,7 +2783,7 @@ impl App {
         i
     }
 
-    fn line_end_char(&self, cursor: usize) -> usize {
+    pub(super) fn line_end_char(&self, cursor: usize) -> usize {
         let chars: Vec<char> = self.input.chars().collect();
         let mut i = cursor.min(chars.len());
         while i < chars.len() && chars[i] != '\n' {
@@ -3361,7 +2792,7 @@ impl App {
         i
     }
 
-    fn move_cursor_vertical(&mut self, delta: isize) -> bool {
+    pub(super) fn move_cursor_vertical(&mut self, delta: isize) -> bool {
         let chars: Vec<char> = self.input.chars().collect();
         let cur_start = self.line_start_char(self.input_cursor);
         let col = self.input_cursor - cur_start;
@@ -3399,2314 +2830,3 @@ fn openai_url_preview(redirect_uri: &str, challenge: &str, state: &str) -> Strin
     )
 }
 
-fn collapse_home(path: &Path) -> String {
-    let home = std::env::var("HOME").ok();
-    let text = path.display().to_string();
-    match home {
-        Some(home) if text == home => "~".to_string(),
-        Some(home) if text.starts_with(&format!("{home}/")) => {
-            format!("~{}", &text[home.len()..])
-        }
-        _ => text,
-    }
-}
-
-fn resolve_cd_path(cwd: &Path, raw: &str) -> PathBuf {
-    if raw == "~" {
-        return PathBuf::from(std::env::var("HOME").unwrap_or_default());
-    }
-    if let Some(tail) = raw.strip_prefix("~/") {
-        return PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(tail);
-    }
-    let p = PathBuf::from(raw);
-    if p.is_absolute() {
-        p
-    } else {
-        cwd.join(p)
-    }
-}
-
-/// Directory autocomplete entries for `/cd <arg>`: returns `(display, completion_arg)`.
-pub fn complete_directories(cwd: &Path, raw: &str) -> Vec<(String, String)> {
-    let expanded_prefix = if raw == "~" || raw.starts_with("~/") {
-        let home = std::env::var("HOME").unwrap_or_default();
-        if raw == "~" {
-            format!("{home}/")
-        } else {
-            format!("{home}/{}", &raw[2..])
-        }
-    } else {
-        raw.to_string()
-    };
-
-    let (dir_to_read, name_prefix, arg_dir_prefix) = if raw.is_empty() {
-        (cwd.to_path_buf(), String::new(), String::new())
-    } else if raw.ends_with('/') {
-        let dir = resolve_cd_path(cwd, raw);
-        (dir, String::new(), raw.to_string())
-    } else if let Some(idx) = raw.rfind('/') {
-        let parent_raw = &raw[..=idx];
-        let dir = resolve_cd_path(cwd, parent_raw);
-        (dir, raw[idx + 1..].to_string(), parent_raw.to_string())
-    } else {
-        let _ = expanded_prefix;
-        (cwd.to_path_buf(), raw.to_string(), String::new())
-    };
-
-    let Ok(entries) = std::fs::read_dir(&dir_to_read) else {
-        return Vec::new();
-    };
-    let mut dirs = Vec::new();
-    for entry in entries.flatten() {
-        let Ok(ft) = entry.file_type() else {
-            continue;
-        };
-        let is_dir = ft.is_dir() || (ft.is_symlink() && entry.path().is_dir());
-        if !is_dir {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') && !name_prefix.starts_with('.') {
-            continue;
-        }
-        if !name_prefix.is_empty() && !name.starts_with(&name_prefix) {
-            continue;
-        }
-        let completed = format!("{arg_dir_prefix}{name}/");
-        dirs.push((format!("{name}/"), completed));
-    }
-    dirs.sort_by(|a, b| a.0.cmp(&b.0));
-    dirs.truncate(10);
-    dirs
-}
-
-// ------------------------------------------------------------------ drawing
-
-fn draw(frame: &mut Frame, app: &mut App) {
-    let theme = app.theme();
-    let area = frame.area();
-    // Opaque base: every cell gets a background before any pane draws.
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme.bg)),
-        area,
-    );
-
-    // The editor is a soft panel with a single accent bar on its left, like
-    // opencode's prompt. It keeps the last row for mode/model/status.
-    let editor_inner_width = area.width.saturating_sub(8).max(10) as usize;
-    let (visual_lines, cursor_row, cursor_col) =
-        layout_editor_text(&app.input, app.input_cursor, editor_inner_width);
-    let editor_height = ((visual_lines.len().clamp(1, 6)) as u16) + 2;
-
-    // The sidebar gets its own full-height column so the prompt never runs
-    // underneath it. Everything else is a centered reading column.
-    let (main_area, sidebar_area) = if app.show_sidebar && area.width >= 100 {
-        let halves = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(48), Constraint::Length(34)])
-            .split(area);
-        // One blank column between the prompt column and the sidebar border.
-        let mut main = halves[0];
-        main.width = main.width.saturating_sub(1);
-        (main, Some(halves[1]))
-    } else {
-        (area, None)
-    };
-    let column = centered_column(main_area, 104);
-
-    // On the home screen the splash and prompt sit together in the upper
-    // half, like opencode; a live transcript keeps the prompt docked at the
-    // bottom.
-    let home = app.session.items.is_empty();
-    let chunks = if home {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Fill(2),
-                Constraint::Length(editor_height),
-                Constraint::Length(1),
-                Constraint::Fill(1),
-            ])
-            .split(column)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(6),
-                Constraint::Length(editor_height),
-                Constraint::Length(1),
-            ])
-            .split(column)
-    };
-    let body_area = chunks[0];
-    let editor_area = chunks[1];
-    let footer_area = chunks[2];
-
-    let max_rows = editor_height.saturating_sub(2) as usize;
-    let editor_skip = if cursor_row >= max_rows {
-        (cursor_row + 1 - max_rows).min(visual_lines.len().saturating_sub(max_rows))
-    } else {
-        0
-    };
-
-    draw_transcript(frame, app, &theme, body_area);
-    if let Some(sidebar) = sidebar_area {
-        draw_sidebar(frame, app, &theme, sidebar);
-    }
-    draw_editor(frame, app, &theme, editor_area, &visual_lines, editor_skip);
-    draw_footer(frame, app, &theme, footer_area);
-
-    draw_queued(frame, app, &theme, editor_area);
-
-    // Popups
-    if app.pending_ask.is_some() {
-        draw_ask(frame, app, &theme, area);
-    } else {
-        if app.focus == Focus::Input && app.modal.is_none() {
-            if !app.cd_completions().is_empty() {
-                draw_cd_menu(frame, app, &theme, editor_area);
-            } else if !app.filtered_slash().is_empty() {
-                draw_slash_menu(frame, app, &theme, editor_area);
-            }
-        }
-        if app.modal.is_some() {
-            draw_modal(frame, app, &theme, area);
-        }
-    }
-
-    if app.modal.is_none() && app.pending_ask.is_none() && app.focus == Focus::Input {
-        let editor = editor_area;
-        let x = editor.x + 2 + cursor_col as u16;
-        let visible_row = cursor_row
-            .saturating_sub(editor_skip)
-            .min(max_rows.saturating_sub(1));
-        let y = editor.y + 1 + (visible_row as u16);
-        if x < editor.x + editor.width.saturating_sub(2)
-            && y < editor.y + editor.height.saturating_sub(1)
-        {
-            frame.set_cursor_position((x, y));
-        }
-    }
-}
-
-/// Keep prose readable on wide terminals: the transcript is a centered column
-/// rather than edge-to-edge text.
-/// Add a separator only when the previous line is not already blank (and not
-/// at the very top of the transcript).
-fn push_blank(lines: &mut Vec<Line<'_>>) {
-    let already = lines
-        .last()
-        .map(|line| line.spans.iter().all(|s| s.content.trim().is_empty()))
-        .unwrap_or(true);
-    if !already {
-        lines.push(Line::from(""));
-    }
-}
-
-fn centered_column(area: Rect, max: u16) -> Rect {
-    let width = area.width.min(max);
-    Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y,
-        width,
-        height: area.height,
-    }
-}
-
-fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
-    app.transcript_height = area.height;
-
-    if app.session.items.is_empty() {
-        draw_welcome(frame, app, theme, area);
-        return;
-    }
-
-    let inner = Rect {
-        x: area.x + 2,
-        y: area.y + 1,
-        width: area.width.saturating_sub(4),
-        height: area.height.saturating_sub(2),
-    };
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-    let width = inner.width.max(16) as usize;
-    let mut lines: Vec<Line> = Vec::new();
-
-    for (idx, item) in app.session.items.iter().enumerate() {
-        let is_selected = app.focus == Focus::Transcript && app.selected_card == Some(idx);
-        match item {
-            TranscriptItem::User { text, .. } => {
-                push_blank(&mut lines);
-                let bar_style = Style::default().fg(if is_selected {
-                    theme.warn
-                } else {
-                    theme.accent
-                });
-                for raw_line in text.lines() {
-                    for wrapped in wrap_text(raw_line, width.saturating_sub(2)) {
-                        lines.push(Line::from(vec![
-                            Span::styled("▌ ", bar_style),
-                            Span::styled(wrapped, Style::default().fg(theme.text)),
-                        ]));
-                    }
-                }
-                push_blank(&mut lines);
-            }
-            TranscriptItem::Assistant {
-                text,
-                reasoning,
-                reasoning_collapsed,
-                done,
-                error,
-                ..
-            } => {
-                if text.trim().is_empty()
-                    && reasoning.is_empty()
-                    && *done
-                    && error.is_none()
-                {
-                    // A pure tool-call step has no prose; do not leave a gap.
-                    continue;
-                }
-                push_blank(&mut lines);
-                if !reasoning.is_empty() {
-                    if *reasoning_collapsed {
-                        lines.push(Line::from(vec![
-                            Span::styled("▸ ", Style::default().fg(theme.dim)),
-                            Span::styled("Thinking", Style::default().fg(theme.dim)),
-                        ]));
-                    } else {
-                        lines.push(Line::styled(
-                            "▾ Thinking",
-                            Style::default().fg(theme.dim),
-                        ));
-                        for rline in reasoning.lines() {
-                            for w in wrap_text(rline, width.saturating_sub(2)) {
-                                lines.push(Line::from(vec![
-                                    Span::styled("  ", Style::default().fg(theme.border)),
-                                    Span::styled(w, Style::default().fg(theme.dim)),
-                                ]));
-                            }
-                        }
-                    }
-                }
-                if text.trim().is_empty() {
-                    if !*done {
-                        lines.push(Line::styled("▍", Style::default().fg(theme.accent)));
-                    }
-                } else {
-                    render_markdown_lines(text, width, theme, &mut lines);
-                }
-                if let Some(err) = error {
-                    for w in wrap_text(&format!("! {err}"), width.saturating_sub(2)) {
-                        lines.push(Line::styled(
-                            format!(" {w}"),
-                            Style::default().fg(theme.bad),
-                        ));
-                    }
-                }
-                push_blank(&mut lines);
-            }
-            TranscriptItem::Tool {
-                title,
-                subtitle,
-                job_id,
-                target,
-                output,
-                status,
-                collapsed,
-                duration_ms,
-                exit_code,
-                started_ms,
-                ..
-            } => {
-                let (glyph, glyph_style) = match status {
-                    CardStatus::Queued => ("○", Style::default().fg(theme.warn)),
-                    CardStatus::Running => ("●", Style::default().fg(theme.ok)),
-                    CardStatus::Done => ("✓", Style::default().fg(theme.ok)),
-                    CardStatus::Error => ("✗", Style::default().fg(theme.bad)),
-                };
-                let mut meta_parts = Vec::new();
-                if let Some(jid) = job_id {
-                    meta_parts.push(format!("#{jid}"));
-                }
-                let elapsed = duration_ms.unwrap_or_else(|| now_ms().saturating_sub(*started_ms));
-                meta_parts.push(fmt_duration(elapsed));
-                if let Some(code) = exit_code {
-                    meta_parts.push(format!("exit {code}"));
-                }
-                if target != "local" {
-                    meta_parts.push(target.clone());
-                }
-                let fold = if *collapsed { "▸" } else { "▾" };
-                meta_parts.push(fold.to_string());
-                let meta = format!("  {}", meta_parts.join(" · "));
-                let meta_w = display_width(&meta);
-                let budget = width.saturating_sub(2 + meta_w).max(10);
-                let title_shown = truncate_width(title, budget);
-                let title_w = display_width(&title_shown);
-                let sub_budget = budget.saturating_sub(title_w + 2);
-
-                let mut spans = vec![
-                    Span::styled(format!("{glyph} "), glyph_style),
-                    Span::styled(
-                        title_shown,
-                        Style::default()
-                            .fg(theme.text)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ];
-                if !subtitle.is_empty() && sub_budget >= 6 {
-                    spans.push(Span::styled(
-                        format!("  {}", truncate_width(subtitle, sub_budget)),
-                        Style::default().fg(theme.dim),
-                    ));
-                }
-                spans.push(Span::styled(meta, Style::default().fg(theme.dim)));
-                if is_selected {
-                    lines.push(Line::from(spans).style(Style::default().bg(theme.selection)));
-                } else {
-                    lines.push(Line::from(spans));
-                }
-
-                if !*collapsed && !output.is_empty() {
-                    let total = output.len();
-                    let preview_start = if total > 60 && *status != CardStatus::Running {
-                        lines.push(Line::styled(
-                            format!("  … ({} earlier lines)", total - 50),
-                            Style::default().fg(theme.dim),
-                        ));
-                        total - 50
-                    } else {
-                        0
-                    };
-                    for out_line in &output[preview_start..] {
-                        let style = if out_line.err {
-                            Style::default().fg(theme.bad)
-                        } else {
-                            Style::default().fg(theme.text)
-                        };
-                        for w in wrap_text(&out_line.text, width.saturating_sub(4)) {
-                            lines.push(Line::styled(format!("    {w}"), style));
-                        }
-                    }
-                }
-            }
-            TranscriptItem::Notice { text, is_error, .. } => {
-                push_blank(&mut lines);
-                let style = Style::default().fg(if *is_error { theme.bad } else { theme.dim });
-                for w in wrap_text(text, width.saturating_sub(2)) {
-                    lines.push(Line::styled(format!("· {w}"), style));
-                }
-            }
-            TranscriptItem::Say { text, level, .. } => {
-                push_blank(&mut lines);
-                let style = Style::default().fg(match level.as_str() {
-                    "warning" => theme.warn,
-                    "error" => theme.bad,
-                    _ => theme.secondary,
-                });
-                for (i, w) in wrap_text(text, width.saturating_sub(4)).iter().enumerate() {
-                    let prefix = if i == 0 { "· " } else { "  " };
-                    lines.push(Line::from(vec![
-                        Span::styled(prefix, Style::default().fg(theme.accent)),
-                        Span::styled(w.clone(), style),
-                    ]));
-                }
-            }
-        }
-    }
-
-    lines.push(Line::from(""));
-    let max_scroll = (lines.len() as u16).saturating_sub(inner.height);
-    app.transcript_max_scroll = max_scroll;
-    if app.follow {
-        app.transcript_scroll = max_scroll;
-    } else {
-        app.transcript_scroll = app.transcript_scroll.min(max_scroll);
-    }
-    frame.render_widget(
-        Paragraph::new(lines).scroll((app.transcript_scroll, 0)),
-        inner,
-    );
-}
-
-fn draw_welcome(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    // 5x5 block letters, doubled in both directions for the opencode-style
-    // splash. Keep every row the same width so centered alignment stays true.
-    const GLYPHS: [ [&str; 5]; 5 ] = [
-        ["████ ", "█    ", "███  ", "█    ", "████ "],
-        ["█   █", "██  █", "█ █ █", "█  ██", "█   █"],
-        ["█   █", "█   █", "█   █", " █ █ ", "  █  "],
-        [" ███ ", "█   █", "█   █", "█   █", " ███ "],
-        ["█   █", "█   █", " ███ ", "  █  ", " █   "],
-    ];
-    // Full splash on a normal terminal; a compact wordmark when the body is
-    // short or narrow, so the model/status lines still fit.
-    let scale = if area.height < 20 || area.width < 90 { 1 } else { 2 };
-    let mut art = vec![String::new(); 5 * scale];
-    for row in 0..5 {
-        for (li, glyph) in GLYPHS.iter().enumerate() {
-            let scaled: String = glyph[row]
-                .chars()
-                .map(|c| {
-                    if c == '█' {
-                        if scale == 2 { "██" } else { "█" }
-                    } else if scale == 2 {
-                        "  "
-                    } else {
-                        " "
-                    }
-                })
-                .collect();
-            for dy in 0..scale {
-                art[row * scale + dy].push_str(&scaled);
-                if li + 1 < GLYPHS.len() {
-                    for _ in 0..scale {
-                        art[row * scale + dy].push(' ');
-                    }
-                }
-            }
-        }
-    }
-    let art_width = art.iter().map(|l| display_width(l)).max().unwrap_or(0);
-    for line in &mut art {
-        while display_width(line) < art_width {
-            line.push(' ');
-        }
-    }
-
-    let (model_line, model_color) = match resolve_active_provider(&app.data_dir) {
-        Some((prov, m)) => (
-            format!("{}  ·  {}", m.display(), prov.credential.kind_label()),
-            theme.secondary,
-        ),
-        None => ("not logged in — type /login".to_string(), theme.warn),
-    };
-    let state_line = if app.agent_offline {
-        ("daemon offline — retrying".to_string(), theme.bad)
-    } else {
-        (
-            format!(
-                "{}  ·  {}",
-                app.target,
-                if app.connected { "local daemon" } else { "daemon" }
-            ),
-            theme.dim,
-        )
-    };
-
-    let mut lines: Vec<Line> = Vec::new();
-    for (row, art_line) in art.iter().enumerate() {
-        let color = if row < 4 {
-            theme.text
-        } else if row < 7 {
-            theme.accent
-        } else {
-            theme.secondary
-        };
-        lines.push(Line::styled(
-            art_line.clone(),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::styled(
-        "terminal agent for local and remote machines",
-        Style::default().fg(theme.dim),
-    ));
-    lines.push(Line::from(""));
-    lines.push(Line::styled(model_line, Style::default().fg(model_color)));
-    lines.push(Line::styled(state_line.0, Style::default().fg(state_line.1)));
-    lines.push(Line::styled(
-        format!("envoy {}", env!("CARGO_PKG_VERSION")),
-        Style::default().fg(theme.dim),
-    ));
-
-    let total = lines.len() as u16;
-    let top = area.height.saturating_sub(total) / 3;
-    let mut padded: Vec<Line> = (0..top).map(|_| Line::from("")).collect();
-    padded.extend(lines);
-    frame.render_widget(
-        Paragraph::new(padded).alignment(Alignment::Center),
-        area,
-    );
-}
-
-fn draw_sidebar(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let border_color = if app.focus == Focus::Sidebar {
-        theme.accent
-    } else {
-        theme.border
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color))
-        .style(Style::default().bg(theme.panel))
-        .title(Span::styled(" session & jobs ", Style::default().fg(theme.dim)));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let sections = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(9), Constraint::Min(4)])
-        .split(inner);
-
-    let model_info = match resolve_active_provider(&app.data_dir) {
-        Some((prov, m)) => format!("{} [{}]", m.display(), prov.credential.kind_label()),
-        None => "none (/login)".to_string(),
-    };
-    let peers_info = match &app.status {
-        Some(s) => {
-            let agents = s
-                .peers
-                .iter()
-                .filter(|p| p.has_service(envoy_proto::AGENT_SERVICE_ID))
-                .count();
-            format!("{agents}/{} agents", s.peers.len())
-        }
-        None => "conduit off".to_string(),
-    };
-    let tok_info = format!(
-        "{} in / {} out",
-        app.session.input_tokens, app.session.output_tokens
-    );
-
-    let info_lines = vec![
-        Line::from(vec![
-            Span::styled(" dir    ", Style::default().fg(theme.dim)),
-            Span::raw(truncate_chars(&app.cwd_label(), 22)),
-        ]),
-        Line::from(vec![
-            Span::styled(" model  ", Style::default().fg(theme.dim)),
-            Span::styled(
-                truncate_chars(&model_info, 22),
-                Style::default().fg(theme.secondary),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(" mode   ", Style::default().fg(theme.dim)),
-            Span::styled(app.mode.label(), Style::default().fg(theme.accent)),
-        ]),
-        Line::from(vec![
-            Span::styled(" target ", Style::default().fg(theme.dim)),
-            Span::raw(format!("{} ({peers_info})", app.target)),
-        ]),
-        Line::from(vec![
-            Span::styled(" tokens ", Style::default().fg(theme.dim)),
-            Span::styled(tok_info, Style::default().fg(theme.dim)),
-        ]),
-        Line::from(""),
-        Line::styled(
-            format!(" jobs ({}) ", app.jobs.len()),
-            Style::default()
-                .fg(theme.dim)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
-    frame.render_widget(Paragraph::new(info_lines), sections[0]);
-
-    let items: Vec<ListItem> = if app.jobs.is_empty() {
-        vec![ListItem::new(Line::styled(
-            "  no jobs yet",
-            Style::default().fg(theme.dim),
-        ))]
-    } else {
-        app.jobs
-            .iter()
-            .map(|job| {
-                let (glyph, style) = match &job.state {
-                    JobState::Queued { .. } => ("○", Style::default().fg(theme.warn)),
-                    JobState::Running { .. } => ("●", Style::default().fg(theme.ok)),
-                    JobState::Done { result, .. } if result.ok() => {
-                        ("✓", Style::default().fg(theme.dim))
-                    }
-                    JobState::Done { .. } => ("✗", Style::default().fg(theme.bad)),
-                };
-                let cmd = truncate_chars(&job.command(), 18);
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!(" {glyph} "), style),
-                    Span::styled(
-                        format!("#{} ", job.id),
-                        Style::default().fg(theme.dim),
-                    ),
-                    Span::raw(cmd),
-                ]))
-            })
-            .collect()
-    };
-
-    let mut state = ListState::default();
-    if !app.jobs.is_empty() {
-        state.select(Some(app.job_selected));
-    }
-    let list = List::new(items).highlight_style(
-        Style::default()
-            .bg(theme.selection)
-            .add_modifier(Modifier::BOLD),
-    );
-    frame.render_stateful_widget(list, sections[1], &mut state);
-}
-
-fn draw_editor(
-    frame: &mut Frame,
-    app: &App,
-    theme: &Theme,
-    area: Rect,
-    visual_lines: &[String],
-    skip: usize,
-) {
-    let mode_color = match app.mode {
-        InputMode::Agent => theme.accent,
-        InputMode::Shell => theme.warn,
-    };
-    let frame_color = if app.focus == Focus::Input {
-        mode_color
-    } else {
-        theme.border
-    };
-    // A filled panel with one accent bar on the left; no block title.
-    let block = Block::default()
-        .borders(Borders::LEFT)
-        .border_style(Style::default().fg(frame_color))
-        .style(Style::default().bg(theme.panel));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if inner.width == 0 || inner.height < 2 {
-        return;
-    }
-
-    let max_rows = area.height.saturating_sub(2) as usize;
-    let skip = skip.min(visual_lines.len().saturating_sub(max_rows));
-    let end = (skip + max_rows).min(visual_lines.len());
-    let content = Rect {
-        x: inner.x + 1,
-        y: inner.y,
-        width: inner.width.saturating_sub(2),
-        height: max_rows as u16,
-    };
-    let mut lines: Vec<Line> = if app.input.is_empty() {
-        let placeholder = match app.mode {
-            InputMode::Agent => "Ask anything…  \"Fix broken tests\"",
-            InputMode::Shell => "Run a shell command…  !ls -la",
-        };
-        vec![Line::styled(placeholder, Style::default().fg(theme.dim))]
-    } else {
-        visual_lines[skip..end]
-            .iter()
-            .map(|text| Line::raw(text.clone()))
-            .collect()
-    };
-    if lines.is_empty() {
-        lines.push(Line::from(""));
-    }
-    frame.render_widget(Paragraph::new(lines), content);
-
-    // Status row: Build · model · target, plus a live toast or token counts.
-    let model = resolve_active_provider(&app.data_dir)
-        .map(|(_, m)| m.display())
-        .unwrap_or_else(|| "no model · /login".to_string());
-    let mode = match app.mode {
-        InputMode::Agent => "Build",
-        InputMode::Shell => "Shell",
-    };
-    let mut left = vec![
-        Span::styled(
-            mode,
-            Style::default()
-                .fg(mode_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  ·  ", Style::default().fg(theme.dim)),
-        Span::styled(model, Style::default().fg(theme.secondary)),
-        Span::styled("  ·  ", Style::default().fg(theme.dim)),
-        Span::styled(app.target.clone(), Style::default().fg(theme.dim)),
-    ];
-    if app.agent_offline || !app.connected {
-        left.push(Span::styled(
-            "  ·  daemon offline",
-            Style::default().fg(theme.bad),
-        ));
-    } else if app.agent_running {
-        left.push(Span::styled(
-            "  ·  working…",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-
-    let right = if let Some((msg, err)) = app.active_toast() {
-        Line::styled(
-            msg.to_string(),
-            Style::default().fg(if err { theme.bad } else { theme.ok }),
-        )
-    } else if app.session.input_tokens + app.session.output_tokens > 0 {
-        Line::styled(
-            format!(
-                "{} in · {} out",
-                app.session.input_tokens, app.session.output_tokens
-            ),
-            Style::default().fg(theme.dim),
-        )
-    } else {
-        Line::from("")
-    };
-
-    let status = Rect {
-        x: inner.x + 1,
-        y: area.y + area.height.saturating_sub(1),
-        width: inner.width.saturating_sub(2),
-        height: 1,
-    };
-    let right_w = (right.width() as u16).min(status.width / 2);
-    let left_area = Rect {
-        width: status.width.saturating_sub(right_w + 2),
-        ..status
-    };
-    frame.render_widget(Paragraph::new(Line::from(left)), left_area);
-    if right_w > 0 {
-        frame.render_widget(Paragraph::new(right).alignment(Alignment::Right), status);
-    }
-}
-
-fn draw_queued(frame: &mut Frame, app: &App, theme: &Theme, editor: Rect) {
-    if app.queued.is_empty() {
-        return;
-    }
-    let take = app.queued.len().min(2);
-    let height = take as u16;
-    let area = Rect {
-        x: editor.x + 2,
-        y: editor.y.saturating_sub(height),
-        width: editor.width.saturating_sub(4),
-        height,
-    };
-    if area.height == 0 || area.width == 0 {
-        return;
-    }
-    frame.render_widget(Clear, area);
-    let mut lines = Vec::new();
-    for text in app.queued.iter().take(take) {
-        lines.push(Line::from(vec![
-            Span::styled("⏳ queued  ", Style::default().fg(theme.warn)),
-            Span::styled(
-                truncate_width(text, area.width.saturating_sub(12) as usize),
-                Style::default().fg(theme.dim),
-            ),
-        ]));
-    }
-    frame.render_widget(
-        Paragraph::new(lines).style(Style::default().bg(theme.bg)),
-        area,
-    );
-}
-
-fn draw_ask(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let Some(ask) = &app.pending_ask else {
-        return;
-    };
-    let width = 64u16.min(area.width.saturating_sub(4));
-    let height = (ask.options.len() as u16 + 8).min(area.height.saturating_sub(2));
-    if width < 20 || height < 5 {
-        return;
-    }
-    let popup = centered_rect(area, width, height);
-    frame.render_widget(Clear, popup);
-    let mut lines = vec![Line::from("")];
-    for wrapped in wrap_text(&ask.question, width.saturating_sub(4) as usize) {
-        lines.push(Line::styled(
-            format!(" {wrapped}"),
-            Style::default().fg(theme.text),
-        ));
-    }
-    lines.push(Line::from(""));
-    for (index, option) in ask.options.iter().enumerate() {
-        let chosen = index == ask.selected;
-        let marker = if chosen { " ▸ " } else { "   " };
-        let style = if chosen {
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.text)
-        };
-        let rec = if option.recommended { "  (recommended)" } else { "" };
-        lines.push(Line::styled(format!("{marker}{}{rec}", option.label), style));
-        if let Some(desc) = &option.description {
-            lines.push(Line::styled(
-                format!("     {desc}"),
-                Style::default().fg(theme.dim),
-            ));
-        }
-    }
-    lines.push(Line::from(""));
-    let left = ask
-        .deadline
-        .saturating_duration_since(Instant::now())
-        .as_secs();
-    lines.push(Line::styled(
-        format!(" enter choose · esc recommended · {left}s left"),
-        Style::default().fg(theme.dim),
-    ));
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.warn))
-        .style(Style::default().bg(theme.panel))
-        .title(Span::styled(" ask ", Style::default().fg(theme.warn)));
-    frame.render_widget(Paragraph::new(lines).block(block), popup);
-}
-
-fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let hints: Vec<(&str, &str)> = if app.agent_running {
-        vec![
-            ("enter", "steer"),
-            ("alt+enter", "queue"),
-            ("esc", "interrupt"),
-            ("ctrl+o", "fold"),
-        ]
-    } else {
-        vec![
-            ("enter", "send"),
-            ("shift+enter", "newline"),
-            ("/", "commands"),
-            ("ctrl+p", "palette"),
-        ]
-    };
-    let mut spans = Vec::new();
-    for (i, (key, label)) in hints.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled("  ", Style::default().fg(theme.dim)));
-        }
-        spans.push(Span::styled(
-            *key,
-            Style::default().fg(theme.accent),
-        ));
-        spans.push(Span::styled(
-            format!(" {label}"),
-            Style::default().fg(theme.dim),
-        ));
-    }
-    let hints_line = Line::from(spans);
-    let hints_w = hints_line.width() as u16;
-    let cwd = app.cwd_label();
-    let cwd_room = area.width.saturating_sub(hints_w + 3);
-    if cwd_room >= 10 {
-        frame.render_widget(
-            Paragraph::new(Line::styled(
-                truncate_width(&cwd, cwd_room as usize),
-                Style::default().fg(theme.dim),
-            )),
-            Rect {
-                width: cwd_room,
-                ..area
-            },
-        );
-    } else if area.width as usize > display_width(&cwd) + hints_w as usize {
-        frame.render_widget(
-            Paragraph::new(Line::styled(cwd, Style::default().fg(theme.dim))),
-            area,
-        );
-    }
-    frame.render_widget(
-        Paragraph::new(hints_line).alignment(Alignment::Right),
-        area,
-    );
-}
-
-fn draw_slash_menu(frame: &mut Frame, app: &App, theme: &Theme, editor: Rect) {
-    let items = app.filtered_slash();
-    if items.is_empty() {
-        return;
-    }
-    let height = (items.len() as u16 + 2)
-        .min(editor.y.saturating_sub(1))
-        .min(14);
-    if height < 3 {
-        return;
-    }
-    let width = editor.width.saturating_sub(2).min(78);
-    let area = Rect {
-        x: editor.x + 1,
-        y: editor.y.saturating_sub(height),
-        width,
-        height,
-    };
-    frame.render_widget(Clear, area);
-    let rows: Vec<ListItem> = items
-        .iter()
-        .map(|cmd| {
-            let label = if cmd.args.is_empty() {
-                format!("/{:<10} {}", cmd.name, cmd.about)
-            } else {
-                format!("/{:<10} {:<10} {}", cmd.name, cmd.args, cmd.about)
-            };
-            ListItem::new(Line::raw(format!(" {label}")))
-        })
-        .collect();
-    let mut state = ListState::default();
-    state.select(Some(app.menu_selected.min(items.len() - 1)));
-    let list = List::new(rows)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(" commands ", Style::default().fg(theme.dim))),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(theme.selection)
-                .add_modifier(Modifier::BOLD),
-        );
-    frame.render_stateful_widget(list, area, &mut state);
-}
-
-fn draw_cd_menu(frame: &mut Frame, app: &App, theme: &Theme, editor: Rect) {
-    let items = app.cd_completions();
-    if items.is_empty() {
-        return;
-    }
-    let height = (items.len() as u16 + 2)
-        .min(editor.y.saturating_sub(1))
-        .min(12);
-    if height < 3 {
-        return;
-    }
-    let width = editor.width.saturating_sub(2).min(64);
-    let area = Rect {
-        x: editor.x + 1,
-        y: editor.y.saturating_sub(height),
-        width,
-        height,
-    };
-    frame.render_widget(Clear, area);
-    let rows: Vec<ListItem> = items
-        .iter()
-        .map(|(display, _)| ListItem::new(Line::raw(format!(" {display}"))))
-        .collect();
-    let mut state = ListState::default();
-    state.select(Some(app.menu_selected.min(items.len() - 1)));
-    let list = List::new(rows)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    " directories (Tab complete · Enter cd) ",
-                    Style::default().fg(theme.dim),
-                )),
-        )
-        .highlight_style(
-            Style::default()
-                .bg(theme.selection)
-                .add_modifier(Modifier::BOLD),
-        );
-    frame.render_stateful_widget(list, area, &mut state);
-}
-
-fn draw_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let Some(modal) = app.modal.as_ref() else {
-        return;
-    };
-    match modal {
-        Modal::Picker(p) => {
-            let filtered: Vec<&(String, Command)> = p
-                .items
-                .iter()
-                .filter(|(label, _)| {
-                    p.query.is_empty()
-                        || label
-                            .to_ascii_lowercase()
-                            .contains(&p.query.to_ascii_lowercase())
-                })
-                .collect();
-            let width = 62u16.min(area.width.saturating_sub(4));
-            let height = ((filtered.len() as u16) + 4)
-                .max(6)
-                .min(area.height.saturating_sub(2))
-                .min(18);
-            let popup = centered_rect(area, width, height);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    format!(" {} ", p.title),
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-
-            let parts = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Min(1)])
-                .split(inner);
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(" Search: ", Style::default().fg(theme.dim)),
-                    Span::raw(p.query.clone()),
-                ])),
-                parts[0],
-            );
-            let list_items: Vec<ListItem> = filtered
-                .iter()
-                .map(|(label, _)| ListItem::new(Line::raw(format!(" {label}"))))
-                .collect();
-            let mut state = ListState::default();
-            if !list_items.is_empty() {
-                state.select(Some(p.selected.min(list_items.len() - 1)));
-            }
-            let list = List::new(list_items).highlight_style(
-                Style::default()
-                    .bg(theme.selection)
-                    .add_modifier(Modifier::BOLD),
-            );
-            frame.render_stateful_widget(list, parts[1], &mut state);
-        }
-        Modal::Models(m) => {
-            let filtered: Vec<&AvailableModel> = m
-                .models
-                .iter()
-                .filter(|item| {
-                    m.filter.is_empty()
-                        || item
-                            .model_id
-                            .to_ascii_lowercase()
-                            .contains(&m.filter.to_ascii_lowercase())
-                        || item
-                            .provider_id
-                            .to_ascii_lowercase()
-                            .contains(&m.filter.to_ascii_lowercase())
-                })
-                .collect();
-            let width = 66u16.min(area.width.saturating_sub(4));
-            let height = ((filtered.len() as u16) + 6)
-                .max(8)
-                .min(area.height.saturating_sub(2))
-                .min(20);
-            let popup = centered_rect(area, width, height);
-            frame.render_widget(Clear, popup);
-            let title = if m.fetching {
-                " Select model (fetching /models…) "
-            } else {
-                " Select model (type to filter or enter custom ID) "
-            };
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(title, Style::default().fg(theme.accent)));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-
-            let parts = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Min(1)])
-                .split(inner);
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(" Filter: ", Style::default().fg(theme.dim)),
-                    Span::raw(m.filter.clone()),
-                ])),
-                parts[0],
-            );
-            let active = resolve_active_provider(&app.data_dir).map(|(_, mr)| mr);
-            let rows: Vec<ListItem> = filtered
-                .iter()
-                .map(|item| {
-                    let is_active = active
-                        .as_ref()
-                        .is_some_and(|a| a.provider_id == item.provider_id && a.model_id == item.model_id);
-                    let dot = if is_active { "● " } else { "  " };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            dot,
-                            Style::default().fg(if is_active { theme.ok } else { theme.dim }),
-                        ),
-                        Span::raw(format!("{:<30} ", item.model_id)),
-                        Span::styled(
-                            format!("{} ({})", item.provider_name, item.auth_kind),
-                            Style::default().fg(theme.dim),
-                        ),
-                    ]))
-                })
-                .collect();
-            let mut state = ListState::default();
-            if !rows.is_empty() {
-                state.select(Some(m.selected.min(rows.len() - 1)));
-            }
-            let list = List::new(rows).highlight_style(
-                Style::default()
-                    .bg(theme.selection)
-                    .add_modifier(Modifier::BOLD),
-            );
-            frame.render_stateful_widget(list, parts[1], &mut state);
-        }
-        Modal::Sessions(s) => {
-            let width = 72u16.min(area.width.saturating_sub(4));
-            let height = ((s.sessions.len() as u16) + 4)
-                .max(7)
-                .min(area.height.saturating_sub(2))
-                .min(18);
-            let popup = centered_rect(area, width, height);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    " Sessions (Enter switch · d delete · Esc close) ",
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-
-            let rows: Vec<ListItem> = if s.sessions.is_empty() {
-                vec![ListItem::new(Line::styled(
-                    " (no saved sessions yet)",
-                    Style::default().fg(theme.dim),
-                ))]
-            } else {
-                s.sessions
-                    .iter()
-                    .map(|item| {
-                        let cur = if item.id == app.session.id { "● " } else { "  " };
-                        ListItem::new(Line::from(vec![
-                            Span::styled(cur, Style::default().fg(theme.ok)),
-                            Span::raw(format!("{:<32} ", truncate_chars(&item.title, 30))),
-                            Span::styled(
-                                format!(
-                                    "{} · {} items",
-                                    collapse_home(&item.cwd),
-                                    item.item_count
-                                ),
-                                Style::default().fg(theme.dim),
-                            ),
-                        ]))
-                    })
-                    .collect()
-            };
-            let mut state = ListState::default();
-            if !s.sessions.is_empty() {
-                state.select(Some(s.selected.min(s.sessions.len() - 1)));
-            }
-            let list = List::new(rows).highlight_style(
-                Style::default()
-                    .bg(theme.selection)
-                    .add_modifier(Modifier::BOLD),
-            );
-            frame.render_stateful_widget(list, inner, &mut state);
-        }
-        Modal::Login(login) => draw_login_modal(frame, app, theme, area, login),
-    }
-}
-
-fn draw_login_modal(
-    frame: &mut Frame,
-    app: &App,
-    theme: &Theme,
-    area: Rect,
-    login: &LoginModal,
-) {
-    match login {
-        LoginModal::SelectProvider { filter, selected } => {
-            let providers = app.filtered_login_providers(filter);
-            let connected = effective_providers(&app.data_dir);
-            let width = 70u16.min(area.width.saturating_sub(4));
-            let height = ((providers.len() as u16) + 5)
-                .max(8)
-                .min(area.height.saturating_sub(2))
-                .min(18);
-            let popup = centered_rect(area, width, height);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    " Connect a provider (/login) ",
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-
-            let parts = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Min(1)])
-                .split(inner);
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(" Search: ", Style::default().fg(theme.dim)),
-                    Span::raw(filter.clone()),
-                ])),
-                parts[0],
-            );
-
-            let rows: Vec<ListItem> = providers
-                .iter()
-                .map(|(_, p)| {
-                    let badge = match connected.get(p.id) {
-                        Some(sp) => format!("[✓ {}]", sp.credential.kind_label()),
-                        None => String::new(),
-                    };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            format!(" {:<20} ", p.name),
-                            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(format!("{:<32} ", p.subtitle), Style::default().fg(theme.dim)),
-                        Span::styled(badge, Style::default().fg(theme.ok)),
-                    ]))
-                })
-                .collect();
-            let mut state = ListState::default();
-            if !rows.is_empty() {
-                state.select(Some((*selected).min(rows.len() - 1)));
-            }
-            let list = List::new(rows).highlight_style(
-                Style::default()
-                    .bg(theme.selection)
-                    .add_modifier(Modifier::BOLD),
-            );
-            frame.render_stateful_widget(list, parts[1], &mut state);
-        }
-        LoginModal::SelectMethod {
-            provider_idx,
-            selected,
-        } => {
-            let prov = &BUILTIN_PROVIDERS[*provider_idx];
-            let width = 72u16.min(area.width.saturating_sub(4));
-            let height = ((prov.methods.len() as u16) * 2 + 4)
-                .min(area.height.saturating_sub(2));
-            let popup = centered_rect(area, width, height);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    format!(" {} — Select auth method (Esc back/close) ", prov.name),
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-
-            let rows: Vec<ListItem> = prov
-                .methods
-                .iter()
-                .map(|m| {
-                    ListItem::new(vec![
-                        Line::styled(
-                            format!(" {}", m.label),
-                            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-                        ),
-                        Line::styled(format!("   {}", m.hint), Style::default().fg(theme.dim)),
-                    ])
-                })
-                .collect();
-            let mut state = ListState::default();
-            state.select(Some(*selected));
-            let list = List::new(rows).highlight_style(
-                Style::default()
-                    .bg(theme.selection)
-                    .add_modifier(Modifier::BOLD),
-            );
-            frame.render_stateful_widget(list, inner, &mut state);
-        }
-        LoginModal::ApiKeyForm {
-            provider_idx,
-            key,
-            base_url,
-            model,
-            focus_field,
-            reveal,
-            error,
-        } => {
-            let prov = &BUILTIN_PROVIDERS[*provider_idx];
-            let width = 68u16.min(area.width.saturating_sub(4));
-            let popup = centered_rect(area, width, 12);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    format!(" {} — API Key ", prov.name),
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-
-            let masked = if *reveal || key.is_empty() {
-                key.clone()
-            } else {
-                "•".repeat(key.chars().count())
-            };
-            let field = |idx: usize, label: &str, val: &str| {
-                let marker = if *focus_field == idx { "▸ " } else { "  " };
-                let style = if *focus_field == idx {
-                    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme.dim)
-                };
-                Line::from(vec![
-                    Span::styled(format!("{marker}{label:<12} "), style),
-                    Span::raw(val.to_string()),
-                ])
-            };
-            let mut lines = vec![
-                Line::from(""),
-                field(0, "API Key:", &masked),
-                field(1, "Base URL:", base_url),
-                field(2, "Model:", model),
-                Line::from(""),
-                Line::styled(
-                    "  Tab switch field · Ctrl+R reveal · Enter save · Esc cancel",
-                    Style::default().fg(theme.dim),
-                ),
-            ];
-            if let Some(err) = error {
-                lines.push(Line::styled(
-                    format!("  Error: {err}"),
-                    Style::default().fg(theme.bad),
-                ));
-            }
-            frame.render_widget(Paragraph::new(lines), inner);
-        }
-        LoginModal::CustomForm {
-            protocol_idx,
-            name,
-            base_url,
-            key,
-            model,
-            focus_field,
-            error,
-        } => {
-            let width = 72u16.min(area.width.saturating_sub(4));
-            let popup = centered_rect(area, width, 14);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    " Custom Compatible Provider ",
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-
-            let proto_label = if *protocol_idx == 1 {
-                "< Anthropic-Compatible >"
-            } else {
-                "< OpenAI-Compatible >"
-            };
-            let masked_key = if key.is_empty() {
-                "(optional)".to_string()
-            } else {
-                "•".repeat(key.chars().count())
-            };
-            let field = |idx: usize, label: &str, val: &str| {
-                let marker = if *focus_field == idx { "▸ " } else { "  " };
-                let style = if *focus_field == idx {
-                    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme.dim)
-                };
-                Line::from(vec![
-                    Span::styled(format!("{marker}{label:<12} "), style),
-                    Span::raw(val.to_string()),
-                ])
-            };
-            let mut lines = vec![
-                Line::from(""),
-                field(0, "Protocol:", proto_label),
-                field(1, "Name:", name),
-                field(2, "Base URL:", base_url),
-                field(3, "API Key:", &masked_key),
-                field(4, "Model ID:", model),
-                Line::from(""),
-                Line::styled(
-                    "  Tab field · ←/→ protocol · Enter save · Esc cancel",
-                    Style::default().fg(theme.dim),
-                ),
-            ];
-            if let Some(err) = error {
-                lines.push(Line::styled(
-                    format!("  Error: {err}"),
-                    Style::default().fg(theme.bad),
-                ));
-            }
-            frame.render_widget(Paragraph::new(lines), inner);
-        }
-        LoginModal::OAuthBrowser {
-            provider_name,
-            url,
-            pasted,
-            status,
-            busy,
-            error,
-            ..
-        } => {
-            let width = 76u16.min(area.width.saturating_sub(4));
-            let popup = centered_rect(area, width, 15);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    format!(" {provider_name} — OAuth Browser "),
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-
-            let w = inner.width.saturating_sub(4) as usize;
-            let mut lines = vec![
-                Line::styled(
-                    format!("  {status}"),
-                    Style::default().fg(if *busy { theme.accent } else { theme.ok }),
-                ),
-                Line::from(""),
-                Line::styled("  Authorize URL:", Style::default().fg(theme.dim)),
-            ];
-            for chunk in wrap_text(url, w) {
-                lines.push(Line::styled(
-                    format!("  {chunk}"),
-                    Style::default().fg(theme.secondary),
-                ));
-            }
-            lines.push(Line::from(""));
-            lines.push(Line::styled(
-                "  Or paste redirect URL / code (for SSH/headless):",
-                Style::default().fg(theme.dim),
-            ));
-            lines.push(Line::from(vec![
-                Span::styled("  > ", Style::default().fg(theme.accent)),
-                Span::raw(pasted.clone()),
-            ]));
-            if let Some(err) = error {
-                lines.push(Line::styled(
-                    format!("  Error: {err}"),
-                    Style::default().fg(theme.bad),
-                ));
-            }
-            frame.render_widget(Paragraph::new(lines), inner);
-        }
-        LoginModal::OAuthCodePaste {
-            provider_name,
-            url,
-            code_input,
-            busy,
-            error,
-            ..
-        } => {
-            let width = 76u16.min(area.width.saturating_sub(4));
-            let popup = centered_rect(area, width, 15);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    format!(" {provider_name} "),
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-
-            let w = inner.width.saturating_sub(4) as usize;
-            let mut lines = vec![
-                Line::styled(
-                    "  Open this URL in your browser to authorize:",
-                    Style::default().fg(theme.dim),
-                ),
-            ];
-            for chunk in wrap_text(url, w) {
-                lines.push(Line::styled(
-                    format!("  {chunk}"),
-                    Style::default().fg(theme.secondary),
-                ));
-            }
-            lines.push(Line::from(""));
-            lines.push(Line::styled(
-                if *busy {
-                    "  Exchanging authorization code…"
-                } else {
-                    "  Paste the `code#state` (or callback URL) and press Enter:"
-                },
-                Style::default().fg(if *busy { theme.accent } else { theme.text }),
-            ));
-            lines.push(Line::from(vec![
-                Span::styled("  > ", Style::default().fg(theme.accent)),
-                Span::raw(code_input.clone()),
-            ]));
-            if let Some(err) = error {
-                lines.push(Line::styled(
-                    format!("  Error: {err}"),
-                    Style::default().fg(theme.bad),
-                ));
-            }
-            frame.render_widget(Paragraph::new(lines), inner);
-        }
-        LoginModal::OAuthDevice {
-            provider_name,
-            verification_uri,
-            user_code,
-            status,
-            error,
-        } => {
-            let width = 66u16.min(area.width.saturating_sub(4));
-            let popup = centered_rect(area, width, 12);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    format!(" {provider_name} — Device Flow "),
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-
-            let mut lines = vec![
-                Line::from(""),
-                Line::from(vec![
-                    Span::styled("  1. Open:  ", Style::default().fg(theme.dim)),
-                    Span::styled(verification_uri.clone(), Style::default().fg(theme.secondary)),
-                ]),
-                Line::from(vec![
-                    Span::styled("  2. Code:  ", Style::default().fg(theme.dim)),
-                    Span::styled(
-                        user_code.clone(),
-                        Style::default()
-                            .fg(theme.ok)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                Line::from(""),
-                Line::styled(format!("  {status}"), Style::default().fg(theme.dim)),
-                Line::styled("  Press Esc to cancel.", Style::default().fg(theme.dim)),
-            ];
-            if let Some(err) = error {
-                lines.push(Line::styled(
-                    format!("  Error: {err}"),
-                    Style::default().fg(theme.bad),
-                ));
-            }
-            frame.render_widget(Paragraph::new(lines), inner);
-        }
-    }
-}
-
-// ------------------------------------------------------------------ text / markdown helpers
-
-fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
-    Rect {
-        x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + (area.height.saturating_sub(height)) / 2,
-        width,
-        height,
-    }
-}
-
-fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-        out.push('…');
-        out
-    }
-}
-
-fn char_width(c: char) -> usize {
-    UnicodeWidthChar::width(c).unwrap_or(1).max(1)
-}
-
-fn display_width(s: &str) -> usize {
-    UnicodeWidthStr::width(s)
-}
-
-fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
-    let max = max_width.max(8);
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut cur_w = 0usize;
-    for ch in text.chars() {
-        let w = char_width(ch);
-        if cur_w + w > max && !cur.is_empty() {
-            // Prefer a word boundary so `exit=0` never becomes `exit=\n0`.
-            if let Some(pos) = cur.rfind(' ') {
-                let tail: String = cur[pos + 1..].to_string();
-                let head = cur[..pos].trim_end().to_string();
-                if !head.is_empty() {
-                    out.push(head);
-                }
-                cur = tail.trim_start().to_string();
-                cur_w = cur.chars().map(char_width).sum();
-            } else {
-                out.push(std::mem::take(&mut cur));
-                cur_w = 0;
-            }
-        }
-        if ch == ' ' && cur.is_empty() {
-            continue;
-        }
-        cur.push(ch);
-        cur_w += w;
-    }
-    if !cur.is_empty() || out.is_empty() {
-        out.push(cur);
-    }
-    out
-}
-
-fn layout_editor_text(input: &str, cursor_chars: usize, max_width: usize) -> (Vec<String>, usize, usize) {
-    let max_width = max_width.max(8);
-    let mut lines = Vec::new();
-    let mut cur = String::new();
-    let mut cur_w = 0usize;
-    let mut c_row = 0usize;
-    let mut c_col = 0usize;
-
-    for (idx, ch) in input.chars().enumerate() {
-        if idx == cursor_chars {
-            c_row = lines.len();
-            c_col = cur_w;
-        }
-        if ch == '\n' {
-            lines.push(std::mem::take(&mut cur));
-            cur_w = 0;
-            continue;
-        }
-        let w = char_width(ch);
-        if cur_w + w > max_width && !cur.is_empty() {
-            lines.push(std::mem::take(&mut cur));
-            cur_w = 0;
-            if idx == cursor_chars {
-                c_row = lines.len();
-                c_col = 0;
-            }
-        }
-        cur.push(ch);
-        cur_w += w;
-    }
-    if cursor_chars >= input.chars().count() {
-        c_row = lines.len();
-        c_col = cur_w;
-    }
-    lines.push(cur);
-    (lines, c_row, c_col)
-}
-
-fn render_markdown_lines<'a>(
-    text: &str,
-    width: usize,
-    theme: &Theme,
-    out: &mut Vec<Line<'a>>,
-) {
-    let lines: Vec<&str> = text.lines().collect();
-    let mut in_code = false;
-    let mut i = 0usize;
-    while i < lines.len() {
-        let raw = lines[i];
-        let trimmed = raw.trim_start();
-
-        if let Some(fence) = trimmed.strip_prefix("```") {
-            in_code = !in_code;
-            if in_code {
-                let lang = fence.trim();
-                out.push(Line::styled(
-                    if lang.is_empty() {
-                        " ┌──".to_string()
-                    } else {
-                        format!(" ┌─ {lang}")
-                    },
-                    Style::default().fg(theme.border),
-                ));
-            } else {
-                out.push(Line::styled(" └──", Style::default().fg(theme.border)));
-            }
-            i += 1;
-            continue;
-        }
-        if in_code {
-            let shown = truncate_width(raw, width.saturating_sub(4));
-            out.push(Line::from(vec![
-                Span::styled(" │ ", Style::default().fg(theme.border)),
-                Span::styled(shown, Style::default().fg(theme.secondary)),
-            ]));
-            i += 1;
-            continue;
-        }
-        if is_table_start(&lines, i) {
-            i += render_table(&lines[i..], width, theme, out);
-            continue;
-        }
-        if trimmed.starts_with("### ") || trimmed.starts_with("## ") || trimmed.starts_with("# ") {
-            let heading = trimmed.trim_start_matches('#').trim();
-            for w in wrap_text(heading, width.saturating_sub(2)) {
-                out.push(Line::styled(
-                    format!(" {w}"),
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            }
-            i += 1;
-            continue;
-        }
-        if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
-            let item = trimmed.trim_start_matches(['-', '*']).trim_start();
-            let wrapped = wrap_text(item, width.saturating_sub(4));
-            for (n, w) in wrapped.iter().enumerate() {
-                let prefix = if n == 0 { " • " } else { "   " };
-                let mut spans = vec![Span::styled(prefix, Style::default().fg(theme.accent))];
-                spans.extend(inline_spans(w, theme));
-                out.push(Line::from(spans));
-            }
-            i += 1;
-            continue;
-        }
-        for w in wrap_text(raw, width.saturating_sub(2)) {
-            out.push(Line::from(inline_spans(&format!(" {w}"), theme)));
-        }
-        i += 1;
-    }
-}
-
-fn is_table_start(lines: &[&str], i: usize) -> bool {
-    if i + 1 >= lines.len() {
-        return false;
-    }
-    let head = lines[i].trim();
-    let delim = lines[i + 1].trim();
-    if !head.starts_with('|') || !delim.starts_with('|') {
-        return false;
-    }
-    let cells = split_table_row(delim);
-    !cells.is_empty()
-        && cells.iter().all(|c| {
-            let core = c.trim_matches(':');
-            !core.is_empty() && core.chars().all(|ch| ch == '-')
-        })
-}
-
-fn split_table_row(line: &str) -> Vec<String> {
-    line.trim()
-        .trim_matches('|')
-        .split('|')
-        .map(|c| c.trim().to_string())
-        .collect()
-}
-
-fn truncate_width(text: &str, max: usize) -> String {
-    let mut out = String::new();
-    let mut width = 0usize;
-    for ch in text.chars() {
-        let w = char_width(ch);
-        if width + w > max {
-            out.push('…');
-            return out;
-        }
-        out.push(ch);
-        width += w;
-    }
-    out
-}
-
-#[derive(Clone, Copy)]
-enum Align {
-    Left,
-    Right,
-    Center,
-}
-
-fn render_table<'a>(
-    lines: &[&str],
-    width: usize,
-    theme: &Theme,
-    out: &mut Vec<Line<'a>>,
-) -> usize {
-    let header = split_table_row(lines[0]);
-    let delim = split_table_row(lines[1]);
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    let mut consumed = 2usize;
-    while consumed < lines.len() && lines[consumed].trim().starts_with('|') {
-        rows.push(split_table_row(lines[consumed]));
-        consumed += 1;
-    }
-    let cols = header
-        .len()
-        .max(delim.len())
-        .max(rows.iter().map(Vec::len).max().unwrap_or(0));
-    if cols == 0 {
-        return consumed;
-    }
-    let aligns: Vec<Align> = (0..cols)
-        .map(|c| {
-            let d = delim.get(c).map(String::as_str).unwrap_or("---");
-            match (d.starts_with(':'), d.ends_with(':')) {
-                (true, true) => Align::Center,
-                (false, true) => Align::Right,
-                _ => Align::Left,
-            }
-        })
-        .collect();
-
-    let mut widths: Vec<usize> = (0..cols)
-        .map(|c| {
-            let mut w: usize = header
-                .get(c)
-                .map(String::as_str)
-                .unwrap_or("")
-                .chars()
-                .map(char_width)
-                .sum();
-            for row in &rows {
-                if let Some(cell) = row.get(c) {
-                    w = w.max(cell.chars().map(char_width).sum());
-                }
-            }
-            w.max(3)
-        })
-        .collect();
-
-    let budget = width.saturating_sub(cols + 3).max(cols * 3);
-    while widths.iter().sum::<usize>() > budget {
-        let Some((idx, _)) = widths.iter().enumerate().max_by_key(|(_, w)| **w) else {
-            break;
-        };
-        if widths[idx] <= 3 {
-            break;
-        }
-        widths[idx] -= 1;
-    }
-
-    let border = Style::default().fg(theme.border);
-    let mut top = String::from(" ┌");
-    for (c, w) in widths.iter().enumerate() {
-        top.push_str(&"─".repeat(*w + 2));
-        top.push(if c + 1 == cols { '┐' } else { '┬' });
-    }
-    out.push(Line::styled(top, border));
-    push_table_row(out, &header, &widths, &aligns, theme, true);
-    let mut mid = String::from(" ├");
-    for (c, w) in widths.iter().enumerate() {
-        mid.push_str(&"─".repeat(*w + 2));
-        mid.push(if c + 1 == cols { '┤' } else { '┼' });
-    }
-    out.push(Line::styled(mid, border));
-    for row in &rows {
-        push_table_row(out, row, &widths, &aligns, theme, false);
-    }
-    let mut bottom = String::from(" └");
-    for (c, w) in widths.iter().enumerate() {
-        bottom.push_str(&"─".repeat(*w + 2));
-        bottom.push(if c + 1 == cols { '┘' } else { '┴' });
-    }
-    out.push(Line::styled(bottom, border));
-    consumed
-}
-
-fn push_table_row<'a>(
-    out: &mut Vec<Line<'a>>,
-    cells: &[String],
-    widths: &[usize],
-    aligns: &[Align],
-    theme: &Theme,
-    header: bool,
-) {
-    let border = Style::default().fg(theme.border);
-    let text_style = if header {
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.text)
-    };
-    let mut spans = vec![Span::styled(" │ ", border)];
-    for (c, width) in widths.iter().enumerate() {
-        let raw = cells.get(c).map(String::as_str).unwrap_or("");
-        let shown = truncate_width(raw, *width);
-        let used: usize = shown.chars().map(char_width).sum();
-        let pad = width.saturating_sub(used);
-        let (before, after) = match aligns.get(c).copied().unwrap_or(Align::Left) {
-            Align::Left => (0, pad),
-            Align::Right => (pad, 0),
-            Align::Center => (pad / 2, pad - pad / 2),
-        };
-        spans.push(Span::styled(
-            format!("{}{}{}", " ".repeat(before), shown, " ".repeat(after)),
-            text_style,
-        ));
-        spans.push(Span::styled(
-            if c + 1 == widths.len() { " │" } else { " │ " },
-            border,
-        ));
-    }
-    out.push(Line::from(spans));
-}
-
-fn inline_spans<'a>(line: &str, theme: &Theme) -> Vec<Span<'a>> {
-    let mut spans = Vec::new();
-    let mut plain = String::new();
-    let mut i = 0usize;
-    while i < line.len() {
-        let rest = &line[i..];
-        let marker = if rest.starts_with('`') {
-            Some(("`", Style::default().fg(theme.secondary).bg(theme.surface)))
-        } else if rest.starts_with("**") {
-            Some(("**", Style::default().add_modifier(Modifier::BOLD)))
-        } else if rest.starts_with('*') {
-            Some(("*", Style::default().add_modifier(Modifier::ITALIC)))
-        } else {
-            None
-        };
-        if let Some((marker, style)) = marker {
-            let after = &rest[marker.len()..];
-            if let Some(end) = after.find(marker) {
-                if end > 0 {
-                    if !plain.is_empty() {
-                        spans.push(Span::raw(std::mem::take(&mut plain)));
-                    }
-                    spans.push(Span::styled(after[..end].to_string(), style));
-                    i += marker.len() + end + marker.len();
-                    continue;
-                }
-            }
-        }
-        let ch = rest.chars().next().expect("non-empty");
-        plain.push(ch);
-        i += ch.len_utf8();
-    }
-    if !plain.is_empty() {
-        spans.push(Span::raw(plain));
-    }
-    if spans.is_empty() {
-        spans.push(Span::raw(String::new()));
-    }
-    spans
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-fn job_elapsed(job: &Job) -> u64 {
-    let now = now_ms();
-    match &job.state {
-        JobState::Queued { since_ms } => now.saturating_sub(*since_ms),
-        JobState::Running { since_ms } => now.saturating_sub(*since_ms),
-        JobState::Done { at_ms, .. } => at_ms.saturating_sub(job.created_ms),
-    }
-}
-
-fn fmt_duration(ms: u64) -> String {
-    let secs = ms / 1000;
-    if secs < 60 {
-        format!("{secs}s")
-    } else if secs < 3600 {
-        format!("{}m{:02}s", secs / 60, secs % 60)
-    } else {
-        format!("{}h{:02}m", secs / 3600, (secs % 3600) / 60)
-    }
-}
-
-// ----------------------------------------------------------------- terminal
-
-struct Tui {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
-    enhanced_keys: bool,
-}
-
-fn terminal_supports_csi_u() -> bool {
-    if std::env::var_os("KITTY_WINDOW_ID").is_some()
-        || std::env::var_os("WEZTERM_EXECUTABLE").is_some()
-        || std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some()
-    {
-        return true;
-    }
-    if matches!(
-        std::env::var("TERM_PROGRAM").as_deref(),
-        Ok("iTerm.app" | "WezTerm" | "ghostty" | "vscode" | "WarpTerminal" | "rio")
-    ) {
-        return true;
-    }
-    matches!(
-        std::env::var("TERM").as_deref(),
-        Ok("xterm-kitty" | "xterm-ghostty" | "alacritty" | "foot" | "foot-extra")
-    )
-}
-
-impl Tui {
-    fn enter() -> Result<Self> {
-        enable_raw_mode()?;
-        execute!(stdout(), EnterAlternateScreen)?;
-        let enhanced_keys = terminal_supports_csi_u();
-        if enhanced_keys {
-            let _ = execute!(
-                stdout(),
-                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-            );
-        }
-        let terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
-        Ok(Self {
-            terminal,
-            enhanced_keys,
-        })
-    }
-}
-
-impl Drop for Tui {
-    fn drop(&mut self) {
-        if self.enhanced_keys {
-            let _ = execute!(
-                self.terminal.backend_mut(),
-                PopKeyboardEnhancementFlags
-            );
-        }
-        let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
-        let _ = self.terminal.show_cursor();
-    }
-}
-
-// -------------------------------------------------------------------- tests
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::session::OutputLine;
-
-    fn tmpdir() -> PathBuf {
-        let mut b = [0u8; 6];
-        let _ = getrandom::fill(&mut b);
-        let p = std::env::temp_dir().join(format!(
-            "envoy-tui-{:02x}{:02x}{:02x}{:02x}",
-            b[0], b[1], b[2], b[3]
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        p
-    }
-
-    fn job(id: JobId, state: JobState) -> Job {
-        Job {
-            id,
-            owner: "local".into(),
-            spec: TaskSpec::Shell {
-                command: format!("echo {id}"),
-            },
-            cwd: "/tmp".into(),
-            label: None,
-            group: DEFAULT_GROUP.into(),
-            created_ms: now_ms(),
-            state,
-            pid: None,
-            log_bytes: 0,
-        }
-    }
-
-    #[test]
-    fn opens_with_input_focused_and_welcome_screen() {
-        use ratatui::backend::TestBackend;
-        let dir = tmpdir();
-        let mut app = App::new(dir.clone(), "local".into(), None, PathBuf::from("/tmp/project"));
-        app.connected = true;
-        assert_eq!(app.focus, Focus::Input);
-
-        let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect();
-
-        let version = format!("envoy {}", env!("CARGO_PKG_VERSION"));
-        for needle in [version.as_str(), "/tmp/project", "/login", "ctrl+p"] {
-            assert!(text.contains(needle), "missing {needle:?}:\n{text}");
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn slash_menu_filters_completes_and_opens_login() {
-        let dir = tmpdir();
-        let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-        app.input = "/log".into();
-        app.input_cursor = 4;
-
-        let names: Vec<&str> = app.filtered_slash().iter().map(|c| c.name).collect();
-        assert_eq!(names, vec!["login", "logout"]);
-
-        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.input, "/login");
-
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(app.modal, Some(Modal::Login(LoginModal::SelectProvider { .. }))));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn login_api_key_flow_persists_and_enables_agent_mode() {
-        let dir = tmpdir();
-        let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-        assert_eq!(app.mode, InputMode::Shell);
-
-        app.run_slash("/login");
-        // Filter to deepseek
-        for ch in "deepseek".chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(
-            app.modal,
-            Some(Modal::Login(LoginModal::ApiKeyForm { .. }))
-        ));
-
-        for ch in "sk-test-key".chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
-        }
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-
-        assert!(app.modal.is_none());
-        assert_eq!(app.mode, InputMode::Agent);
-        let (prov, model) = resolve_active_provider(&dir).unwrap();
-        assert_eq!(prov.id, "deepseek");
-        assert_eq!(model.model_id, "deepseek-chat");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn cd_directory_autocomplete_lists_subdirs_and_switches() {
-        let dir = tmpdir();
-        let sub = dir.join("alpha-proj");
-        std::fs::create_dir_all(&sub).unwrap();
-        std::fs::create_dir_all(dir.join("beta-proj")).unwrap();
-
-        let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-        app.input = "/cd al".into();
-        app.input_cursor = app.input.chars().count();
-
-        let comps = app.cd_completions();
-        assert_eq!(comps, vec![("alpha-proj/".into(), "alpha-proj/".into())]);
-
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.session.cwd, std::fs::canonicalize(&sub).unwrap());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn multiline_shift_enter_inserts_newline_and_bang_runs_shell() {
-        let dir = tmpdir();
-        let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-        app.mode = InputMode::Agent;
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
-        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
-        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
-        assert_eq!(app.input, "a\nb");
-
-        app.input = "!echo hi".into();
-        app.input_cursor = app.input.chars().count();
-        match app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
-            Action::SubmitShell(req) => assert_eq!(req.spec.display(), "echo hi"),
-            _ => panic!("!cmd should always submit shell even in Agent mode"),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn renders_transcript_cards_and_sidebar() {
-        use ratatui::backend::TestBackend;
-        let dir = tmpdir();
-        let mut app = App::new(dir.clone(), "local".into(), None, PathBuf::from("/tmp"));
-        app.connected = true;
-        app.show_sidebar = true;
-        app.jobs = vec![job(
-            1,
-            JobState::Done {
-                at_ms: now_ms(),
-                result: envoy_proto::JobResult::Success,
-            },
-        )];
-        let uid = app.session.alloc_id();
-        app.session.items.push(TranscriptItem::User {
-            id: uid,
-            text: "check files".into(),
-            mode: "Agent".into(),
-            cwd: "/tmp".into(),
-            ts_ms: now_ms(),
-        });
-        let tid = app.session.alloc_id();
-        app.session.items.push(TranscriptItem::Tool {
-            id: tid,
-            call_id: "c1".into(),
-            name: "exec".into(),
-            title: "$ ls -la".into(),
-            subtitle: "/tmp".into(),
-            job_id: Some(1),
-            target: "local".into(),
-            output: vec![OutputLine {
-                text: "Cargo.toml".into(),
-                err: false,
-            }],
-            status: CardStatus::Done,
-            collapsed: false,
-            duration_ms: Some(1200),
-            exit_code: Some(0),
-            started_ms: now_ms(),
-        });
-
-        let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
-        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect();
-
-        for needle in ["check files", "$ ls -la", "Cargo.toml", "exit 0", "jobs (1)"] {
-            assert!(text.contains(needle), "missing {needle:?}:\n{text}");
-        }
-
-        // ctrl+o collapses tool output
-        app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
-        assert!(matches!(
-            app.session.items[1],
-            TranscriptItem::Tool { collapsed: true, .. }
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn leader_requires_prefix_and_palette_filters() {
-        let dir = tmpdir();
-        let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-        assert!(matches!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
-            Action::None
-        ));
-        assert!(matches!(
-            app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
-            Action::Quit
-        ));
-
-        app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
-        assert!(matches!(app.modal, Some(Modal::Picker(_))));
-        for ch in "quit".chars() {
-            app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
-        }
-        assert!(matches!(
-            app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            Action::Quit
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}

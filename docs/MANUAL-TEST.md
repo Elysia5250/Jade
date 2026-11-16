@@ -51,8 +51,8 @@ TUI（需要真终端）：
 
 ```bash
 $B ui
-# 左边 job 列表，右边输出，底部命令框，footer 键位提示
-# 按 n 输入 echo hi 回车；选中任务按 c 取消；ctrl+p 打开命令面板；ctrl+x q 退出
+# 空白会话只有底部输入框。状态行：模式、工作区、模型、上下文用量
+# ctrl+p 打开命令面板；ctrl+x q 退出
 ```
 
 MCP：
@@ -209,8 +209,8 @@ TUI 多机切换（conduit 已连接时）：
 
 ```bash
 envoy ui
-# header 显示 "2 peer(s)"；ctrl+p → "Switch to laptop (…)" 回车即切目标
-# 切换后左下 job 列表清空，后续命令都发往新目标
+# 状态行在目标不是 local 时显示机器名；ctrl+p → "Switch to laptop (…)" 回车即切目标
+# 切换后任务发往新目标；`/sidebar` 里的 job 列表跟着换
 ```
 
 > conduit 的 `/v1/services/{id}/open|accept` 与 `/v1/events` 已落地，本清单已在
