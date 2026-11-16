@@ -1173,12 +1173,6 @@ impl App {
         self.set_toast("follow-up queued", false);
     }
 
-    fn answer_pending_ask(&mut self, label: String) {
-        if let Some(ask) = self.pending_ask.take() {
-            self.asks.answer(ask.id, label);
-        }
-    }
-
     fn handle_ask_key(&mut self, key: KeyEvent) -> Action {
         let Some(mut ask) = self.pending_ask.take() else {
             return Action::None;
