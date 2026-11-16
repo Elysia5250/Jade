@@ -1,0 +1,19 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Source size guard
+        run: python3 scripts/check-file-sizes.py
+      - name: Test workspace
+        run: cargo test --workspace
+      - name: Check all targets
+        run: cargo check --workspace --all-targets

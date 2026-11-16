@@ -1,0 +1,13 @@
+# Files above the 700-line hard limit when the guard was introduced.
+# Format: repo-relative path<TAB>current max lines.
+# These entries are a debt list: remove an entry once the file is split, and
+# never raise a number to make a failing check pass.
+crates/envoy-cli/src/auth.rs	1666
+crates/envoy-cli/src/llm.rs	1669
+crates/envoy-cli/src/main.rs	999
+crates/envoy-cli/src/mcp.rs	713
+crates/envoy-cli/src/tui/mod.rs	848
+crates/envoy-cli/src/tui/state.rs	2832
+crates/envoy-cli/src/tui/view.rs	1310
+crates/envoy-service/src/client.rs	706
+crates/envoy-service/src/conduit.rs	801
