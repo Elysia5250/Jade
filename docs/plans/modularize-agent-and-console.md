@@ -14,12 +14,13 @@ context compaction and permissions behind their own modules.
 - [x] Baseline the existing TUI split and context meter.
 - [x] Add `scripts/check-file-sizes.py` and a debt baseline.
 - [x] Add `AGENTS.md` map and `docs/architecture.md`.
-- [ ] Split `tui/state.rs` into `state/{mod,agent,jobs,login,modals,commands,input}.rs`.
-- [ ] Split `tui/view.rs` into `view/{mod,transcript,editor,status,sidebar,queued,ask,menus,modals}.rs`.
-- [ ] Split `llm.rs` into `agent/{loop,prompt,events,asks}` and
+- [x] Split `tui/state.rs` into `state/{mod,agent,jobs,login,modals,commands,input}.rs`.
+- [x] Split `tui/view.rs` into `view/{mod,transcript,editor,status,sidebar,queued,ask,menus,modals}.rs`.
+- [x] Split `llm.rs` into `agent/{loop,prompt,events,asks}` and
       `agent/{tools,providers}/`.
 - [ ] Enable the hard file-size check with the split files removed from the
-      baseline.
+      baseline. (state, view and llm entries removed; auth/main/mcp/service
+      remain.)
 - [ ] Context compaction module.
 - [ ] Permission module.
 
