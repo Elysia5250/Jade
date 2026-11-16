@@ -139,6 +139,13 @@ through `sh -c`; multiple arguments are executed verbatim (no shell) unless
 | `pgup`/`pgdn`, `ctrl+u`/`ctrl+f`, `g`/`G` | scroll transcript / jump top or bottom |
 | `esc` / `ctrl+c` | clear input / cancel active turn or focus transcript / quit |
 
+**Async input.** While a turn is running the editor stays live: `enter` steers
+the loop with your exact words (delivered at the next tool boundary), `alt+enter`
+queues a follow-up for after the run, `esc` interrupts, and `alt+up` recalls a
+queued follow-up. The agent reports through the `say` tool and asks decisions
+through `ask` (options with one recommended; after 300s the recommended option
+is taken). Detached jobs can be awaited with `job action=wait`.
+
 Bare commands run in the console's working directory (`--cwd` or `/cd` to
 change it). The agent reads `AGENTS.md` (or `ENVOY.md`) from that directory as
 project instructions, replies in the language of your message, and renders

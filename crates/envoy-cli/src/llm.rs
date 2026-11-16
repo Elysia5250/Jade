@@ -18,10 +18,12 @@ use envoy_proto::{LogRecord, SubmitRequest, TaskSpec, DEFAULT_GROUP, READ_LIMIT}
 use envoy_service::{dialer_for, AgentDialer, Remote};
 use futures::StreamExt;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 const TOOL_OUTPUT_CAP: usize = 64 * 1024;
 const MAX_TOOL_STEPS: usize = 25;
@@ -54,12 +56,75 @@ pub enum AgentEvent {
         duration_ms: u64,
         exit_code: Option<i32>,
     },
+    /// A user-facing progress note from the `say` tool.
+    Say {
+        text: String,
+        kind: String,
+    },
+    /// The `ask` tool wants a decision; the UI answers through [`AskBroker`].
+    Ask {
+        id: u64,
+        question: String,
+        options: Vec<AskOption>,
+        recommended: usize,
+        timeout_ms: u64,
+    },
+    /// The ask timed out (or was aborted) and the UI should close the prompt.
+    AskClosed {
+        id: u64,
+    },
     TurnDone {
         messages: Vec<ChatMessage>,
         input_tokens: u64,
         output_tokens: u64,
     },
     TurnError(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct AskOption {
+    pub label: String,
+    pub description: Option<String>,
+    pub recommended: bool,
+}
+
+/// Routes `ask` questions to the UI and waits for the chosen option.
+#[derive(Default)]
+pub struct AskBroker {
+    next: AtomicU64,
+    pending: Mutex<HashMap<u64, oneshot::Sender<String>>>,
+}
+
+impl std::fmt::Debug for AskBroker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AskBroker")
+    }
+}
+
+impl AskBroker {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn next_id(&self) -> u64 {
+        self.next.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn register(&self, id: u64, tx: oneshot::Sender<String>) {
+        self.pending.lock().unwrap().insert(id, tx);
+    }
+
+    fn forget(&self, id: u64) {
+        self.pending.lock().unwrap().remove(&id);
+    }
+
+    /// Answer a pending question. Returns false if it already timed out.
+    pub fn answer(&self, id: u64, label: String) -> bool {
+        match self.pending.lock().unwrap().remove(&id) {
+            Some(tx) => tx.send(label).is_ok(),
+            None => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +136,11 @@ pub struct TurnConfig {
     pub provider: StoredProvider,
     pub model: ModelRef,
     pub history: Vec<ChatMessage>,
+    /// Questions the model asks the user.
+    pub asks: Arc<AskBroker>,
+    /// Messages the user steered in while the turn is running; drained between
+    /// tool batches and delivered verbatim as `role=user`.
+    pub steer: Arc<Mutex<Vec<String>>>,
 }
 
 pub async fn run_agent_turn(cfg: TurnConfig, tx: mpsc::UnboundedSender<AgentEvent>) {
@@ -161,7 +231,8 @@ async fn execute_turn(
         }
 
         for tc in tool_calls {
-            let result = run_tool_call(&remote, &cfg.target, &cfg.cwd, &tc, tx).await;
+            let result =
+                run_tool_call(&remote, &cfg.target, &cfg.cwd, &tc, tx, &cfg.asks).await;
             messages.push(ChatMessage {
                 role: ChatRole::Tool,
                 content: result,
@@ -169,6 +240,23 @@ async fn execute_turn(
                 tool_calls: Vec::new(),
                 tool_call_id: Some(tc.id),
                 tool_name: Some(tc.name),
+            });
+        }
+
+        // Steering: deliver queued user text verbatim before the next model
+        // call. No summarising, no reordering.
+        let steered: Vec<String> = {
+            let mut pending = cfg.steer.lock().unwrap();
+            pending.drain(..).collect()
+        };
+        for text in steered {
+            messages.push(ChatMessage {
+                role: ChatRole::User,
+                content: text,
+                reasoning: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                tool_name: None,
             });
         }
     }
@@ -188,14 +276,19 @@ fn build_system_prompt(target: &str, cwd: &Path) -> String {
          - If a request is ambiguous, ask one short question before acting. If a command is destructive (delete, overwrite, force-push, chmod -R, kill), confirm first.\n\
          - Prefer `read`/`edit`/`ls` over shell commands when inspecting or editing files. Relative paths resolve against the working directory.\n\
          - Use `exec` with a small wait for long commands, then `job` to follow or cancel. Report exact commands, job ids and exit codes; never invent tool output.\n\
-         - Answer in Markdown. Use tables for comparisons, but keep them narrow enough for a terminal.\n\n\
-         ## Tools (all run on the active target machine)\n\
+         - Answer in Markdown. Use tables for comparisons, but keep them narrow enough for a terminal.\n\
+         - Use `say` for short progress notes the user should see while you work (one sentence). Do not use it to restate the request.\n\
+         - Use `ask` when a decision is genuinely ambiguous or a command is destructive. Give 2-5 options, mark exactly one `recommended`, and keep the safe option recommended for destructive actions. If nobody answers within the timeout, the recommended option is taken.\n\n\
+         ## Machine tools (run on the active target machine)\n\
          - `exec`: run a shell command (detached daemon job, streams output)\n\
          - `read`: read a file\n\
          - `write`: write a whole file atomically\n\
          - `edit`: replace an exact snippet in a file\n\
          - `ls`: list a directory\n\
-         - `job`: inspect, follow logs of, or cancel detached jobs",
+         - `job`: inspect, follow logs of (action \"wait\"), or cancel detached jobs\n\
+         ## User tools (not machine operations)\n\
+         - `say`: report progress to the user\n\
+         - `ask`: ask the user to choose; blocks until answered or timeout",
         cwd.display(),
         std::env::consts::OS,
         std::env::consts::ARCH
@@ -242,6 +335,41 @@ mod prompt_tests {
         p
     }
 
+    #[tokio::test]
+    async fn ask_broker_routes_an_answer_once() {
+        let asks = AskBroker::new();
+        let (tx, rx) = oneshot::channel();
+        asks.register(7, tx);
+        assert!(asks.answer(7, "yes".into()));
+        assert_eq!(rx.await.unwrap(), "yes");
+        assert!(!asks.answer(7, "again".into()));
+    }
+
+    #[tokio::test]
+    async fn ask_tool_returns_the_chosen_option() {
+        let asks = AskBroker::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let answerer = asks.clone();
+        tokio::spawn(async move {
+            if let Some(AgentEvent::Ask { id, .. }) = rx.recv().await {
+                answerer.answer(id, "B".into());
+            }
+        });
+        let out = ask_tool(
+            &asks,
+            &tx,
+            &json!({
+                "question": "which?",
+                "options": [{"label": "A"}, {"label": "B", "recommended": true}],
+                "timeout_s": 5
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(out.contains("\"answer\":\"B\""), "{out}");
+        assert!(out.contains("\"via\":\"user\""), "{out}");
+    }
+
     #[test]
     fn prompt_pins_the_language_and_environment() {
         let dir = tmpdir("lang");
@@ -251,6 +379,21 @@ mod prompt_tests {
         assert!(prompt.contains("laptop"));
         assert!(prompt.contains(&dir.display().to_string()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_toolset_includes_say_and_ask() {
+        let names: Vec<String> = openai_tools_json()
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(names.contains(&"say".to_string()), "{names:?}");
+        assert!(names.contains(&"ask".to_string()), "{names:?}");
+        assert!(names.contains(&"exec".to_string()), "{names:?}");
+        let prompt = build_system_prompt("local", std::path::Path::new("/tmp"));
+        assert!(prompt.contains("`say`"));
+        assert!(prompt.contains("`ask`"));
+        assert!(prompt.contains("recommended"));
     }
 
     #[test]
@@ -350,8 +493,51 @@ fn openai_tools_json() -> Vec<Value> {
         json!({
             "type": "function",
             "function": {
+                "name": "say",
+                "description": "Report a short progress note to the user. Non-blocking.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string" },
+                        "kind": { "type": "string", "enum": ["progress", "note", "warning"], "default": "progress" }
+                    },
+                    "required": ["text"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "ask",
+                "description": "Ask the user to choose between options. Blocks the turn until answered; on timeout the recommended option is used (default 300s).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string" },
+                        "options": {
+                            "type": "array",
+                            "minItems": 2,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "label": { "type": "string" },
+                                    "description": { "type": "string" },
+                                    "recommended": { "type": "boolean" }
+                                },
+                                "required": ["label"]
+                            }
+                        },
+                        "timeout_s": { "type": "integer", "default": 300 }
+                    },
+                    "required": ["question", "options"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
                 "name": "job",
-                "description": "Inspect or control detached jobs (`list`, `status`, `logs`, `cancel`).",
+                "description": "Inspect or control detached jobs (`list`, `wait`, `status`, `logs`, `cancel`).",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -448,6 +634,7 @@ async fn run_tool_call(
     cwd: &Path,
     tc: &ToolCall,
     tx: &mpsc::UnboundedSender<AgentEvent>,
+    asks: &Arc<AskBroker>,
 ) -> String {
     let args: Value = serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!({}));
     let (title, subtitle) = summarize_tool(&tc.name, &args);
@@ -466,6 +653,15 @@ async fn run_tool_call(
         "edit" => edit_tool(remote, target, cwd, &args).await.map(|s| (s, None)),
         "ls" => ls_tool(remote, target, cwd, &args).await.map(|s| (s, None)),
         "job" => job_tool(remote, target, &args).await.map(|s| (s, None)),
+        "say" => {
+            let text = args["text"].as_str().unwrap_or("").trim().to_string();
+            let kind = args["kind"].as_str().unwrap_or("progress").to_string();
+            if !text.is_empty() {
+                let _ = tx.send(AgentEvent::Say { text, kind });
+            }
+            Ok(("ok".to_string(), None))
+        }
+        "ask" => ask_tool(asks, tx, &args).await.map(|s| (s, None)),
         other => Err(anyhow!("unknown tool `{other}`")),
     };
 
@@ -676,6 +872,60 @@ async fn ls_tool(
     Ok(out)
 }
 
+async fn ask_tool(
+    asks: &Arc<AskBroker>,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    args: &Value,
+) -> Result<String> {
+    let question = args["question"]
+        .as_str()
+        .filter(|q| !q.trim().is_empty())
+        .context("missing `question`")?;
+    let list = args["options"]
+        .as_array()
+        .context("`ask` needs at least one option")?;
+    let mut options = Vec::new();
+    for item in list {
+        if let Some(label) = item["label"].as_str() {
+            options.push(AskOption {
+                label: label.to_string(),
+                description: item["description"].as_str().map(str::to_string),
+                recommended: item["recommended"].as_bool().unwrap_or(false),
+            });
+        }
+    }
+    if options.is_empty() {
+        bail!("`ask` needs at least one option");
+    }
+    let recommended = options
+        .iter()
+        .position(|o| o.recommended)
+        .unwrap_or(0);
+    let timeout_s = args["timeout_s"].as_u64().unwrap_or(300).clamp(5, 3600);
+    let id = asks.next_id();
+    let (send, recv) = oneshot::channel();
+    asks.register(id, send);
+    let _ = tx.send(AgentEvent::Ask {
+        id,
+        question: question.to_string(),
+        options: options.clone(),
+        recommended,
+        timeout_ms: timeout_s * 1000,
+    });
+
+    let answer = tokio::time::timeout(Duration::from_secs(timeout_s), recv).await;
+    asks.forget(id);
+    let (label, via) = match answer {
+        Ok(Ok(label)) => (label, "user"),
+        // Timeout or the UI went away: take the recommended option.
+        _ => {
+            let _ = tx.send(AgentEvent::AskClosed { id });
+            (options[recommended].label.clone(), "timeout")
+        }
+    };
+    Ok(json!({ "answer": label, "via": via }).to_string())
+}
+
 async fn job_tool(
     remote: &Remote<Box<dyn AgentDialer>>,
     target: &str,
@@ -723,6 +973,32 @@ async fn job_tool(
                 .await?;
             text.push_str(&format!("\n[next={next} finished={finished:?}]"));
             Ok(text)
+        }
+        "wait" => {
+            let id = args["id"].as_u64().context("missing `id`")?;
+            let timeout_s = args["timeout_s"].as_u64().unwrap_or(300).clamp(5, 3600);
+            let deadline = Instant::now() + Duration::from_secs(timeout_s);
+            let mut offset = 0u64;
+            let mut text = String::new();
+            loop {
+                let (next, finished) = remote
+                    .logs(target, id, offset, false, |recs| {
+                        for r in recs {
+                            text.push_str(&String::from_utf8_lossy(&r.data));
+                        }
+                    })
+                    .await?;
+                offset = next;
+                if let Some(code) = finished {
+                    return Ok(format!("{text}\n[job #{id} exit {code}]"));
+                }
+                if Instant::now() >= deadline {
+                    return Ok(format!(
+                        "{text}\n[job #{id} still running after {timeout_s}s; use job wait again]"
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
         }
         "cancel" => {
             let id = args["id"].as_u64().context("missing `id`")?;

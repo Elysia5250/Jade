@@ -103,6 +103,12 @@ pub enum TranscriptItem {
         text: String,
         is_error: bool,
     },
+    /// A user-facing progress note emitted by the `say` tool.
+    Say {
+        id: u64,
+        text: String,
+        level: String,
+    },
 }
 
 fn default_true() -> bool {
@@ -115,7 +121,8 @@ impl TranscriptItem {
             TranscriptItem::User { id, .. }
             | TranscriptItem::Assistant { id, .. }
             | TranscriptItem::Tool { id, .. }
-            | TranscriptItem::Notice { id, .. } => *id,
+            | TranscriptItem::Notice { id, .. }
+            | TranscriptItem::Say { id, .. } => *id,
         }
     }
 

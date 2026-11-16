@@ -24,7 +24,7 @@ use crate::auth::{
     BUILTIN_PROVIDERS,
 };
 use crate::daemon;
-use crate::llm::{run_agent_turn, AgentEvent, TurnConfig};
+use crate::llm::{run_agent_turn, AgentEvent, AskBroker, AskOption, TurnConfig};
 use crate::session::{
     delete_session, latest_session_for_cwd, list_sessions, load_session, save_session, CardStatus,
     ChatMessage, ChatRole, Session, SessionSummary, TranscriptItem,
@@ -46,7 +46,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::io::{stdout, IsTerminal, Stdout};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -107,7 +108,8 @@ pub async fn run(
                     }
                     Action::None => {}
                     Action::SubmitShell(req) => app.submit_shell(&remote, req).await,
-                    Action::SubmitAgent(prompt) => app.start_agent_turn(prompt),
+                    Action::SubmitAgent(prompt) => app.submit_agent(prompt),
+                    Action::SubmitAgentFollowup(prompt) => app.queue_followup(prompt),
                     Action::Cancel => app.cancel_active(&remote).await,
                     Action::CancelJob(id) => app.cancel_job(&remote, id).await,
                     Action::Refresh => app.refresh(&remote).await,
@@ -252,6 +254,7 @@ enum Action {
     Refresh,
     SubmitShell(SubmitRequest),
     SubmitAgent(String),
+    SubmitAgentFollowup(String),
     Cancel,
     CancelJob(JobId),
     Switch(String),
@@ -485,6 +488,15 @@ struct ShellWatch {
 
 // ------------------------------------------------------------------ App
 
+struct PendingAsk {
+    id: u64,
+    question: String,
+    options: Vec<AskOption>,
+    recommended: usize,
+    selected: usize,
+    deadline: Instant,
+}
+
 struct App {
     data_dir: PathBuf,
     conduit: Option<PathBuf>,
@@ -520,6 +532,10 @@ struct App {
 
     // Active agent turn
     agent_running: bool,
+    asks: Arc<AskBroker>,
+    steer: Arc<Mutex<Vec<String>>>,
+    pending_ask: Option<PendingAsk>,
+    queued: VecDeque<String>,
     agent_rx: Option<mpsc::UnboundedReceiver<AgentEvent>>,
     agent_task: Option<JoinHandle<()>>,
     active_assistant_id: Option<u64>,
@@ -577,6 +593,10 @@ impl App {
             interval: Duration::from_millis(600),
             last_refresh: Instant::now() - Duration::from_secs(1),
             agent_running: false,
+            asks: AskBroker::new(),
+            steer: Arc::new(Mutex::new(Vec::new())),
+            pending_ask: None,
+            queued: VecDeque::new(),
             agent_rx: None,
             agent_task: None,
             active_assistant_id: None,
@@ -902,6 +922,7 @@ impl App {
         self.session.touch();
         self.follow = true;
 
+        self.pending_ask = None;
         let (tx, rx) = mpsc::unbounded_channel();
         let cfg = TurnConfig {
             data_dir: self.data_dir.clone(),
@@ -911,6 +932,8 @@ impl App {
             provider,
             model,
             history: self.session.messages.clone(),
+            asks: self.asks.clone(),
+            steer: self.steer.clone(),
         };
         let handle = tokio::spawn(run_agent_turn(cfg, tx));
         self.agent_running = true;
@@ -1038,6 +1061,40 @@ impl App {
                         }
                     }
                 }
+                AgentEvent::Say { text, kind } => {
+                    let id = self.session.alloc_id();
+                    self.session.items.push(TranscriptItem::Say {
+                        id,
+                        text,
+                        level: kind,
+                    });
+                    self.session.touch();
+                    self.persist_session();
+                    self.follow = true;
+                }
+                AgentEvent::Ask {
+                    id,
+                    question,
+                    options,
+                    recommended,
+                    timeout_ms,
+                } => {
+                    self.pending_ask = Some(PendingAsk {
+                        id,
+                        question,
+                        options,
+                        recommended,
+                        selected: recommended,
+                        deadline: Instant::now() + Duration::from_millis(timeout_ms),
+                    });
+                    self.follow = true;
+                }
+                AgentEvent::AskClosed { id } => {
+                    if self.pending_ask.as_ref().map(|a| a.id) == Some(id) {
+                        self.pending_ask = None;
+                        self.set_toast("no answer; using the recommended option", false);
+                    }
+                }
                 AgentEvent::TurnDone {
                     messages,
                     input_tokens,
@@ -1079,9 +1136,80 @@ impl App {
             self.agent_task = None;
             self.active_assistant_id = None;
             self.active_tool_items.clear();
+            self.pending_ask = None;
+            if let Some(next) = self.queued.pop_front() {
+                self.start_agent_turn(next);
+            }
         } else {
             self.agent_rx = Some(rx);
         }
+    }
+
+    /// Enter while idle starts a turn; while running it steers the loop with
+    /// the user's exact words at the next tool boundary.
+    fn submit_agent(&mut self, prompt: String) {
+        if !self.agent_running {
+            self.start_agent_turn(prompt);
+            return;
+        }
+        self.steer.lock().unwrap().push(prompt.clone());
+        let id = self.session.alloc_id();
+        self.session.items.push(TranscriptItem::User {
+            id,
+            text: prompt,
+            mode: "Agent · steer".into(),
+            cwd: self.cwd_label(),
+            ts_ms: now_ms(),
+        });
+        self.session.touch();
+        self.persist_session();
+        self.follow = true;
+        self.set_toast("steer queued for the next tool boundary", false);
+    }
+
+    /// Alt+Enter: deliver after the current run finishes.
+    fn queue_followup(&mut self, prompt: String) {
+        self.queued.push_back(prompt);
+        self.set_toast("follow-up queued", false);
+    }
+
+    fn answer_pending_ask(&mut self, label: String) {
+        if let Some(ask) = self.pending_ask.take() {
+            self.asks.answer(ask.id, label);
+        }
+    }
+
+    fn handle_ask_key(&mut self, key: KeyEvent) -> Action {
+        let Some(mut ask) = self.pending_ask.take() else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Up => {
+                ask.selected = ask.selected.saturating_sub(1);
+                self.pending_ask = Some(ask);
+            }
+            KeyCode::Down => {
+                ask.selected = (ask.selected + 1).min(ask.options.len().saturating_sub(1));
+                self.pending_ask = Some(ask);
+            }
+            KeyCode::Enter => {
+                let label = ask
+                    .options
+                    .get(ask.selected)
+                    .map(|o| o.label.clone())
+                    .unwrap_or_default();
+                self.asks.answer(ask.id, label.clone());
+                self.set_toast(format!("chose: {label}"), false);
+            }
+            KeyCode::Esc => {
+                if let Some(option) = ask.options.get(ask.recommended) {
+                    self.asks.answer(ask.id, option.label.clone());
+                    self.set_toast(format!("chose recommended: {}", option.label), false);
+                }
+            }
+            _ => self.pending_ask = Some(ask),
+        }
+        Action::None
     }
 
     async fn cancel_active(&mut self, remote: &Remote<AnyDialer>) {
@@ -1091,6 +1219,7 @@ impl App {
             }
             self.agent_running = false;
             self.agent_rx = None;
+            self.pending_ask = None;
             if let Some(id) = self.active_assistant_id.take() {
                 if let Some(TranscriptItem::Assistant { done, error, .. }) =
                     self.session.items.iter_mut().find(|i| i.id() == id)
@@ -1912,6 +2041,17 @@ impl App {
         if self.modal.is_some() {
             return self.handle_modal_key(key);
         }
+        if self.pending_ask.is_some() {
+            return self.handle_ask_key(key);
+        }
+        if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Up {
+            if let Some(last) = self.queued.pop_back() {
+                self.input = last;
+                self.input_cursor = self.input.chars().count();
+                self.focus = Focus::Input;
+            }
+            return Action::None;
+        }
 
         // Leader prefix (`ctrl+x`)
         if let Some(at) = self.leader_at.take() {
@@ -2200,9 +2340,7 @@ impl App {
         }
 
         // 3. Multiline newline bindings (Shift+Enter, Alt+Enter, Ctrl+J)
-        if (key.code == KeyCode::Enter
-            && (key.modifiers.contains(KeyModifiers::SHIFT)
-                || key.modifiers.contains(KeyModifiers::ALT)))
+        if (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT))
             || (key.code == KeyCode::Char('j') && key.modifiers.contains(KeyModifiers::CONTROL))
         {
             self.insert_char('\n');
@@ -2249,6 +2387,9 @@ impl App {
                         group: DEFAULT_GROUP.to_string(),
                         timeout_s: 0,
                     }),
+                    InputMode::Agent if key.modifiers.contains(KeyModifiers::ALT) => {
+                        Action::SubmitAgentFollowup(text)
+                    }
                     InputMode::Agent => Action::SubmitAgent(text),
                 }
             }
@@ -3134,18 +3275,25 @@ fn draw(frame: &mut Frame, app: &mut App) {
     draw_editor(frame, app, &theme, chunks[2], &visual_lines, editor_skip);
     draw_footer(frame, app, &theme, chunks[3]);
 
+    draw_queued(frame, app, &theme, chunks[2]);
+
     // Popups
-    if app.focus == Focus::Input && app.modal.is_none() {
-        if !app.cd_completions().is_empty() {
-            draw_cd_menu(frame, app, &theme, chunks[2]);
-        } else if !app.filtered_slash().is_empty() {
-            draw_slash_menu(frame, app, &theme, chunks[2]);
+    if app.pending_ask.is_some() {
+        draw_ask(frame, app, &theme, area);
+    } else {
+        if app.focus == Focus::Input && app.modal.is_none() {
+            if !app.cd_completions().is_empty() {
+                draw_cd_menu(frame, app, &theme, chunks[2]);
+            } else if !app.filtered_slash().is_empty() {
+                draw_slash_menu(frame, app, &theme, chunks[2]);
+            }
+        }
+        if app.modal.is_some() {
+            draw_modal(frame, app, &theme, area);
         }
     }
 
-    if app.modal.is_some() {
-        draw_modal(frame, app, &theme, area);
-    } else if app.focus == Focus::Input {
+    if app.modal.is_none() && app.pending_ask.is_none() && app.focus == Focus::Input {
         let inner = chunks[2];
         let x = inner.x + 4 + (cursor_col as u16);
         let visible_row = cursor_row.saturating_sub(editor_skip).min(max_rows.saturating_sub(1));
@@ -3450,6 +3598,21 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) 
                     lines.push(Line::styled(format!(" · {w}"), style));
                 }
             }
+            TranscriptItem::Say { text, level, .. } => {
+                lines.push(Line::from(""));
+                let style = Style::default().fg(match level.as_str() {
+                    "warning" => theme.warn,
+                    "error" => theme.bad,
+                    _ => theme.secondary,
+                });
+                for (i, w) in wrap_text(text, width.saturating_sub(4)).iter().enumerate() {
+                    let prefix = if i == 0 { " · " } else { "   " };
+                    lines.push(Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(theme.accent)),
+                        Span::styled(w.clone(), style),
+                    ]));
+                }
+            }
         }
     }
 
@@ -3708,12 +3871,115 @@ fn draw_editor(
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+fn draw_queued(frame: &mut Frame, app: &App, theme: &Theme, editor: Rect) {
+    if app.queued.is_empty() {
+        return;
+    }
+    let take = app.queued.len().min(3);
+    let height = take as u16 + 2;
+    let area = Rect {
+        x: editor.x + 1,
+        y: editor.y.saturating_sub(height),
+        width: editor.width.saturating_sub(2),
+        height,
+    };
+    if area.height < 3 {
+        return;
+    }
+    frame.render_widget(Clear, area);
+    let mut lines = Vec::new();
+    for text in app.queued.iter().take(take) {
+        lines.push(Line::from(vec![
+            Span::styled(" ⏳ later  ", Style::default().fg(theme.warn)),
+            Span::raw(truncate_width(
+                text,
+                area.width.saturating_sub(12) as usize,
+            )),
+        ]));
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.warn))
+        .style(Style::default().bg(theme.panel))
+        .title(Span::styled(" queued ", Style::default().fg(theme.warn)));
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn draw_ask(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    let Some(ask) = &app.pending_ask else {
+        return;
+    };
+    let width = 64u16.min(area.width.saturating_sub(4));
+    let height = (ask.options.len() as u16 + 8).min(area.height.saturating_sub(2));
+    if width < 20 || height < 5 {
+        return;
+    }
+    let popup = centered_rect(area, width, height);
+    frame.render_widget(Clear, popup);
+    let mut lines = vec![Line::from("")];
+    for wrapped in wrap_text(&ask.question, width.saturating_sub(4) as usize) {
+        lines.push(Line::styled(
+            format!(" {wrapped}"),
+            Style::default().fg(theme.text),
+        ));
+    }
+    lines.push(Line::from(""));
+    for (index, option) in ask.options.iter().enumerate() {
+        let chosen = index == ask.selected;
+        let marker = if chosen { " ▸ " } else { "   " };
+        let style = if chosen {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text)
+        };
+        let rec = if option.recommended { "  (recommended)" } else { "" };
+        lines.push(Line::styled(format!("{marker}{}{rec}", option.label), style));
+        if let Some(desc) = &option.description {
+            lines.push(Line::styled(
+                format!("     {desc}"),
+                Style::default().fg(theme.dim),
+            ));
+        }
+    }
+    lines.push(Line::from(""));
+    let left = ask
+        .deadline
+        .saturating_duration_since(Instant::now())
+        .as_secs();
+    lines.push(Line::styled(
+        format!(" enter choose · esc recommended · {left}s left"),
+        Style::default().fg(theme.dim),
+    ));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.warn))
+        .style(Style::default().bg(theme.panel))
+        .title(Span::styled(" ask ", Style::default().fg(theme.warn)));
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
 fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let model_hint = match resolve_active_provider(&app.data_dir) {
         Some((_, m)) => m.display(),
         None => "run /login".to_string(),
     };
-    let hints = Line::from(vec![
+    let hints = if app.agent_running {
+        Line::from(vec![
+            Span::styled(" enter ", Style::default().fg(theme.accent)),
+            Span::styled("steer ", Style::default().fg(theme.dim)),
+            Span::styled("alt+enter ", Style::default().fg(theme.accent)),
+            Span::styled("queue ", Style::default().fg(theme.dim)),
+            Span::styled("esc ", Style::default().fg(theme.accent)),
+            Span::styled("interrupt ", Style::default().fg(theme.dim)),
+            Span::styled("! ", Style::default().fg(theme.accent)),
+            Span::styled("shell ", Style::default().fg(theme.dim)),
+            Span::styled("ctrl+o ", Style::default().fg(theme.accent)),
+            Span::styled("expand", Style::default().fg(theme.dim)),
+        ])
+    } else {
+        Line::from(vec![
         Span::styled(
             format!(" {} ", app.mode.label()),
             Style::default()
@@ -3731,7 +3997,8 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Span::styled("palette  ", Style::default().fg(theme.dim)),
         Span::styled("ctrl+x q ", Style::default().fg(theme.accent)),
         Span::styled("quit", Style::default().fg(theme.dim)),
-    ]);
+    ])
+    };
     frame.render_widget(Paragraph::new(hints), area);
 }
 
