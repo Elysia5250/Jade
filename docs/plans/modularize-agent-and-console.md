@@ -33,7 +33,10 @@ context compaction and permissions behind their own modules.
 
 ## Next
 
-Split `tui/state.rs` by concern, starting with the agent/event methods.
+Phase 1 is complete through the agent split. Next is phase 2: add
+`agent/context/` (budget, pruning, structured summary, overflow retry) before
+permissions. `auth.rs`, `main.rs`, `mcp.rs` and two service files remain in
+the size baseline; split them opportunistically when they are touched.
 
 ## Verification
 
