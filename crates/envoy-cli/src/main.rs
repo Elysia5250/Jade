@@ -289,7 +289,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let is_mcp = matches!(cli.cmd.as_ref(), Some(Commands::Mcp { .. }));
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("envoy_cli=info,envoy_service=info"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("envoy=info,envoy_service=info"));
     let builder = tracing_subscriber::fmt().with_env_filter(filter);
     if is_mcp {
         // MCP speaks JSON-RPC on stdout; logs must stay on stderr.

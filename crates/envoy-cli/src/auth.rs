@@ -131,10 +131,6 @@ impl ModelRef {
     }
 }
 
-fn default_true() -> bool {
-    true
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPrefs {
     pub active: Option<ModelRef>,
@@ -142,7 +138,7 @@ pub struct ModelPrefs {
     pub recent: Vec<ModelRef>,
     #[serde(default)]
     pub theme: usize,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub show_sidebar: bool,
 }
 
@@ -152,7 +148,7 @@ impl Default for ModelPrefs {
             active: None,
             recent: Vec::new(),
             theme: 0,
-            show_sidebar: true,
+            show_sidebar: false,
         }
     }
 }

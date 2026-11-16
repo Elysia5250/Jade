@@ -2,11 +2,15 @@
 //!
 //! Layout & interaction mirror `opencode`:
 //! - Opens directly in the current directory with the prompt editor focused.
+//! - Home is a centered block-letter wordmark, model/login hint and a prompt
+//!   panel whose status row shows mode, model and target.
 //! - Main pane is an inline transcript stream of user prompts, streaming
-//!   assistant replies (with collapsible reasoning), and collapsible tool/shell
-//!   execution cards (command/tool, duration, exit code, live stdout/stderr).
-//! - Right sidebar shows session context, active model/auth, target machine,
-//!   and a live index of detached daemon jobs.
+//!   assistant replies, and tool/shell cards. Reasoning and tool output are
+//!   collapsed by default; `ctrl+o` expands them.
+//! - The right sidebar (hidden by default) shows session context and detached
+//!   daemon jobs.
+//! - Turns live in the daemon; the console attaches to an event stream and
+//!   survives a lost connection instead of holding the turn in-process.
 //! - `/` opens the filterable command menu (`/login`, `/models`, `/cd` with
 //!   directory autocomplete, `/machine`, `/sessions`, `/new`, `/mode`, etc.).
 //! - `/login` provides an interactive wizard for API Keys, OAuth (ChatGPT
@@ -42,7 +46,7 @@ use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
@@ -53,7 +57,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const LEADER_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -93,25 +97,7 @@ pub async fn run(
     }
 
     // The turn lives in the daemon; the console attaches to its stream.
-    let _ = runtime::request(
-        &data_dir,
-        &AgentReq::Ensure {
-            id: app.session.id.clone(),
-            cwd: app.session.cwd.clone(),
-            target: app.target.clone(),
-            history: app.session.messages.clone(),
-        },
-    )
-    .await
-    .map_err(|e| app.set_toast(format!("{e:#}"), true));
-    let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(runtime::attach(
-        data_dir.clone(),
-        app.session.id.clone(),
-        app.session.event_seq,
-        tx,
-    ));
-    app.agent_stream = Some(rx);
+    app.spawn_agent_attach();
 
     let mut tui = Tui::enter()?;
     app.refresh(&remote).await;
@@ -152,8 +138,13 @@ pub async fn run(
         }
 
         app.drain_agent_events();
+        app.drain_ui_notices();
         app.drain_login_events();
         app.drain_model_events();
+
+        if app.agent_stream.is_none() && Instant::now() >= app.agent_retry_at {
+            app.spawn_agent_attach();
+        }
 
         if app.last_refresh.elapsed() >= app.interval {
             app.refresh(&remote).await;
@@ -180,7 +171,6 @@ struct Theme {
     border: Color,
     selection: Color,
     surface: Color,
-    user_bg: Color,
     /// Full-screen background. Explicit so a transparent terminal or a
     /// wallpaper cannot leak through as random colour bands.
     bg: Color,
@@ -202,7 +192,6 @@ const THEMES: [(&str, Theme); 3] = [
             border: Color::Rgb(0x45, 0x47, 0x56),
             selection: Color::Rgb(0x2d, 0x2a, 0x3e),
             surface: Color::Rgb(0x1f, 0x20, 0x29),
-            user_bg: Color::Rgb(0x25, 0x24, 0x32),
             bg: Color::Rgb(0x16, 0x17, 0x1d),
             panel: Color::Rgb(0x1b, 0x1c, 0x24),
         },
@@ -220,7 +209,6 @@ const THEMES: [(&str, Theme); 3] = [
             border: Color::Rgb(0x3b, 0x42, 0x61),
             selection: Color::Rgb(0x28, 0x34, 0x57),
             surface: Color::Rgb(0x1e, 0x20, 0x30),
-            user_bg: Color::Rgb(0x24, 0x28, 0x3b),
             bg: Color::Rgb(0x1a, 0x1b, 0x26),
             panel: Color::Rgb(0x1f, 0x23, 0x35),
         },
@@ -238,7 +226,6 @@ const THEMES: [(&str, Theme); 3] = [
             border: Color::Rgb(0xb5, 0xb8, 0xc2),
             selection: Color::Rgb(0xe4, 0xe7, 0xf2),
             surface: Color::Rgb(0xf3, 0xf4, 0xf7),
-            user_bg: Color::Rgb(0xea, 0xec, 0xf4),
             bg: Color::Rgb(0xff, 0xff, 0xff),
             panel: Color::Rgb(0xf5, 0xf6, 0xf9),
         },
@@ -509,6 +496,14 @@ struct ShellWatch {
 
 // ------------------------------------------------------------------ App
 
+enum UiNotice {
+    /// A send failed because the daemon went away; put the items back in the
+    /// outbox so the next attach can deliver them.
+    Requeue(Vec<(String, SendMode)>),
+    /// The daemon returned a recalled follow-up (or had none).
+    Recalled(Option<String>),
+}
+
 struct PendingAsk {
     id: u64,
     question: String,
@@ -554,8 +549,16 @@ struct App {
     // Active agent turn
     agent_running: bool,
     agent_stream: Option<mpsc::UnboundedReceiver<AgentResp>>,
+    agent_retry_at: Instant,
+    agent_offline: bool,
+    /// True after the daemon has sent the attach snapshot. Until then sends
+    /// are held in the outbox so they cannot race the session creation.
+    agent_ready: bool,
     pending_ask: Option<PendingAsk>,
     queued: VecDeque<String>,
+    outbox: VecDeque<(String, SendMode)>,
+    notice_tx: mpsc::UnboundedSender<UiNotice>,
+    notice_rx: mpsc::UnboundedReceiver<UiNotice>,
     active_assistant_id: Option<u64>,
     active_tool_items: HashMap<String, u64>,
 
@@ -581,6 +584,7 @@ impl App {
             InputMode::Shell
         };
         let session = Session::new(cwd, target.clone());
+        let (notice_tx, notice_rx) = mpsc::unbounded_channel();
         Self {
             data_dir,
             conduit,
@@ -612,8 +616,14 @@ impl App {
             last_refresh: Instant::now() - Duration::from_secs(1),
             agent_running: false,
             agent_stream: None,
+            agent_retry_at: Instant::now(),
+            agent_offline: false,
+            agent_ready: false,
             pending_ask: None,
             queued: VecDeque::new(),
+            outbox: VecDeque::new(),
+            notice_tx,
+            notice_rx,
             active_assistant_id: None,
             active_tool_items: HashMap::new(),
             shell_watches: Vec::new(),
@@ -636,6 +646,64 @@ impl App {
         self.session = loaded;
         self.selected_card = None;
         self.follow = true;
+        self.reset_agent_view();
+    }
+
+    fn reset_agent_view(&mut self) {
+        self.agent_running = false;
+        self.active_assistant_id = None;
+        self.active_tool_items.clear();
+        self.pending_ask = None;
+        self.queued.clear();
+        self.outbox.clear();
+        self.agent_stream = None;
+        self.agent_ready = false;
+        self.agent_retry_at = Instant::now();
+    }
+
+    /// Connect (or reconnect) to the daemon session. The replay cursor comes
+    /// from the last event applied to the local transcript.
+    fn spawn_agent_attach(&mut self) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(runtime::attach(
+            self.data_dir.clone(),
+            self.session.id.clone(),
+            self.session.cwd.clone(),
+            self.target.clone(),
+            self.session.messages.clone(),
+            self.session.event_seq,
+            tx,
+        ));
+        self.agent_stream = Some(rx);
+        self.agent_ready = false;
+        self.agent_retry_at = Instant::now() + Duration::from_secs(2);
+    }
+
+    /// Rebuild the in-flight view after an attach. Events before the cursor
+    /// are not replayed, so find the open assistant/tool items in the
+    /// persisted transcript.
+    fn resume_active_view(&mut self) {
+        self.active_assistant_id = self
+            .session
+            .items
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                TranscriptItem::Assistant { id, done: false, .. } => Some(*id),
+                _ => None,
+            });
+        self.active_tool_items.clear();
+        for item in &self.session.items {
+            if let TranscriptItem::Tool {
+                id,
+                call_id,
+                status: CardStatus::Running,
+                ..
+            } = item
+            {
+                self.active_tool_items.insert(call_id.clone(), *id);
+            }
+        }
     }
 
     fn session_cwd_set(&mut self, cwd: PathBuf) {
@@ -706,9 +774,11 @@ impl App {
                     };
                 self.connected = true;
             }
-            Err(e) => {
+            Err(_) => {
+                // Keep the console usable while the daemon is down: the
+                // status line carries the state, and a toast every refresh
+                // would stomp on whatever the user is doing.
                 self.connected = false;
-                self.set_toast(format!("{e:#}"), true);
             }
         }
     }
@@ -738,7 +808,7 @@ impl App {
                     target: self.target.clone(),
                     output: Vec::new(),
                     status: CardStatus::Running,
-                    collapsed: false,
+                    collapsed: true,
                     duration_ms: None,
                     exit_code: None,
                     started_ms: now_ms(),
@@ -904,48 +974,169 @@ impl App {
         false
     }
 
-    fn start_agent_turn(&mut self, prompt: String) {
+    /// Send while connected, otherwise hold the prompt until an attach
+    /// succeeds so a daemon restart does not eat what the user typed.
+    fn send_agent(&mut self, text: String, mode: SendMode) {
+        if !self.agent_ready || self.agent_offline || self.agent_stream.is_none() {
+            self.outbox.push_back((text, mode));
+            if self.agent_offline || self.agent_stream.is_none() {
+                self.set_toast("daemon offline — prompt queued", true);
+            }
+            return;
+        }
+        self.dispatch_agent(vec![(text, mode)]);
+    }
+
+    fn dispatch_agent(&self, items: Vec<(String, SendMode)>) {
+        if items.is_empty() {
+            return;
+        }
         let data_dir = self.data_dir.clone();
         let id = self.session.id.clone();
+        let notice = self.notice_tx.clone();
         tokio::spawn(async move {
-            runtime::tell(
-                &data_dir,
-                AgentReq::Send {
-                    id,
-                    text: prompt,
-                    mode: SendMode::Prompt,
-                },
-            )
-            .await;
+            let mut items = items;
+            while let Some((text, mode)) = items.first().cloned() {
+                let result = runtime::tell(
+                    &data_dir,
+                    AgentReq::Send {
+                        id: id.clone(),
+                        text,
+                        mode,
+                    },
+                )
+                .await;
+                if result.is_err() {
+                    let _ = notice.send(UiNotice::Requeue(items));
+                    return;
+                }
+                items.remove(0);
+            }
         });
-        self.agent_running = true;
-        self.active_assistant_id = None;
-        self.active_tool_items.clear();
-        self.pending_ask = None;
+    }
+
+    fn flush_outbox(&mut self) {
+        if self.outbox.is_empty() {
+            return;
+        }
+        let items: Vec<(String, SendMode)> = self.outbox.drain(..).collect();
+        self.dispatch_agent(items);
+    }
+
+    fn remove_outbox(&mut self, text: &str) {
+        if let Some(pos) = self.outbox.iter().rposition(|(t, _)| t == text) {
+            self.outbox.remove(pos);
+        }
+    }
+
+    fn recall_queued(&self) {
+        if self.agent_offline || self.agent_stream.is_none() {
+            return;
+        }
+        let data_dir = self.data_dir.clone();
+        let id = self.session.id.clone();
+        let notice = self.notice_tx.clone();
+        tokio::spawn(async move {
+            let recalled = match runtime::request(&data_dir, &AgentReq::Recall { id }).await {
+                Ok(AgentResp::Recalled(text)) => text,
+                _ => None,
+            };
+            let _ = notice.send(UiNotice::Recalled(recalled));
+        });
+    }
+
+    fn drain_ui_notices(&mut self) {
+        let mut notices = Vec::new();
+        while let Ok(notice) = self.notice_rx.try_recv() {
+            notices.push(notice);
+        }
+        for notice in notices {
+            match notice {
+                UiNotice::Requeue(items) => {
+                    self.agent_offline = true;
+                    self.agent_ready = false;
+                    self.agent_stream = None;
+                    self.agent_retry_at = Instant::now() + Duration::from_millis(750);
+                    for item in items.into_iter().rev() {
+                        self.outbox.push_front(item);
+                    }
+                    self.set_toast("daemon offline — prompt queued", true);
+                }
+                UiNotice::Recalled(Some(text)) => {
+                    // The daemon's copy is authoritative; this also catches
+                    // follow-ups queued by an earlier console.
+                    self.input = text;
+                    self.input_cursor = self.input.chars().count();
+                    self.focus = Focus::Input;
+                }
+                UiNotice::Recalled(None) => {}
+            }
+        }
+    }
+
+    fn start_agent_turn(&mut self, prompt: String) {
         self.follow = true;
+        if !self.agent_offline && self.agent_stream.is_some() {
+            self.agent_running = true;
+        }
+        self.send_agent(prompt, SendMode::Prompt);
     }
 
     fn drain_agent_events(&mut self) {
-        // Collect first so the borrow on `agent_stream` ends before applying.
-        let messages: Vec<AgentResp> = {
-            let Some(rx) = self.agent_stream.as_mut() else {
-                return;
+        let mut disconnected = false;
+        loop {
+            let message = {
+                let Some(rx) = self.agent_stream.as_mut() else {
+                    return;
+                };
+                match rx.try_recv() {
+                    Ok(message) => message,
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
             };
-            std::iter::from_fn(|| rx.try_recv().ok()).collect()
-        };
-        for message in messages {
             match message {
-                AgentResp::Snapshot(events) => {
+                AgentResp::Snapshot { events, running } => {
                     for item in events {
                         self.apply_event(item.seq, item.event);
+                    }
+                    // The daemon is authoritative: a console that missed a
+                    // TurnDone must not stay stuck in "running".
+                    self.agent_running = running;
+                    self.agent_offline = false;
+                    self.agent_ready = true;
+                    if running {
+                        self.resume_active_view();
+                    }
+                    if !self.outbox.is_empty() {
+                        self.set_toast("daemon back — sending queued prompt", false);
+                        self.flush_outbox();
                     }
                 }
                 AgentResp::Event(item) => self.apply_event(item.seq, item.event),
                 AgentResp::Error(err) => {
+                    let first = !self.agent_offline;
+                    self.agent_offline = true;
+                    self.agent_ready = false;
                     self.agent_running = false;
-                    self.set_toast(err, true);
+                    if first {
+                        self.set_toast(err, true);
+                    }
                 }
                 _ => {}
+            }
+        }
+        if disconnected {
+            self.agent_stream = None;
+            self.agent_ready = false;
+            self.agent_running = false;
+            self.agent_retry_at = Instant::now() + Duration::from_millis(750);
+            if !self.agent_offline {
+                self.agent_offline = true;
+                self.set_toast("agent stream lost — reconnecting…", true);
             }
         }
     }
@@ -963,7 +1154,7 @@ impl App {
                 self.pending_ask = None;
             }
             AgentEvent::UserMessage { text, mode } => {
-                if self.queued.front().map(|q| q == &text).unwrap_or(false) {
+                if mode != "steer" && self.queued.front().map(|q| q == &text).unwrap_or(false) {
                     self.queued.pop_front();
                 }
                 let id = self.session.alloc_id();
@@ -1033,7 +1224,7 @@ impl App {
                     target: self.target.clone(),
                     output: Vec::new(),
                     status: CardStatus::Running,
-                    collapsed: false,
+                    collapsed: true,
                     duration_ms: None,
                     exit_code: None,
                     started_ms: now_ms(),
@@ -1166,42 +1357,19 @@ impl App {
     /// Enter while idle starts a turn; while running it steers the loop with
     /// the user's exact words at the next tool boundary.
     fn submit_agent(&mut self, prompt: String) {
-        if !self.agent_running {
-            self.start_agent_turn(prompt);
-            return;
+        let was_running = self.agent_running;
+        // Always `Prompt`: the daemon starts a turn when idle and steers the
+        // live one otherwise. Keeping the decision on the server side means a
+        // stale console flag cannot swallow the next task.
+        self.start_agent_turn(prompt);
+        if was_running {
+            self.set_toast("steer queued for the next tool boundary", false);
         }
-        let data_dir = self.data_dir.clone();
-        let id = self.session.id.clone();
-        tokio::spawn(async move {
-            runtime::tell(
-                &data_dir,
-                AgentReq::Send {
-                    id,
-                    text: prompt,
-                    mode: SendMode::Steer,
-                },
-            )
-            .await;
-        });
-        self.set_toast("steer queued for the next tool boundary", false);
     }
 
     /// Alt+Enter: deliver after the current run finishes.
     fn queue_followup(&mut self, prompt: String) {
-        let data_dir = self.data_dir.clone();
-        let id = self.session.id.clone();
-        let text = prompt.clone();
-        tokio::spawn(async move {
-            runtime::tell(
-                &data_dir,
-                AgentReq::Send {
-                    id,
-                    text,
-                    mode: SendMode::FollowUp,
-                },
-            )
-            .await;
-        });
+        self.send_agent(prompt.clone(), SendMode::FollowUp);
         self.queued.push_back(prompt);
         self.set_toast("follow-up queued", false);
     }
@@ -1210,7 +1378,7 @@ impl App {
         let data_dir = self.data_dir.clone();
         let id = self.session.id.clone();
         tokio::spawn(async move {
-            runtime::tell(
+            let _ = runtime::tell(
                 &data_dir,
                 AgentReq::Answer {
                     id,
@@ -1259,7 +1427,7 @@ impl App {
         let data_dir = self.data_dir.clone();
         let id = self.session.id.clone();
         tokio::spawn(async move {
-            runtime::tell(&data_dir, AgentReq::Interrupt { id }).await;
+            let _ = runtime::tell(&data_dir, AgentReq::Interrupt { id }).await;
         });
     }
 
@@ -1268,12 +1436,14 @@ impl App {
             self.interrupt_agent();
             self.agent_running = false;
             self.pending_ask = None;
-            if let Some(id) = self.active_assistant_id.take() {
-                if let Some(TranscriptItem::Assistant { done, error, .. }) =
+            // The daemon publishes the authoritative TurnError; just stop the
+            // local spinner and leave the id in place so that event lands on
+            // the open assistant item.
+            if let Some(id) = self.active_assistant_id {
+                if let Some(TranscriptItem::Assistant { done, .. }) =
                     self.session.items.iter_mut().find(|i| i.id() == id)
                 {
                     *done = true;
-                    *error = Some("interrupted by user".into());
                 }
             }
             for item_id in self.active_tool_items.values() {
@@ -1885,6 +2055,8 @@ impl App {
                 self.session = Session::new(self.session.cwd.clone(), self.target.clone());
                 self.selected_card = None;
                 self.follow = true;
+                self.reset_agent_view();
+                self.spawn_agent_attach();
                 self.set_toast("started new session", false);
                 Action::None
             }
@@ -1932,16 +2104,29 @@ impl App {
                 return;
             }
         }
-        // Otherwise toggle the latest tool card, or all if none/uniform
+        // Otherwise fold/unfold every tool card and reasoning block.
         let any_collapsed = self.session.items.iter().any(|i| {
             matches!(i, TranscriptItem::Tool { collapsed: true, .. })
+                || matches!(
+                    i,
+                    TranscriptItem::Assistant {
+                        reasoning_collapsed: true,
+                        ..
+                    }
+                )
         });
         let target_state = !any_collapsed;
         for item in &mut self.session.items {
-            if let TranscriptItem::Tool { collapsed, .. } = item {
-                *collapsed = target_state;
+            match item {
+                TranscriptItem::Tool { collapsed, .. } => *collapsed = target_state,
+                TranscriptItem::Assistant {
+                    reasoning_collapsed,
+                    ..
+                } => *reasoning_collapsed = target_state,
+                _ => {}
             }
         }
+        self.persist_session();
     }
 
     fn run_slash(&mut self, text: &str) -> Action {
@@ -2094,9 +2279,18 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Up {
             if let Some(last) = self.queued.pop_back() {
+                // A queued item can be in two places: the local outbox while
+                // offline, or the daemon's follow-up queue. Remove it from
+                // both before putting it back in the editor.
+                self.remove_outbox(&last);
+                self.recall_queued();
                 self.input = last;
                 self.input_cursor = self.input.chars().count();
                 self.focus = Focus::Input;
+            } else {
+                // The console may have restarted while the daemon still had
+                // follow-ups queued; ask it for the last one.
+                self.recall_queued();
             }
             return Action::None;
         }
@@ -2685,6 +2879,7 @@ impl App {
                             match load_session(&self.data_dir, &summary.id) {
                                 Ok(loaded) => {
                                     self.load_existing_session(loaded);
+                                    self.spawn_agent_attach();
                                     self.set_toast("session loaded", false);
                                 }
                                 Err(e) => self.set_toast(format!("{e:#}"), true),
@@ -3296,20 +3491,56 @@ fn draw(frame: &mut Frame, app: &mut App) {
         area,
     );
 
-    let editor_inner_width = area.width.saturating_sub(6).max(10) as usize;
+    // The editor is a soft panel with a single accent bar on its left, like
+    // opencode's prompt. It keeps the last row for mode/model/status.
+    let editor_inner_width = area.width.saturating_sub(8).max(10) as usize;
     let (visual_lines, cursor_row, cursor_col) =
         layout_editor_text(&app.input, app.input_cursor, editor_inner_width);
     let editor_height = ((visual_lines.len().clamp(1, 6)) as u16) + 2;
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(6),
-            Constraint::Length(editor_height),
-            Constraint::Length(1),
-        ])
-        .split(area);
+    // The sidebar gets its own full-height column so the prompt never runs
+    // underneath it. Everything else is a centered reading column.
+    let (main_area, sidebar_area) = if app.show_sidebar && area.width >= 100 {
+        let halves = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(48), Constraint::Length(34)])
+            .split(area);
+        // One blank column between the prompt column and the sidebar border.
+        let mut main = halves[0];
+        main.width = main.width.saturating_sub(1);
+        (main, Some(halves[1]))
+    } else {
+        (area, None)
+    };
+    let column = centered_column(main_area, 104);
+
+    // On the home screen the splash and prompt sit together in the upper
+    // half, like opencode; a live transcript keeps the prompt docked at the
+    // bottom.
+    let home = app.session.items.is_empty();
+    let chunks = if home {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Fill(2),
+                Constraint::Length(editor_height),
+                Constraint::Length(1),
+                Constraint::Fill(1),
+            ])
+            .split(column)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(6),
+                Constraint::Length(editor_height),
+                Constraint::Length(1),
+            ])
+            .split(column)
+    };
+    let body_area = chunks[0];
+    let editor_area = chunks[1];
+    let footer_area = chunks[2];
 
     let max_rows = editor_height.saturating_sub(2) as usize;
     let editor_skip = if cursor_row >= max_rows {
@@ -3318,12 +3549,14 @@ fn draw(frame: &mut Frame, app: &mut App) {
         0
     };
 
-    draw_header(frame, app, &theme, chunks[0]);
-    draw_body(frame, app, &theme, chunks[1]);
-    draw_editor(frame, app, &theme, chunks[2], &visual_lines, editor_skip);
-    draw_footer(frame, app, &theme, chunks[3]);
+    draw_transcript(frame, app, &theme, body_area);
+    if let Some(sidebar) = sidebar_area {
+        draw_sidebar(frame, app, &theme, sidebar);
+    }
+    draw_editor(frame, app, &theme, editor_area, &visual_lines, editor_skip);
+    draw_footer(frame, app, &theme, footer_area);
 
-    draw_queued(frame, app, &theme, chunks[2]);
+    draw_queued(frame, app, &theme, editor_area);
 
     // Popups
     if app.pending_ask.is_some() {
@@ -3331,9 +3564,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         if app.focus == Focus::Input && app.modal.is_none() {
             if !app.cd_completions().is_empty() {
-                draw_cd_menu(frame, app, &theme, chunks[2]);
+                draw_cd_menu(frame, app, &theme, editor_area);
             } else if !app.filtered_slash().is_empty() {
-                draw_slash_menu(frame, app, &theme, chunks[2]);
+                draw_slash_menu(frame, app, &theme, editor_area);
             }
         }
         if app.modal.is_some() {
@@ -3342,194 +3575,138 @@ fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     if app.modal.is_none() && app.pending_ask.is_none() && app.focus == Focus::Input {
-        let inner = chunks[2];
-        let x = inner.x + 4 + (cursor_col as u16);
-        let visible_row = cursor_row.saturating_sub(editor_skip).min(max_rows.saturating_sub(1));
-        let y = inner.y + 1 + (visible_row as u16);
-        if x < inner.x + inner.width.saturating_sub(1) && y < inner.y + inner.height.saturating_sub(1) {
+        let editor = editor_area;
+        let x = editor.x + 2 + cursor_col as u16;
+        let visible_row = cursor_row
+            .saturating_sub(editor_skip)
+            .min(max_rows.saturating_sub(1));
+        let y = editor.y + 1 + (visible_row as u16);
+        if x < editor.x + editor.width.saturating_sub(2)
+            && y < editor.y + editor.height.saturating_sub(1)
+        {
             frame.set_cursor_position((x, y));
         }
     }
 }
 
-fn draw_header(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let (dot, dot_style) = if app.connected {
-        ("●", Style::default().fg(theme.ok))
-    } else {
-        ("○", Style::default().fg(theme.bad))
-    };
-    let running = app
-        .jobs
-        .iter()
-        .filter(|j| matches!(j.state, JobState::Running { .. }))
-        .count();
-
-    let model_text = match resolve_active_provider(&app.data_dir) {
-        Some((prov, m)) => format!("{} ({})", m.display(), prov.credential.kind_label()),
-        None => "no model (/login)".to_string(),
-    };
-
-    let mut spans = vec![
-        Span::styled(
-            " envoy ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("{} ", app.session.title),
-            Style::default().fg(theme.text),
-        ),
-        Span::styled("· ", Style::default().fg(theme.dim)),
-        Span::styled(format!("{} ", app.cwd_label()), Style::default().fg(theme.dim)),
-        Span::styled("· ", Style::default().fg(theme.dim)),
-        Span::styled(dot, dot_style),
-        Span::styled(format!(" {} ", app.target), Style::default().fg(theme.dim)),
-        Span::styled("· ", Style::default().fg(theme.dim)),
-        Span::styled(
-            format!("{model_text} "),
-            Style::default().fg(theme.secondary),
-        ),
-    ];
-    if running > 0 {
-        spans.push(Span::styled(
-            format!("· {running} running "),
-            Style::default().fg(theme.ok),
-        ));
+/// Keep prose readable on wide terminals: the transcript is a centered column
+/// rather than edge-to-edge text.
+/// Add a separator only when the previous line is not already blank (and not
+/// at the very top of the transcript).
+fn push_blank(lines: &mut Vec<Line<'_>>) {
+    let already = lines
+        .last()
+        .map(|line| line.spans.iter().all(|s| s.content.trim().is_empty()))
+        .unwrap_or(true);
+    if !already {
+        lines.push(Line::from(""));
     }
-    if app.agent_running {
-        spans.push(Span::styled(
-            "· thinking… ",
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
-        ));
-    }
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme.bg)),
-        area,
-    );
 }
 
-fn draw_body(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
-    let (main_area, sidebar_area) = if app.show_sidebar && area.width >= 84 {
-        let halves = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(40), Constraint::Length(34)])
-            .split(area);
-        (halves[0], Some(halves[1]))
-    } else {
-        (area, None)
-    };
-
-    draw_transcript(frame, app, theme, main_area);
-    if let Some(sb) = sidebar_area {
-        draw_sidebar(frame, app, theme, sb);
+fn centered_column(area: Rect, max: u16) -> Rect {
+    let width = area.width.min(max);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y,
+        width,
+        height: area.height,
     }
 }
 
 fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
-    let border_color = if app.focus == Focus::Transcript {
-        theme.accent
-    } else {
-        theme.border
-    };
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color))
-        .style(Style::default().bg(theme.bg))
-        .title(Span::styled(
-            if app.session.items.is_empty() {
-                " home ".to_string()
-            } else {
-                format!(" transcript · {} ", app.session.id)
-            },
-            Style::default().fg(theme.dim),
-        ));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    app.transcript_height = inner.height;
+    app.transcript_height = area.height;
 
     if app.session.items.is_empty() {
-        draw_welcome(frame, app, theme, inner);
+        draw_welcome(frame, app, theme, area);
         return;
     }
 
-    let width = inner.width.saturating_sub(2).max(16) as usize;
+    let inner = Rect {
+        x: area.x + 2,
+        y: area.y + 1,
+        width: area.width.saturating_sub(4),
+        height: area.height.saturating_sub(2),
+    };
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let width = inner.width.max(16) as usize;
     let mut lines: Vec<Line> = Vec::new();
 
     for (idx, item) in app.session.items.iter().enumerate() {
         let is_selected = app.focus == Focus::Transcript && app.selected_card == Some(idx);
         match item {
-            TranscriptItem::User { text, mode, .. } => {
-                lines.push(Line::from(""));
+            TranscriptItem::User { text, .. } => {
+                push_blank(&mut lines);
                 let bar_style = Style::default().fg(if is_selected {
                     theme.warn
                 } else {
                     theme.accent
                 });
-                let bg = theme.user_bg;
-                for (li, raw_line) in text.lines().enumerate() {
-                    for wrapped in wrap_text(raw_line, width.saturating_sub(3)) {
-                        let mut spans = vec![Span::styled(" ┃ ", bar_style.bg(bg))];
-                        spans.push(Span::styled(
-                            wrapped,
-                            Style::default().fg(theme.text).bg(bg),
-                        ));
-                        if li == 0 {
-                            // keep clean
-                        }
-                        lines.push(Line::from(spans));
+                for raw_line in text.lines() {
+                    for wrapped in wrap_text(raw_line, width.saturating_sub(2)) {
+                        lines.push(Line::from(vec![
+                            Span::styled("▌ ", bar_style),
+                            Span::styled(wrapped, Style::default().fg(theme.text)),
+                        ]));
                     }
                 }
-                lines.push(Line::from(vec![
-                    Span::styled(" ┃ ", bar_style),
-                    Span::styled(mode.clone(), Style::default().fg(theme.dim)),
-                ]));
+                push_blank(&mut lines);
             }
             TranscriptItem::Assistant {
                 text,
                 reasoning,
                 reasoning_collapsed,
-                model,
                 done,
                 error,
                 ..
             } => {
-                lines.push(Line::from(""));
+                if text.trim().is_empty()
+                    && reasoning.is_empty()
+                    && *done
+                    && error.is_none()
+                {
+                    // A pure tool-call step has no prose; do not leave a gap.
+                    continue;
+                }
+                push_blank(&mut lines);
                 if !reasoning.is_empty() {
                     if *reasoning_collapsed {
                         lines.push(Line::from(vec![
-                            Span::styled(" ▸ Thinking ", Style::default().fg(theme.dim)),
-                            Span::styled(
-                                format!("({} chars · ctrl+o to expand)", reasoning.chars().count()),
-                                Style::default().fg(theme.dim),
-                            ),
+                            Span::styled("▸ ", Style::default().fg(theme.dim)),
+                            Span::styled("Thinking", Style::default().fg(theme.dim)),
                         ]));
                     } else {
                         lines.push(Line::styled(
-                            " ▾ Thinking",
+                            "▾ Thinking",
                             Style::default().fg(theme.dim),
                         ));
                         for rline in reasoning.lines() {
-                            for w in wrap_text(rline, width.saturating_sub(3)) {
+                            for w in wrap_text(rline, width.saturating_sub(2)) {
                                 lines.push(Line::from(vec![
-                                    Span::styled(" │ ", Style::default().fg(theme.border)),
+                                    Span::styled("  ", Style::default().fg(theme.border)),
                                     Span::styled(w, Style::default().fg(theme.dim)),
                                 ]));
                             }
                         }
                     }
                 }
-                render_markdown_lines(text, width, theme, &mut lines);
-                if !*done {
-                    lines.push(Line::styled(
-                        format!(" ▍ {model}"),
-                        Style::default().fg(theme.accent),
-                    ));
-                } else if let Some(err) = error {
-                    for w in wrap_text(&format!("Error: {err}"), width.saturating_sub(2)) {
-                        lines.push(Line::styled(format!(" {w}"), Style::default().fg(theme.bad)));
+                if text.trim().is_empty() {
+                    if !*done {
+                        lines.push(Line::styled("▍", Style::default().fg(theme.accent)));
+                    }
+                } else {
+                    render_markdown_lines(text, width, theme, &mut lines);
+                }
+                if let Some(err) = error {
+                    for w in wrap_text(&format!("! {err}"), width.saturating_sub(2)) {
+                        lines.push(Line::styled(
+                            format!(" {w}"),
+                            Style::default().fg(theme.bad),
+                        ));
                     }
                 }
+                push_blank(&mut lines);
             }
             TranscriptItem::Tool {
                 title,
@@ -3544,24 +3721,12 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) 
                 started_ms,
                 ..
             } => {
-                lines.push(Line::from(""));
                 let (glyph, glyph_style) = match status {
                     CardStatus::Queued => ("○", Style::default().fg(theme.warn)),
                     CardStatus::Running => ("●", Style::default().fg(theme.ok)),
                     CardStatus::Done => ("✓", Style::default().fg(theme.ok)),
                     CardStatus::Error => ("✗", Style::default().fg(theme.bad)),
                 };
-                let bar_color = if is_selected {
-                    theme.warn
-                } else {
-                    match status {
-                        CardStatus::Error => theme.bad,
-                        CardStatus::Running => theme.ok,
-                        _ => theme.border,
-                    }
-                };
-                let bar = Span::styled(" │ ", Style::default().fg(bar_color));
-
                 let mut meta_parts = Vec::new();
                 if let Some(jid) = job_id {
                     meta_parts.push(format!("#{jid}"));
@@ -3574,55 +3739,44 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) 
                 if target != "local" {
                     meta_parts.push(target.clone());
                 }
-                let fold_glyph = if *collapsed { "▸" } else { "▾" };
-                let meta_badge = format!("  [{}] {fold_glyph}", meta_parts.join(" · "));
-                let meta_w = meta_badge.chars().map(char_width).sum::<usize>();
-                let budget = width.saturating_sub(5 + meta_w).max(10);
-                let title_shown = truncate_chars(title, budget);
-                let title_w = title_shown.chars().map(char_width).sum::<usize>();
+                let fold = if *collapsed { "▸" } else { "▾" };
+                meta_parts.push(fold.to_string());
+                let meta = format!("  {}", meta_parts.join(" · "));
+                let meta_w = display_width(&meta);
+                let budget = width.saturating_sub(2 + meta_w).max(10);
+                let title_shown = truncate_width(title, budget);
+                let title_w = display_width(&title_shown);
                 let sub_budget = budget.saturating_sub(title_w + 2);
 
-                let mut header_spans = vec![
-                    bar.clone(),
+                let mut spans = vec![
                     Span::styled(format!("{glyph} "), glyph_style),
                     Span::styled(
                         title_shown,
-                        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(theme.text)
+                            .add_modifier(Modifier::BOLD),
                     ),
                 ];
                 if !subtitle.is_empty() && sub_budget >= 6 {
-                    header_spans.push(Span::styled(
-                        format!("  {}", truncate_chars(subtitle, sub_budget)),
+                    spans.push(Span::styled(
+                        format!("  {}", truncate_width(subtitle, sub_budget)),
                         Style::default().fg(theme.dim),
                     ));
                 }
-                header_spans.push(Span::styled(meta_badge, Style::default().fg(theme.dim)));
-                lines.push(Line::from(header_spans));
+                spans.push(Span::styled(meta, Style::default().fg(theme.dim)));
+                if is_selected {
+                    lines.push(Line::from(spans).style(Style::default().bg(theme.selection)));
+                } else {
+                    lines.push(Line::from(spans));
+                }
 
-                if *collapsed {
-                    if !output.is_empty() {
-                        lines.push(Line::from(vec![
-                            bar,
-                            Span::styled(
-                                format!(
-                                    "  {} lines collapsed (ctrl+o or Enter in transcript to expand)",
-                                    output.len()
-                                ),
-                                Style::default().fg(theme.dim),
-                            ),
-                        ]));
-                    }
-                } else if !output.is_empty() {
+                if !*collapsed && !output.is_empty() {
                     let total = output.len();
                     let preview_start = if total > 60 && *status != CardStatus::Running {
-                        // Show last 50 lines inline when huge, keep card snappy
-                        lines.push(Line::from(vec![
-                            bar.clone(),
-                            Span::styled(
-                                format!("  … ({} earlier lines)", total - 50),
-                                Style::default().fg(theme.dim),
-                            ),
-                        ]));
+                        lines.push(Line::styled(
+                            format!("  … ({} earlier lines)", total - 50),
+                            Style::default().fg(theme.dim),
+                        ));
                         total - 50
                     } else {
                         0
@@ -3634,27 +3788,27 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) 
                             Style::default().fg(theme.text)
                         };
                         for w in wrap_text(&out_line.text, width.saturating_sub(4)) {
-                            lines.push(Line::from(vec![bar.clone(), Span::styled(w, style)]));
+                            lines.push(Line::styled(format!("    {w}"), style));
                         }
                     }
                 }
             }
             TranscriptItem::Notice { text, is_error, .. } => {
-                lines.push(Line::from(""));
+                push_blank(&mut lines);
                 let style = Style::default().fg(if *is_error { theme.bad } else { theme.dim });
                 for w in wrap_text(text, width.saturating_sub(2)) {
-                    lines.push(Line::styled(format!(" · {w}"), style));
+                    lines.push(Line::styled(format!("· {w}"), style));
                 }
             }
             TranscriptItem::Say { text, level, .. } => {
-                lines.push(Line::from(""));
+                push_blank(&mut lines);
                 let style = Style::default().fg(match level.as_str() {
                     "warning" => theme.warn,
                     "error" => theme.bad,
                     _ => theme.secondary,
                 });
                 for (i, w) in wrap_text(text, width.saturating_sub(4)).iter().enumerate() {
-                    let prefix = if i == 0 { " · " } else { "   " };
+                    let prefix = if i == 0 { "· " } else { "  " };
                     lines.push(Line::from(vec![
                         Span::styled(prefix, Style::default().fg(theme.accent)),
                         Span::styled(w.clone(), style),
@@ -3679,65 +3833,105 @@ fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) 
 }
 
 fn draw_welcome(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let daemon = if app.connected {
-        "daemon ok"
-    } else {
-        "daemon unreachable"
-    };
-    let peers = match &app.status {
-        Some(status) => format!("{} peer(s)", status.peers.len()),
-        None => "conduit off".to_string(),
-    };
+    // 5x5 block letters, doubled in both directions for the opencode-style
+    // splash. Keep every row the same width so centered alignment stays true.
+    const GLYPHS: [ [&str; 5]; 5 ] = [
+        ["████ ", "█    ", "███  ", "█    ", "████ "],
+        ["█   █", "██  █", "█ █ █", "█  ██", "█   █"],
+        ["█   █", "█   █", "█   █", " █ █ ", "  █  "],
+        [" ███ ", "█   █", "█   █", "█   █", " ███ "],
+        ["█   █", "█   █", " ███ ", "  █  ", " █   "],
+    ];
+    // Full splash on a normal terminal; a compact wordmark when the body is
+    // short or narrow, so the model/status lines still fit.
+    let scale = if area.height < 20 || area.width < 90 { 1 } else { 2 };
+    let mut art = vec![String::new(); 5 * scale];
+    for row in 0..5 {
+        for (li, glyph) in GLYPHS.iter().enumerate() {
+            let scaled: String = glyph[row]
+                .chars()
+                .map(|c| {
+                    if c == '█' {
+                        if scale == 2 { "██" } else { "█" }
+                    } else if scale == 2 {
+                        "  "
+                    } else {
+                        " "
+                    }
+                })
+                .collect();
+            for dy in 0..scale {
+                art[row * scale + dy].push_str(&scaled);
+                if li + 1 < GLYPHS.len() {
+                    for _ in 0..scale {
+                        art[row * scale + dy].push(' ');
+                    }
+                }
+            }
+        }
+    }
+    let art_width = art.iter().map(|l| display_width(l)).max().unwrap_or(0);
+    for line in &mut art {
+        while display_width(line) < art_width {
+            line.push(' ');
+        }
+    }
+
     let (model_line, model_color) = match resolve_active_provider(&app.data_dir) {
         Some((prov, m)) => (
-            format!("  model     {} ({})", m.display(), prov.credential.kind_label()),
-            theme.ok,
+            format!("{}  ·  {}", m.display(), prov.credential.kind_label()),
+            theme.secondary,
         ),
-        None => (
-            "  model     not logged in — type /login to configure API Key or OAuth".to_string(),
-            theme.warn,
-        ),
+        None => ("not logged in — type /login".to_string(), theme.warn),
+    };
+    let state_line = if app.agent_offline {
+        ("daemon offline — retrying".to_string(), theme.bad)
+    } else {
+        (
+            format!(
+                "{}  ·  {}",
+                app.target,
+                if app.connected { "local daemon" } else { "daemon" }
+            ),
+            theme.dim,
+        )
     };
 
-    let lines = vec![
-        Line::from(""),
-        Line::styled(
-            format!("  envoy {}", env!("CARGO_PKG_VERSION")),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Line::styled(
-            "  opencode-style terminal agent & detached remote executor",
-            Style::default().fg(theme.dim),
-        ),
-        Line::from(""),
-        Line::styled(format!("  cwd       {}", app.cwd_label()), Style::default()),
-        Line::styled(
-            format!("  target    {} · {daemon} · {peers}", app.target),
-            Style::default().fg(theme.dim),
-        ),
-        Line::styled(model_line, Style::default().fg(model_color)),
-        Line::from(""),
-        Line::styled(
-            "  Type a prompt or command and press enter.",
-            Style::default().fg(theme.text),
-        ),
-        Line::styled(
-            "  Type / for commands (/login, /models, /cd, /machine, /sessions).",
-            Style::default().fg(theme.dim),
-        ),
-        Line::styled(
-            "  Prefix with ! to run a shell command directly (e.g. !ls -la).",
-            Style::default().fg(theme.dim),
-        ),
-        Line::from(""),
-        Line::styled(
-            "  ctrl+p palette · tab switch Agent/Shell · shift+enter newline",
-            Style::default().fg(theme.dim),
-        ),
-    ];
-    frame.render_widget(Paragraph::new(lines), area);
+    let mut lines: Vec<Line> = Vec::new();
+    for (row, art_line) in art.iter().enumerate() {
+        let color = if row < 4 {
+            theme.text
+        } else if row < 7 {
+            theme.accent
+        } else {
+            theme.secondary
+        };
+        lines.push(Line::styled(
+            art_line.clone(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "terminal agent for local and remote machines",
+        Style::default().fg(theme.dim),
+    ));
+    lines.push(Line::from(""));
+    lines.push(Line::styled(model_line, Style::default().fg(model_color)));
+    lines.push(Line::styled(state_line.0, Style::default().fg(state_line.1)));
+    lines.push(Line::styled(
+        format!("envoy {}", env!("CARGO_PKG_VERSION")),
+        Style::default().fg(theme.dim),
+    ));
+
+    let total = lines.len() as u16;
+    let top = area.height.saturating_sub(total) / 3;
+    let mut padded: Vec<Line> = (0..top).map(|_| Line::from("")).collect();
+    padded.extend(lines);
+    frame.render_widget(
+        Paragraph::new(padded).alignment(Alignment::Center),
+        area,
+    );
 }
 
 fn draw_sidebar(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
@@ -3867,90 +4061,146 @@ fn draw_editor(
         InputMode::Agent => theme.accent,
         InputMode::Shell => theme.warn,
     };
-    let title = match app.active_toast() {
-        Some((msg, err)) => Span::styled(
-            format!(" {} · {msg} ", app.mode.label()),
-            Style::default().fg(if err { theme.bad } else { theme.ok }),
-        ),
-        None => Span::styled(
-            format!(
-                " {}  (/ commands · ! shell · shift+enter newline) ",
-                app.mode.label()
-            ),
-            Style::default().fg(if app.focus == Focus::Input {
-                mode_color
-            } else {
-                theme.dim
-            }),
-        ),
+    let frame_color = if app.focus == Focus::Input {
+        mode_color
+    } else {
+        theme.border
     };
+    // A filled panel with one accent bar on the left; no block title.
     let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(if app.focus == Focus::Input {
-            mode_color
-        } else {
-            theme.border
-        }))
-        .style(Style::default().bg(theme.panel))
-        .title(title);
+        .borders(Borders::LEFT)
+        .border_style(Style::default().fg(frame_color))
+        .style(Style::default().bg(theme.panel));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height < 2 {
+        return;
+    }
 
     let max_rows = area.height.saturating_sub(2) as usize;
     let skip = skip.min(visual_lines.len().saturating_sub(max_rows));
     let end = (skip + max_rows).min(visual_lines.len());
-    let mut lines: Vec<Line> = visual_lines[skip..end]
-        .iter()
-        .enumerate()
-        .map(|(i, text)| {
-            let prefix = if i == 0 && skip == 0 { " > " } else { "   " };
-            Line::from(vec![
-                Span::styled(prefix, Style::default().fg(mode_color)),
-                Span::raw(text.clone()),
-            ])
-        })
-        .collect();
-    if app.input.is_empty() && app.focus != Focus::Input {
-        if let Some(first) = lines.first_mut() {
-            first.spans.push(Span::styled(
-                "press i or / to type",
-                Style::default().fg(theme.dim),
-            ));
-        }
+    let content = Rect {
+        x: inner.x + 1,
+        y: inner.y,
+        width: inner.width.saturating_sub(2),
+        height: max_rows as u16,
+    };
+    let mut lines: Vec<Line> = if app.input.is_empty() {
+        let placeholder = match app.mode {
+            InputMode::Agent => "Ask anything…  \"Fix broken tests\"",
+            InputMode::Shell => "Run a shell command…  !ls -la",
+        };
+        vec![Line::styled(placeholder, Style::default().fg(theme.dim))]
+    } else {
+        visual_lines[skip..end]
+            .iter()
+            .map(|text| Line::raw(text.clone()))
+            .collect()
+    };
+    if lines.is_empty() {
+        lines.push(Line::from(""));
     }
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    frame.render_widget(Paragraph::new(lines), content);
+
+    // Status row: Build · model · target, plus a live toast or token counts.
+    let model = resolve_active_provider(&app.data_dir)
+        .map(|(_, m)| m.display())
+        .unwrap_or_else(|| "no model · /login".to_string());
+    let mode = match app.mode {
+        InputMode::Agent => "Build",
+        InputMode::Shell => "Shell",
+    };
+    let mut left = vec![
+        Span::styled(
+            mode,
+            Style::default()
+                .fg(mode_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  ·  ", Style::default().fg(theme.dim)),
+        Span::styled(model, Style::default().fg(theme.secondary)),
+        Span::styled("  ·  ", Style::default().fg(theme.dim)),
+        Span::styled(app.target.clone(), Style::default().fg(theme.dim)),
+    ];
+    if app.agent_offline || !app.connected {
+        left.push(Span::styled(
+            "  ·  daemon offline",
+            Style::default().fg(theme.bad),
+        ));
+    } else if app.agent_running {
+        left.push(Span::styled(
+            "  ·  working…",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    let right = if let Some((msg, err)) = app.active_toast() {
+        Line::styled(
+            msg.to_string(),
+            Style::default().fg(if err { theme.bad } else { theme.ok }),
+        )
+    } else if app.session.input_tokens + app.session.output_tokens > 0 {
+        Line::styled(
+            format!(
+                "{} in · {} out",
+                app.session.input_tokens, app.session.output_tokens
+            ),
+            Style::default().fg(theme.dim),
+        )
+    } else {
+        Line::from("")
+    };
+
+    let status = Rect {
+        x: inner.x + 1,
+        y: area.y + area.height.saturating_sub(1),
+        width: inner.width.saturating_sub(2),
+        height: 1,
+    };
+    let right_w = (right.width() as u16).min(status.width / 2);
+    let left_area = Rect {
+        width: status.width.saturating_sub(right_w + 2),
+        ..status
+    };
+    frame.render_widget(Paragraph::new(Line::from(left)), left_area);
+    if right_w > 0 {
+        frame.render_widget(Paragraph::new(right).alignment(Alignment::Right), status);
+    }
 }
 
 fn draw_queued(frame: &mut Frame, app: &App, theme: &Theme, editor: Rect) {
     if app.queued.is_empty() {
         return;
     }
-    let take = app.queued.len().min(3);
-    let height = take as u16 + 2;
+    let take = app.queued.len().min(2);
+    let height = take as u16;
     let area = Rect {
-        x: editor.x + 1,
+        x: editor.x + 2,
         y: editor.y.saturating_sub(height),
-        width: editor.width.saturating_sub(2),
+        width: editor.width.saturating_sub(4),
         height,
     };
-    if area.height < 3 {
+    if area.height == 0 || area.width == 0 {
         return;
     }
     frame.render_widget(Clear, area);
     let mut lines = Vec::new();
     for text in app.queued.iter().take(take) {
         lines.push(Line::from(vec![
-            Span::styled(" ⏳ later  ", Style::default().fg(theme.warn)),
-            Span::raw(truncate_width(
-                text,
-                area.width.saturating_sub(12) as usize,
-            )),
+            Span::styled("⏳ queued  ", Style::default().fg(theme.warn)),
+            Span::styled(
+                truncate_width(text, area.width.saturating_sub(12) as usize),
+                Style::default().fg(theme.dim),
+            ),
         ]));
     }
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.warn))
-        .style(Style::default().bg(theme.panel))
-        .title(Span::styled(" queued ", Style::default().fg(theme.warn)));
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    frame.render_widget(
+        Paragraph::new(lines).style(Style::default().bg(theme.bg)),
+        area,
+    );
 }
 
 fn draw_ask(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
@@ -4009,45 +4259,60 @@ fn draw_ask(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let model_hint = match resolve_active_provider(&app.data_dir) {
-        Some((_, m)) => m.display(),
-        None => "run /login".to_string(),
-    };
-    let hints = if app.agent_running {
-        Line::from(vec![
-            Span::styled(" enter ", Style::default().fg(theme.accent)),
-            Span::styled("steer ", Style::default().fg(theme.dim)),
-            Span::styled("alt+enter ", Style::default().fg(theme.accent)),
-            Span::styled("queue ", Style::default().fg(theme.dim)),
-            Span::styled("esc ", Style::default().fg(theme.accent)),
-            Span::styled("interrupt ", Style::default().fg(theme.dim)),
-            Span::styled("! ", Style::default().fg(theme.accent)),
-            Span::styled("shell ", Style::default().fg(theme.dim)),
-            Span::styled("ctrl+o ", Style::default().fg(theme.accent)),
-            Span::styled("expand", Style::default().fg(theme.dim)),
-        ])
+    let hints: Vec<(&str, &str)> = if app.agent_running {
+        vec![
+            ("enter", "steer"),
+            ("alt+enter", "queue"),
+            ("esc", "interrupt"),
+            ("ctrl+o", "fold"),
+        ]
     } else {
-        Line::from(vec![
-        Span::styled(
-            format!(" {} ", app.mode.label()),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(format!("{model_hint}  "), Style::default().fg(theme.secondary)),
-        Span::styled("tab ", Style::default().fg(theme.accent)),
-        Span::styled("mode  ", Style::default().fg(theme.dim)),
-        Span::styled("/ ", Style::default().fg(theme.accent)),
-        Span::styled("commands  ", Style::default().fg(theme.dim)),
-        Span::styled("ctrl+o ", Style::default().fg(theme.accent)),
-        Span::styled("fold  ", Style::default().fg(theme.dim)),
-        Span::styled("ctrl+p ", Style::default().fg(theme.accent)),
-        Span::styled("palette  ", Style::default().fg(theme.dim)),
-        Span::styled("ctrl+x q ", Style::default().fg(theme.accent)),
-        Span::styled("quit", Style::default().fg(theme.dim)),
-    ])
+        vec![
+            ("enter", "send"),
+            ("shift+enter", "newline"),
+            ("/", "commands"),
+            ("ctrl+p", "palette"),
+        ]
     };
-    frame.render_widget(Paragraph::new(hints), area);
+    let mut spans = Vec::new();
+    for (i, (key, label)) in hints.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled("  ", Style::default().fg(theme.dim)));
+        }
+        spans.push(Span::styled(
+            *key,
+            Style::default().fg(theme.accent),
+        ));
+        spans.push(Span::styled(
+            format!(" {label}"),
+            Style::default().fg(theme.dim),
+        ));
+    }
+    let hints_line = Line::from(spans);
+    let hints_w = hints_line.width() as u16;
+    let cwd = app.cwd_label();
+    let cwd_room = area.width.saturating_sub(hints_w + 3);
+    if cwd_room >= 10 {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                truncate_width(&cwd, cwd_room as usize),
+                Style::default().fg(theme.dim),
+            )),
+            Rect {
+                width: cwd_room,
+                ..area
+            },
+        );
+    } else if area.width as usize > display_width(&cwd) + hints_w as usize {
+        frame.render_widget(
+            Paragraph::new(Line::styled(cwd, Style::default().fg(theme.dim))),
+            area,
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(hints_line).alignment(Alignment::Right),
+        area,
+    );
 }
 
 fn draw_slash_menu(frame: &mut Frame, app: &App, theme: &Theme, editor: Rect) {
@@ -4753,6 +5018,10 @@ fn char_width(c: char) -> usize {
     UnicodeWidthChar::width(c).unwrap_or(1).max(1)
 }
 
+fn display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
 fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     let max = max_width.max(8);
     if text.is_empty() {
@@ -5357,6 +5626,7 @@ mod tests {
         let dir = tmpdir();
         let mut app = App::new(dir.clone(), "local".into(), None, PathBuf::from("/tmp"));
         app.connected = true;
+        app.show_sidebar = true;
         app.jobs = vec![job(
             1,
             JobState::Done {

@@ -31,13 +31,16 @@ pub struct ToolCall {
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // Keep every field on the wire. postcard is not self-describing, so a
+    // `skip_serializing_if` here would shift the remaining fields when the
+    // same message is sent over `agent.sock` (it broke TurnDone replay).
+    #[serde(default)]
     pub reasoning: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub tool_call_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub tool_name: Option<String>,
 }
 
@@ -391,6 +394,56 @@ pub fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_messages_round_trip_over_postcard() {
+        // The agent socket uses postcard. Optional/empty fields must still be
+        // encoded, otherwise the reader shifts and loses the event.
+        let message = ChatMessage {
+            role: ChatRole::Assistant,
+            content: "done".into(),
+            reasoning: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+        };
+        let bytes = postcard::to_stdvec(&message).unwrap();
+        let back: ChatMessage = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back.role, message.role);
+        assert_eq!(back.content, message.content);
+        assert!(back.reasoning.is_none());
+        assert!(back.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn turn_done_round_trips_over_postcard() {
+        let event = crate::llm::AgentEvent::TurnDone {
+            messages: vec![ChatMessage {
+                role: ChatRole::User,
+                content: "hi".into(),
+                reasoning: None,
+                tool_calls: Vec::new(),
+                tool_call_id: None,
+                tool_name: None,
+            }],
+            input_tokens: 3,
+            output_tokens: 4,
+        };
+        let bytes = postcard::to_stdvec(&event).unwrap();
+        let back: crate::llm::AgentEvent = postcard::from_bytes(&bytes).unwrap();
+        match back {
+            crate::llm::AgentEvent::TurnDone {
+                messages,
+                input_tokens,
+                output_tokens,
+            } => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].content, "hi");
+                assert_eq!((input_tokens, output_tokens), (3, 4));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
 
     fn tmpdir() -> PathBuf {
         let mut b = [0u8; 6];

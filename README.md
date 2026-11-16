@@ -107,15 +107,16 @@ through `sh -c`; multiple arguments are executed verbatim (no shell) unless
 
 `envoy` / `envoy ui` follows `opencode`'s TUI layout and workflow:
 
-- **Inline transcript stream** (main pane): user prompt cards (`┃`), streaming
-  assistant Markdown replies (with collapsible `▸ Thinking` reasoning), and
-  collapsible tool/shell execution cards (live stdout/stderr, job `#id`,
-  elapsed time, exit code, target machine).
-- **Right sidebar**: session context (`dir`, `model`, `mode`, `target`, token
-  usage) and a live index of detached daemon jobs (`ctrl+x b` or `/sidebar`).
-- **Multiline editor**: `Shift+Enter`, `Alt+Enter`, or `Ctrl+J` inserts newlines;
-  `Tab` toggles `Agent` / `Shell` mode; `!cmd` always executes directly as a
-  shell job.
+- **Home splash**: centered block-letter `envoy` wordmark, model/login hint,
+  and a prompt panel with a status line (`Build · model · target`).
+- **Inline transcript stream**: user prompts on a `▌` bar, streaming assistant
+  Markdown replies, and tool/shell execution cards. `▸ Thinking` and tool
+  output are collapsed by default; `ctrl+o` expands everything.
+- **Right sidebar** (hidden by default): session context (`dir`, `model`,
+  `mode`, `target`, token usage) and a live index of detached daemon jobs
+  (`ctrl+x b` or `/sidebar`).
+- **Prompt panel**: `Shift+Enter` or `Ctrl+J` inserts a newline; `Tab` toggles
+  `Build` / `Shell` mode; `!cmd` always executes directly as a shell job.
 - **`/` command menu & `/cd` autocomplete**: type `/` to open the filterable
   command menu (`/login`, `/models`, `/cd`, `/machine`, `/sessions`, `/new`,
   `/mode`, `/expand`, `/sidebar`, `/theme`, `/help`, `/quit`); `/cd ` offers
@@ -128,7 +129,9 @@ through `sh -c`; multiple arguments are executed verbatim (no shell) unless
 
 | Key | Action |
 |---|---|
-| `enter` / `shift+enter` | submit prompt or command / insert newline (`alt+enter`, `ctrl+j` also insert newline) |
+| `enter` | send prompt (starts a turn, or steers the live one at the next tool boundary) |
+| `alt+enter` | queue the prompt as a follow-up after the current run |
+| `shift+enter` / `ctrl+j` | insert a newline in the editor |
 | `!cmd` | run a shell command directly as a detached job (even in `Agent` mode) |
 | `tab` | in editor: toggle `Agent` / `Shell` mode (or complete `/` command / `/cd` dir) |
 | `shift+tab` | cycle focus (`input` → `transcript` → `sidebar`) |
@@ -137,12 +140,16 @@ through `sh -c`; multiple arguments are executed verbatim (no shell) unless
 | `ctrl+p` | command palette (login, models, sessions, switch machine, theme, quit) |
 | `ctrl+x` then `q`/`n`/`c`/`b`/`t`/`l`/`m`/`s` | leader shortcuts (quit, new session, cancel, sidebar, theme, login, models, refresh) |
 | `pgup`/`pgdn`, `ctrl+u`/`ctrl+f`, `g`/`G` | scroll transcript / jump top or bottom |
+| `alt+up` | recall the last queued follow-up into the editor |
 | `esc` / `ctrl+c` | clear input / cancel active turn or focus transcript / quit |
 
-**Async input.** While a turn is running the editor stays live: `enter` steers
-the loop with your exact words (delivered at the next tool boundary), `alt+enter`
-queues a follow-up for after the run, `esc` interrupts, and `alt+up` recalls a
-queued follow-up. The agent reports through the `say` tool and asks decisions
+**Async input.** The turn lives in the daemon, so the console is only a client.
+While a turn is running the editor stays live: `enter` steers the loop with your
+exact words (delivered at the next tool boundary), `alt+enter` queues a follow-up
+for after the run, `esc` interrupts, and `alt+up` recalls a queued follow-up.
+`enter` always sends `Prompt` to the daemon, which decides whether to start or
+steer, so a stale console flag cannot swallow the next task. Closing the console
+does not kill the running turn. The agent reports through the `say` tool and asks decisions
 through `ask` (options with one recommended; after 300s the recommended option
 is taken). Detached jobs can be awaited with `job action=wait`.
 
