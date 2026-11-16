@@ -232,6 +232,9 @@ pub struct Session {
     pub output_tokens: u64,
     #[serde(default)]
     pub next_item_id: u64,
+    /// Last agent event applied to `items`; attach replays from here.
+    #[serde(default)]
+    pub event_seq: u64,
     #[serde(default)]
     pub items: Vec<TranscriptItem>,
     #[serde(default)]
@@ -251,6 +254,7 @@ impl Session {
             input_tokens: 0,
             output_tokens: 0,
             next_item_id: 1,
+            event_seq: 0,
             items: Vec::new(),
             messages: Vec::new(),
         }

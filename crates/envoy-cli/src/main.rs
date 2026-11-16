@@ -11,6 +11,7 @@ mod auth;
 mod daemon;
 mod llm;
 mod mcp;
+mod runtime;
 mod session;
 mod tui;
 
@@ -685,6 +686,19 @@ async fn cmd_serve(
     }
     std::fs::write(daemon::pid_file(&data_dir), std::process::id().to_string()).ok();
 
+    // Console control plane: agent turns live here, not in the TUI.
+    let agent_path = runtime::socket_path(&data_dir);
+    let _ = std::fs::remove_file(&agent_path);
+    let agent_listener = tokio::net::UnixListener::bind(&agent_path)
+        .with_context(|| format!("binding {}", agent_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&agent_path, std::fs::Permissions::from_mode(0o600));
+    }
+    let sessions = runtime::Runtime::new(data_dir.clone());
+    tokio::spawn(runtime::serve(sessions, agent_listener));
+
     let server = AgentServer::open_store(data_dir.clone())?;
     tracing::info!(socket = %path.display(), "envoy daemon listening");
     println!("envoy daemon listening on {}", path.display());
@@ -718,6 +732,7 @@ async fn cmd_serve(
     if let Some(pool) = pool {
         pool.abort();
     }
+    let _ = std::fs::remove_file(runtime::socket_path(&data_dir));
     Ok(())
 }
 

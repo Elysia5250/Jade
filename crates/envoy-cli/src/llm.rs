@@ -17,6 +17,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use envoy_proto::{LogRecord, SubmitRequest, TaskSpec, DEFAULT_GROUP, READ_LIMIT};
 use envoy_service::{dialer_for, AgentDialer, Remote};
 use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -28,8 +29,15 @@ use tokio::sync::{mpsc, oneshot};
 const TOOL_OUTPUT_CAP: usize = 64 * 1024;
 const MAX_TOOL_STEPS: usize = 25;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentEvent {
+    /// The daemon started a fresh session (it was restarted): rebuild the view.
+    SessionReset,
+    /// A user message entered the session (prompt, steer, or queued follow-up).
+    UserMessage {
+        text: String,
+        mode: String,
+    },
     AssistantStart {
         model: String,
     },
@@ -81,7 +89,7 @@ pub enum AgentEvent {
     TurnError(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AskOption {
     pub label: String,
     pub description: Option<String>,

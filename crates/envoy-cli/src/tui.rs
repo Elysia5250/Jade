@@ -24,10 +24,11 @@ use crate::auth::{
     BUILTIN_PROVIDERS,
 };
 use crate::daemon;
-use crate::llm::{run_agent_turn, AgentEvent, AskBroker, AskOption, TurnConfig};
+use crate::llm::{AgentEvent, AskOption};
+use crate::runtime::{self, AgentReq, AgentResp, SendMode};
 use crate::session::{
     delete_session, latest_session_for_cwd, list_sessions, load_session, save_session, CardStatus,
-    ChatMessage, ChatRole, Session, SessionSummary, TranscriptItem,
+    Session, SessionSummary, TranscriptItem,
 };
 use anyhow::{bail, Result};
 use envoy_proto::{Job, JobId, JobState, LogRecord, SubmitRequest, TaskSpec, DEFAULT_GROUP};
@@ -47,7 +48,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
 use std::io::{stdout, IsTerminal, Stdout};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -91,6 +91,27 @@ pub async fn run(
     if let Ok(rx) = client.watch().await {
         app.watch = Some(rx);
     }
+
+    // The turn lives in the daemon; the console attaches to its stream.
+    let _ = runtime::request(
+        &data_dir,
+        &AgentReq::Ensure {
+            id: app.session.id.clone(),
+            cwd: app.session.cwd.clone(),
+            target: app.target.clone(),
+            history: app.session.messages.clone(),
+        },
+    )
+    .await
+    .map_err(|e| app.set_toast(format!("{e:#}"), true));
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(runtime::attach(
+        data_dir.clone(),
+        app.session.id.clone(),
+        app.session.event_seq,
+        tx,
+    ));
+    app.agent_stream = Some(rx);
 
     let mut tui = Tui::enter()?;
     app.refresh(&remote).await;
@@ -532,12 +553,9 @@ struct App {
 
     // Active agent turn
     agent_running: bool,
-    asks: Arc<AskBroker>,
-    steer: Arc<Mutex<Vec<String>>>,
+    agent_stream: Option<mpsc::UnboundedReceiver<AgentResp>>,
     pending_ask: Option<PendingAsk>,
     queued: VecDeque<String>,
-    agent_rx: Option<mpsc::UnboundedReceiver<AgentEvent>>,
-    agent_task: Option<JoinHandle<()>>,
     active_assistant_id: Option<u64>,
     active_tool_items: HashMap<String, u64>,
 
@@ -593,12 +611,9 @@ impl App {
             interval: Duration::from_millis(600),
             last_refresh: Instant::now() - Duration::from_secs(1),
             agent_running: false,
-            asks: AskBroker::new(),
-            steer: Arc::new(Mutex::new(Vec::new())),
+            agent_stream: None,
             pending_ask: None,
             queued: VecDeque::new(),
-            agent_rx: None,
-            agent_task: None,
             active_assistant_id: None,
             active_tool_items: HashMap::new(),
             shell_watches: Vec::new(),
@@ -890,258 +905,261 @@ impl App {
     }
 
     fn start_agent_turn(&mut self, prompt: String) {
-        if self.agent_running {
-            self.set_toast("agent is still running (Esc or /cancel to stop)", true);
-            return;
-        }
-        let Some((provider, model)) = resolve_active_provider(&self.data_dir) else {
-            self.push_notice(
-                "No model provider configured. Run `/login` (API Key or OAuth) or prefix shell commands with `!`.",
-                true,
-            );
-            return;
-        };
-
-        self.session.maybe_set_title_from(&prompt);
-        let user_id = self.session.alloc_id();
-        self.session.items.push(TranscriptItem::User {
-            id: user_id,
-            text: prompt.clone(),
-            mode: format!("Agent · {}", model.display()),
-            cwd: self.cwd_label(),
-            ts_ms: now_ms(),
+        let data_dir = self.data_dir.clone();
+        let id = self.session.id.clone();
+        tokio::spawn(async move {
+            runtime::tell(
+                &data_dir,
+                AgentReq::Send {
+                    id,
+                    text: prompt,
+                    mode: SendMode::Prompt,
+                },
+            )
+            .await;
         });
-        self.session.messages.push(ChatMessage {
-            role: ChatRole::User,
-            content: prompt,
-            reasoning: None,
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-            tool_name: None,
-        });
-        self.session.touch();
-        self.follow = true;
-
-        self.pending_ask = None;
-        let (tx, rx) = mpsc::unbounded_channel();
-        let cfg = TurnConfig {
-            data_dir: self.data_dir.clone(),
-            conduit: self.conduit.clone(),
-            target: self.target.clone(),
-            cwd: self.session.cwd.clone(),
-            provider,
-            model,
-            history: self.session.messages.clone(),
-            asks: self.asks.clone(),
-            steer: self.steer.clone(),
-        };
-        let handle = tokio::spawn(run_agent_turn(cfg, tx));
         self.agent_running = true;
-        self.agent_rx = Some(rx);
-        self.agent_task = Some(handle);
         self.active_assistant_id = None;
         self.active_tool_items.clear();
+        self.pending_ask = None;
+        self.follow = true;
     }
 
     fn drain_agent_events(&mut self) {
-        let Some(mut rx) = self.agent_rx.take() else {
-            return;
+        // Collect first so the borrow on `agent_stream` ends before applying.
+        let messages: Vec<AgentResp> = {
+            let Some(rx) = self.agent_stream.as_mut() else {
+                return;
+            };
+            std::iter::from_fn(|| rx.try_recv().ok()).collect()
         };
-        let mut finished = false;
-        while let Ok(ev) = rx.try_recv() {
-            match ev {
-                AgentEvent::AssistantStart { model } => {
-                    let id = self.session.alloc_id();
-                    self.session.items.push(TranscriptItem::Assistant {
-                        id,
-                        text: String::new(),
-                        reasoning: String::new(),
-                        reasoning_collapsed: true,
-                        model,
-                        done: false,
-                        error: None,
-                    });
-                    self.active_assistant_id = Some(id);
-                }
-                AgentEvent::ReasoningDelta(d) => {
-                    if let Some(id) = self.active_assistant_id {
-                        if let Some(TranscriptItem::Assistant { reasoning, .. }) =
-                            self.session.items.iter_mut().find(|i| i.id() == id)
-                        {
-                            reasoning.push_str(&d);
-                        }
+        for message in messages {
+            match message {
+                AgentResp::Snapshot(events) => {
+                    for item in events {
+                        self.apply_event(item.seq, item.event);
                     }
                 }
-                AgentEvent::TextDelta(d) => {
-                    if let Some(id) = self.active_assistant_id {
-                        if let Some(TranscriptItem::Assistant { text, .. }) =
-                            self.session.items.iter_mut().find(|i| i.id() == id)
-                        {
-                            text.push_str(&d);
-                        }
+                AgentResp::Event(item) => self.apply_event(item.seq, item.event),
+                AgentResp::Error(err) => {
+                    self.agent_running = false;
+                    self.set_toast(err, true);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn apply_event(&mut self, seq: u64, event: AgentEvent) {
+        self.session.event_seq = seq;
+        match event {
+            AgentEvent::SessionReset => {
+                // The daemon restarted: its sequence numbers restarted too.
+                // Keep the local transcript (it is history), just re-base the
+                // cursor so the new events apply.
+                self.session.event_seq = 0;
+                self.active_assistant_id = None;
+                self.active_tool_items.clear();
+                self.pending_ask = None;
+            }
+            AgentEvent::UserMessage { text, mode } => {
+                if self.queued.front().map(|q| q == &text).unwrap_or(false) {
+                    self.queued.pop_front();
+                }
+                let id = self.session.alloc_id();
+                self.session.items.push(TranscriptItem::User {
+                    id,
+                    text,
+                    mode,
+                    cwd: self.cwd_label(),
+                    ts_ms: now_ms(),
+                });
+                self.session.touch();
+                self.follow = true;
+                self.agent_running = true;
+            }
+            AgentEvent::AssistantStart { model } => {
+                let id = self.session.alloc_id();
+                self.session.items.push(TranscriptItem::Assistant {
+                    id,
+                    text: String::new(),
+                    reasoning: String::new(),
+                    reasoning_collapsed: true,
+                    model,
+                    done: false,
+                    error: None,
+                });
+                self.active_assistant_id = Some(id);
+            }
+            AgentEvent::ReasoningDelta(d) => {
+                if let Some(id) = self.active_assistant_id {
+                    if let Some(TranscriptItem::Assistant { reasoning, .. }) =
+                        self.session.items.iter_mut().find(|i| i.id() == id)
+                    {
+                        reasoning.push_str(&d);
                     }
                 }
-                AgentEvent::ToolStart {
-                    call_id,
+            }
+            AgentEvent::TextDelta(d) => {
+                if let Some(id) = self.active_assistant_id {
+                    if let Some(TranscriptItem::Assistant { text, .. }) =
+                        self.session.items.iter_mut().find(|i| i.id() == id)
+                    {
+                        text.push_str(&d);
+                    }
+                }
+            }
+            AgentEvent::ToolStart {
+                call_id,
+                name,
+                title,
+                subtitle,
+            } => {
+                if let Some(id) = self.active_assistant_id {
+                    if let Some(TranscriptItem::Assistant { done, .. }) =
+                        self.session.items.iter_mut().find(|i| i.id() == id)
+                    {
+                        *done = true;
+                    }
+                }
+                let card_id = self.session.alloc_id();
+                self.session.items.push(TranscriptItem::Tool {
+                    id: card_id,
+                    call_id: call_id.clone(),
                     name,
                     title,
                     subtitle,
-                } => {
-                    if let Some(id) = self.active_assistant_id {
-                        if let Some(TranscriptItem::Assistant { done, .. }) =
-                            self.session.items.iter_mut().find(|i| i.id() == id)
-                        {
-                            *done = true;
-                        }
+                    job_id: None,
+                    target: self.target.clone(),
+                    output: Vec::new(),
+                    status: CardStatus::Running,
+                    collapsed: false,
+                    duration_ms: None,
+                    exit_code: None,
+                    started_ms: now_ms(),
+                });
+                self.active_tool_items.insert(call_id, card_id);
+                self.session.touch();
+                self.persist_session();
+            }
+            AgentEvent::ToolJob { call_id, job_id } => {
+                if let Some(&item_id) = self.active_tool_items.get(&call_id) {
+                    if let Some(TranscriptItem::Tool { job_id: slot, .. }) =
+                        self.session.items.iter_mut().find(|i| i.id() == item_id)
+                    {
+                        *slot = Some(job_id);
                     }
-                    let card_id = self.session.alloc_id();
-                    self.session.items.push(TranscriptItem::Tool {
-                        id: card_id,
-                        call_id: call_id.clone(),
+                }
+            }
+            AgentEvent::ToolOutput { call_id, text, err } => {
+                if let Some(&item_id) = self.active_tool_items.get(&call_id) {
+                    if let Some(item) = self.session.items.iter_mut().find(|i| i.id() == item_id) {
+                        item.push_output_text(&text, err);
+                    }
+                }
+            }
+            AgentEvent::ToolDone {
+                call_id,
+                ok,
+                duration_ms,
+                exit_code,
+            } => {
+                if let Some(&item_id) = self.active_tool_items.get(&call_id) {
+                    if let Some(TranscriptItem::Tool {
+                        status,
+                        duration_ms: dur,
+                        exit_code: code,
+                        output,
+                        collapsed,
                         name,
-                        title,
-                        subtitle,
-                        job_id: None,
-                        target: self.target.clone(),
-                        output: Vec::new(),
-                        status: CardStatus::Running,
-                        collapsed: false,
-                        duration_ms: None,
-                        exit_code: None,
-                        started_ms: now_ms(),
-                    });
-                    self.active_tool_items.insert(call_id, card_id);
-                }
-                AgentEvent::ToolJob { call_id, job_id } => {
-                    if let Some(&item_id) = self.active_tool_items.get(&call_id) {
-                        if let Some(TranscriptItem::Tool {
-                            job_id: slot, ..
-                        }) = self.session.items.iter_mut().find(|i| i.id() == item_id)
-                        {
-                            *slot = Some(job_id);
+                        ..
+                    }) = self.session.items.iter_mut().find(|i| i.id() == item_id)
+                    {
+                        *status = if ok { CardStatus::Done } else { CardStatus::Error };
+                        *dur = Some(duration_ms);
+                        *code = exit_code;
+                        if ok && name != "exec" && output.len() > 14 {
+                            *collapsed = true;
                         }
                     }
                 }
-                AgentEvent::ToolOutput { call_id, text, err } => {
-                    if let Some(&item_id) = self.active_tool_items.get(&call_id) {
-                        if let Some(item) = self.session.items.iter_mut().find(|i| i.id() == item_id)
-                        {
-                            item.push_output_text(&text, err);
-                        }
-                    }
-                }
-                AgentEvent::ToolDone {
-                    call_id,
-                    ok,
-                    duration_ms,
-                    exit_code,
-                } => {
-                    if let Some(&item_id) = self.active_tool_items.get(&call_id) {
-                        if let Some(TranscriptItem::Tool {
-                            status,
-                            duration_ms: dur,
-                            exit_code: code,
-                            output,
-                            collapsed,
-                            name,
-                            ..
-                        }) = self.session.items.iter_mut().find(|i| i.id() == item_id)
-                        {
-                            *status = if ok {
-                                CardStatus::Done
-                            } else {
-                                CardStatus::Error
-                            };
-                            *dur = Some(duration_ms);
-                            *code = exit_code;
-                            // Collapse lengthy read/ls outputs cleanly like opencode
-                            if ok && name != "exec" && output.len() > 14 {
-                                *collapsed = true;
-                            }
-                        }
-                    }
-                }
-                AgentEvent::Say { text, kind } => {
-                    let id = self.session.alloc_id();
-                    self.session.items.push(TranscriptItem::Say {
-                        id,
-                        text,
-                        level: kind,
-                    });
-                    self.session.touch();
-                    self.persist_session();
-                    self.follow = true;
-                }
-                AgentEvent::Ask {
+                self.session.touch();
+                self.persist_session();
+            }
+            AgentEvent::Say { text, kind } => {
+                let id = self.session.alloc_id();
+                self.session.items.push(TranscriptItem::Say {
+                    id,
+                    text,
+                    level: kind,
+                });
+                self.session.touch();
+                self.persist_session();
+                self.follow = true;
+            }
+            AgentEvent::Ask {
+                id,
+                question,
+                options,
+                recommended,
+                timeout_ms,
+            } => {
+                self.pending_ask = Some(PendingAsk {
                     id,
                     question,
                     options,
                     recommended,
-                    timeout_ms,
-                } => {
-                    self.pending_ask = Some(PendingAsk {
-                        id,
-                        question,
-                        options,
-                        recommended,
-                        selected: recommended,
-                        deadline: Instant::now() + Duration::from_millis(timeout_ms),
-                    });
-                    self.follow = true;
-                }
-                AgentEvent::AskClosed { id } => {
-                    if self.pending_ask.as_ref().map(|a| a.id) == Some(id) {
-                        self.pending_ask = None;
-                        self.set_toast("no answer; using the recommended option", false);
-                    }
-                }
-                AgentEvent::TurnDone {
-                    messages,
-                    input_tokens,
-                    output_tokens,
-                } => {
-                    if let Some(id) = self.active_assistant_id {
-                        if let Some(TranscriptItem::Assistant { done, .. }) =
-                            self.session.items.iter_mut().find(|i| i.id() == id)
-                        {
-                            *done = true;
-                        }
-                    }
-                    self.session.messages = messages;
-                    self.session.input_tokens += input_tokens;
-                    self.session.output_tokens += output_tokens;
-                    self.session.touch();
-                    self.persist_session();
-                    finished = true;
-                }
-                AgentEvent::TurnError(err) => {
-                    if let Some(id) = self.active_assistant_id {
-                        if let Some(TranscriptItem::Assistant { done, error, .. }) =
-                            self.session.items.iter_mut().find(|i| i.id() == id)
-                        {
-                            *done = true;
-                            *error = Some(err.clone());
-                        }
-                    } else {
-                        self.push_notice(err, true);
-                    }
-                    self.session.touch();
-                    self.persist_session();
-                    finished = true;
+                    selected: recommended,
+                    deadline: Instant::now() + Duration::from_millis(timeout_ms),
+                });
+                self.follow = true;
+            }
+            AgentEvent::AskClosed { id } => {
+                if self.pending_ask.as_ref().map(|a| a.id) == Some(id) {
+                    self.pending_ask = None;
+                    self.set_toast("no answer; using the recommended option", false);
                 }
             }
-        }
-        if finished {
-            self.agent_running = false;
-            self.agent_task = None;
-            self.active_assistant_id = None;
-            self.active_tool_items.clear();
-            self.pending_ask = None;
-            if let Some(next) = self.queued.pop_front() {
-                self.start_agent_turn(next);
+            AgentEvent::TurnDone {
+                messages,
+                input_tokens,
+                output_tokens,
+            } => {
+                if let Some(id) = self.active_assistant_id {
+                    if let Some(TranscriptItem::Assistant { done, .. }) =
+                        self.session.items.iter_mut().find(|i| i.id() == id)
+                    {
+                        *done = true;
+                    }
+                }
+                self.session.messages = messages;
+                self.session.input_tokens += input_tokens;
+                self.session.output_tokens += output_tokens;
+                self.session.touch();
+                self.persist_session();
+                self.agent_running = false;
+                self.active_assistant_id = None;
+                self.active_tool_items.clear();
+                self.pending_ask = None;
             }
-        } else {
-            self.agent_rx = Some(rx);
+            AgentEvent::TurnError(err) => {
+                if let Some(id) = self.active_assistant_id {
+                    if let Some(TranscriptItem::Assistant { done, error, .. }) =
+                        self.session.items.iter_mut().find(|i| i.id() == id)
+                    {
+                        *done = true;
+                        *error = Some(err.clone());
+                    }
+                } else {
+                    self.push_notice(err, true);
+                }
+                self.session.touch();
+                self.persist_session();
+                self.agent_running = false;
+                self.active_assistant_id = None;
+                self.active_tool_items.clear();
+                self.pending_ask = None;
+            }
         }
     }
 
@@ -1152,25 +1170,56 @@ impl App {
             self.start_agent_turn(prompt);
             return;
         }
-        self.steer.lock().unwrap().push(prompt.clone());
-        let id = self.session.alloc_id();
-        self.session.items.push(TranscriptItem::User {
-            id,
-            text: prompt,
-            mode: "Agent · steer".into(),
-            cwd: self.cwd_label(),
-            ts_ms: now_ms(),
+        let data_dir = self.data_dir.clone();
+        let id = self.session.id.clone();
+        tokio::spawn(async move {
+            runtime::tell(
+                &data_dir,
+                AgentReq::Send {
+                    id,
+                    text: prompt,
+                    mode: SendMode::Steer,
+                },
+            )
+            .await;
         });
-        self.session.touch();
-        self.persist_session();
-        self.follow = true;
         self.set_toast("steer queued for the next tool boundary", false);
     }
 
     /// Alt+Enter: deliver after the current run finishes.
     fn queue_followup(&mut self, prompt: String) {
+        let data_dir = self.data_dir.clone();
+        let id = self.session.id.clone();
+        let text = prompt.clone();
+        tokio::spawn(async move {
+            runtime::tell(
+                &data_dir,
+                AgentReq::Send {
+                    id,
+                    text,
+                    mode: SendMode::FollowUp,
+                },
+            )
+            .await;
+        });
         self.queued.push_back(prompt);
         self.set_toast("follow-up queued", false);
+    }
+
+    fn answer_ask(&self, ask_id: u64, label: String) {
+        let data_dir = self.data_dir.clone();
+        let id = self.session.id.clone();
+        tokio::spawn(async move {
+            runtime::tell(
+                &data_dir,
+                AgentReq::Answer {
+                    id,
+                    ask_id,
+                    label,
+                },
+            )
+            .await;
+        });
     }
 
     fn handle_ask_key(&mut self, key: KeyEvent) -> Action {
@@ -1192,12 +1241,12 @@ impl App {
                     .get(ask.selected)
                     .map(|o| o.label.clone())
                     .unwrap_or_default();
-                self.asks.answer(ask.id, label.clone());
+                self.answer_ask(ask.id, label.clone());
                 self.set_toast(format!("chose: {label}"), false);
             }
             KeyCode::Esc => {
                 if let Some(option) = ask.options.get(ask.recommended) {
-                    self.asks.answer(ask.id, option.label.clone());
+                    self.answer_ask(ask.id, option.label.clone());
                     self.set_toast(format!("chose recommended: {}", option.label), false);
                 }
             }
@@ -1206,13 +1255,18 @@ impl App {
         Action::None
     }
 
+    fn interrupt_agent(&self) {
+        let data_dir = self.data_dir.clone();
+        let id = self.session.id.clone();
+        tokio::spawn(async move {
+            runtime::tell(&data_dir, AgentReq::Interrupt { id }).await;
+        });
+    }
+
     async fn cancel_active(&mut self, remote: &Remote<AnyDialer>) {
         if self.agent_running {
-            if let Some(h) = self.agent_task.take() {
-                h.abort();
-            }
+            self.interrupt_agent();
             self.agent_running = false;
-            self.agent_rx = None;
             self.pending_ask = None;
             if let Some(id) = self.active_assistant_id.take() {
                 if let Some(TranscriptItem::Assistant { done, error, .. }) =
