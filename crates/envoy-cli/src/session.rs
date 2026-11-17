@@ -222,6 +222,31 @@ mod ansi_tests {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChange {
+    pub path: String,
+    pub before: String,
+    pub after: String,
+    pub added: usize,
+    pub removed: usize,
+    pub ts_ms: u64,
+}
+
+pub fn compute_diff_counts(before: &str, after: &str) -> (usize, usize) {
+    use similar::{ChangeTag, TextDiff};
+    let diff = TextDiff::from_lines(before, after);
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Insert => added += 1,
+            ChangeTag::Delete => removed += 1,
+            ChangeTag::Equal => {}
+        }
+    }
+    (added, removed)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: String,
     pub title: String,
@@ -245,6 +270,8 @@ pub struct Session {
     pub items: Vec<TranscriptItem>,
     #[serde(default)]
     pub messages: Vec<ChatMessage>,
+    #[serde(default)]
+    pub changed_files: Vec<FileChange>,
 }
 
 impl Session {
@@ -264,6 +291,30 @@ impl Session {
             event_seq: 0,
             items: Vec::new(),
             messages: Vec::new(),
+            changed_files: Vec::new(),
+        }
+    }
+
+    pub fn record_file_change(&mut self, path: String, before: String, after: String) -> (usize, usize) {
+        let now = now_ms();
+        if let Some(existing) = self.changed_files.iter_mut().find(|f| f.path == path) {
+            existing.after = after;
+            let (added, removed) = compute_diff_counts(&existing.before, &existing.after);
+            existing.added = added;
+            existing.removed = removed;
+            existing.ts_ms = now;
+            (added, removed)
+        } else {
+            let (added, removed) = compute_diff_counts(&before, &after);
+            self.changed_files.push(FileChange {
+                path,
+                before,
+                after,
+                added,
+                removed,
+                ts_ms: now,
+            });
+            (added, removed)
         }
     }
 

@@ -17,7 +17,15 @@ impl App {
         } else {
             InputMode::Shell
         };
-        let session = Session::new(cwd, target.clone());
+        let session = Session::new(cwd.clone(), target.clone());
+        let perm_mode = PermissionEngine::new(
+            data_dir.clone(),
+            cwd,
+            session.id.clone(),
+            target.clone(),
+            PermissionMode::Default,
+        )
+        .mode();
         let (notice_tx, notice_rx) = mpsc::unbounded_channel();
         Self {
             data_dir,
@@ -30,6 +38,7 @@ impl App {
             session,
             focus: Focus::Input,
             mode,
+            perm_mode,
             show_sidebar: prefs.show_sidebar,
             follow: true,
             transcript_scroll: 0,
@@ -65,6 +74,16 @@ impl App {
             login_task: None,
             login_cancel: None,
             models_rx: None,
+            inspector: InspectorState::default(),
+            workspace_index: links::WorkspaceIndex::default(),
+            hit_regions: Vec::new(),
+            transcript_area: Rect::default(),
+            expanded_explore_groups: HashSet::new(),
+            mouse_capture: true,
+            selection: None,
+            drag_start: None,
+            screen_lines: Vec::new(),
+            transcript_cache: HashMap::new(),
         }
     }
 
@@ -82,6 +101,9 @@ impl App {
         self.session = loaded;
         self.selected_card = None;
         self.follow = true;
+        self.expanded_explore_groups.clear();
+        self.transcript_cache.clear();
+        self.inspector = InspectorState::default();
         self.reset_agent_view();
     }
 
@@ -101,6 +123,97 @@ impl App {
 
     pub(in crate::tui) fn session_cwd_set(&mut self, cwd: PathBuf) {
         self.session.cwd = cwd;
+        self.workspace_index.invalidate();
+        self.transcript_cache.clear();
+    }
+
+    pub(in crate::tui) fn open_file_in_inspector(&mut self, raw_path: &str, line: Option<usize>) {
+        self.workspace_index.ensure_fresh(&self.session.cwd);
+        let (rel, parsed_line) = self
+            .workspace_index
+            .resolve_path(&self.session.cwd, &self.session.changed_files, raw_path)
+            .unwrap_or_else(|| {
+                (
+                    links::normalize_display_path(&self.session.cwd, std::path::Path::new(raw_path)),
+                    None,
+                )
+            });
+        let target_line = line.or(parsed_line);
+
+        self.show_sidebar = true;
+        self.inspector.force_open = true;
+        self.inspector.file_path = Some(rel.clone());
+        self.inspector.file_line = target_line;
+
+        if target_line.is_none() {
+            if let Some(idx) = self.find_changed_file_index(&rel) {
+                self.inspector.selected_diff = idx;
+                self.inspector.tab = InspectorTab::Diff;
+                self.inspector.scroll = 0;
+                return;
+            }
+            if diff::load_git_pair(&self.session.cwd, &rel).is_some() {
+                self.inspector.tab = InspectorTab::Diff;
+                self.inspector.scroll = 0;
+                return;
+            }
+        }
+
+        self.inspector.tab = InspectorTab::File;
+        self.inspector.scroll = target_line
+            .map(|l| l.saturating_sub(6) as u16)
+            .unwrap_or(0);
+    }
+
+    pub(in crate::tui) fn find_changed_file_index(&self, rel_or_abs: &str) -> Option<usize> {
+        let norm = links::normalize_display_path(&self.session.cwd, std::path::Path::new(rel_or_abs));
+        self.session.changed_files.iter().position(|fc| {
+            fc.path == rel_or_abs
+                || links::normalize_display_path(&self.session.cwd, std::path::Path::new(&fc.path))
+                    == norm
+        })
+    }
+
+    pub(in crate::tui) fn open_diff_index(&mut self, idx: usize) {
+        if idx < self.session.changed_files.len() {
+            let rel = links::normalize_display_path(
+                &self.session.cwd,
+                std::path::Path::new(&self.session.changed_files[idx].path),
+            );
+            self.inspector.selected_diff = idx;
+            self.inspector.file_path = Some(rel);
+            self.inspector.file_line = None;
+            self.inspector.tab = InspectorTab::Diff;
+            self.inspector.scroll = 0;
+            self.show_sidebar = true;
+            self.inspector.force_open = true;
+        }
+    }
+
+    pub(in crate::tui) fn open_tool_output(&mut self, item_id: u64) {
+        self.inspector.output_item_id = Some(item_id);
+        self.inspector.output_job_id = None;
+        self.inspector.tab = InspectorTab::Output;
+        self.inspector.scroll = 0;
+        self.show_sidebar = true;
+        self.inspector.force_open = true;
+    }
+
+    pub(in crate::tui) fn open_job_output(&mut self, job_id: JobId) {
+        self.inspector.output_job_id = Some(job_id);
+        self.inspector.output_item_id = None;
+        self.inspector.tab = InspectorTab::Output;
+        self.inspector.scroll = 0;
+        self.show_sidebar = true;
+        self.inspector.force_open = true;
+    }
+
+    pub(in crate::tui) fn open_tool_inspect(&mut self, item_id: u64) {
+        self.inspector.inspect_item_id = Some(item_id);
+        self.inspector.tab = InspectorTab::Inspect;
+        self.inspector.scroll = 0;
+        self.show_sidebar = true;
+        self.inspector.force_open = true;
     }
 
 

@@ -194,14 +194,22 @@ pub(crate) fn layout_editor_text(input: &str, cursor_chars: usize, max_width: us
     (lines, c_row, c_col)
 }
 
-pub(crate) fn render_markdown_lines<'a>(
+pub(crate) fn render_markdown_linked(
     text: &str,
     width: usize,
     theme: &Theme,
-    out: &mut Vec<Line<'a>>,
-) {
+    cwd: &Path,
+    changed: &[crate::session::FileChange],
+    index: &super::links::WorkspaceIndex,
+) -> Vec<super::types::LinkedLine> {
+    use super::highlight::{highlight_code_line, Lang};
+    use super::links::{inline_spans_linked, LinkedSpan};
+    use super::types::LinkedLine;
+
+    let mut out = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
     let mut in_code = false;
+    let mut code_lang = Lang::Plain;
     let mut i = 0usize;
     while i < lines.len() {
         let raw = lines[i];
@@ -211,63 +219,158 @@ pub(crate) fn render_markdown_lines<'a>(
             in_code = !in_code;
             if in_code {
                 let lang = fence.trim();
-                out.push(Line::styled(
+                code_lang = Lang::from_hint(lang);
+                out.push(LinkedLine::from_line(Line::styled(
                     if lang.is_empty() {
                         " ┌──".to_string()
                     } else {
                         format!(" ┌─ {lang}")
                     },
                     Style::default().fg(theme.border),
-                ));
+                )));
             } else {
-                out.push(Line::styled(" └──", Style::default().fg(theme.border)));
+                code_lang = Lang::Plain;
+                out.push(LinkedLine::from_line(Line::styled(
+                    " └──",
+                    Style::default().fg(theme.border),
+                )));
             }
             i += 1;
             continue;
         }
         if in_code {
             let shown = truncate_width(raw, width.saturating_sub(4));
-            out.push(Line::from(vec![
-                Span::styled(" │ ", Style::default().fg(theme.border)),
-                Span::styled(shown, Style::default().fg(theme.secondary)),
-            ]));
+            let mut spans = vec![LinkedSpan {
+                span: Span::styled(" │ ", Style::default().fg(theme.border)),
+                target: None,
+            }];
+            let code_spans = highlight_code_line(
+                &shown,
+                code_lang,
+                theme,
+                Style::default().fg(theme.secondary),
+            );
+            for sp in code_spans {
+                spans.push(LinkedSpan {
+                    span: Span::styled(sp.content.into_owned(), sp.style),
+                    target: None,
+                });
+            }
+            out.push(LinkedLine::from_linked(spans));
             i += 1;
             continue;
         }
         if is_table_start(&lines, i) {
-            i += render_table(&lines[i..], width, theme, out);
+            let mut tbl = Vec::new();
+            i += render_table(&lines[i..], width, theme, &mut tbl);
+            for l in tbl {
+                out.push(LinkedLine::from_line(l));
+            }
             continue;
         }
         if trimmed.starts_with("### ") || trimmed.starts_with("## ") || trimmed.starts_with("# ") {
             let heading = trimmed.trim_start_matches('#').trim();
             for w in wrap_text(heading, width.saturating_sub(2)) {
-                out.push(Line::styled(
+                out.push(LinkedLine::from_line(Line::styled(
                     format!(" {w}"),
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
-                ));
+                )));
             }
             i += 1;
             continue;
         }
         if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
             let item = trimmed.trim_start_matches(['-', '*']).trim_start();
-            let wrapped = wrap_text(item, width.saturating_sub(4));
-            for (n, w) in wrapped.iter().enumerate() {
-                let prefix = if n == 0 { " • " } else { "   " };
-                let mut spans = vec![Span::styled(prefix, Style::default().fg(theme.accent))];
-                spans.extend(inline_spans(w, theme));
-                out.push(Line::from(spans));
+            let linked = inline_spans_linked(item, theme, cwd, changed, index);
+            let wrapped = wrap_linked_spans(
+                LinkedSpan {
+                    span: Span::styled(" • ", Style::default().fg(theme.accent)),
+                    target: None,
+                },
+                LinkedSpan {
+                    span: Span::raw("   "),
+                    target: None,
+                },
+                linked,
+                width,
+            );
+            for row in wrapped {
+                out.push(LinkedLine::from_linked(row));
             }
             i += 1;
             continue;
         }
-        for w in wrap_text(raw, width.saturating_sub(2)) {
-            out.push(Line::from(inline_spans(&format!(" {w}"), theme)));
+        let linked = inline_spans_linked(raw, theme, cwd, changed, index);
+        let wrapped = wrap_linked_spans(
+            LinkedSpan {
+                span: Span::raw(" "),
+                target: None,
+            },
+            LinkedSpan {
+                span: Span::raw(" "),
+                target: None,
+            },
+            linked,
+            width,
+        );
+        for row in wrapped {
+            out.push(LinkedLine::from_linked(row));
         }
         i += 1;
     }
+    out
+}
+
+pub(crate) fn wrap_linked_spans(
+    first_prefix: super::links::LinkedSpan,
+    cont_prefix: super::links::LinkedSpan,
+    spans: Vec<super::links::LinkedSpan>,
+    max_width: usize,
+) -> Vec<Vec<super::links::LinkedSpan>> {
+    use super::links::LinkedSpan;
+    let first_w = display_width(&first_prefix.span.content);
+    let cont_w = display_width(&cont_prefix.span.content);
+    let body_budget = max_width.saturating_sub(first_w.max(cont_w)).max(8);
+
+    let mut rows: Vec<Vec<LinkedSpan>> = vec![vec![first_prefix]];
+    let mut cur_w = 0usize;
+
+    for token in spans {
+        let style = token.span.style;
+        let target = token.target;
+        let text = token.span.content.into_owned();
+        if text.is_empty() {
+            continue;
+        }
+        let mut buf = String::new();
+        for ch in text.chars() {
+            let cw = char_width(ch);
+            if cur_w + cw > body_budget && (cur_w > 0 || !buf.is_empty()) {
+                if !buf.is_empty() {
+                    rows.last_mut().unwrap().push(LinkedSpan {
+                        span: Span::styled(std::mem::take(&mut buf), style),
+                        target: target.clone(),
+                    });
+                }
+                rows.push(vec![cont_prefix.clone()]);
+                cur_w = 0;
+                if ch == ' ' {
+                    continue;
+                }
+            }
+            buf.push(ch);
+            cur_w += cw;
+        }
+        if !buf.is_empty() {
+            rows.last_mut().unwrap().push(LinkedSpan {
+                span: Span::styled(buf, style),
+                target,
+            });
+        }
+    }
+    rows
 }
 
 pub(crate) fn is_table_start(lines: &[&str], i: usize) -> bool {
@@ -443,47 +546,6 @@ pub(crate) fn push_table_row<'a>(
     out.push(Line::from(spans));
 }
 
-pub(crate) fn inline_spans<'a>(line: &str, theme: &Theme) -> Vec<Span<'a>> {
-    let mut spans = Vec::new();
-    let mut plain = String::new();
-    let mut i = 0usize;
-    while i < line.len() {
-        let rest = &line[i..];
-        let marker = if rest.starts_with('`') {
-            Some(("`", Style::default().fg(theme.secondary).bg(theme.surface)))
-        } else if rest.starts_with("**") {
-            Some(("**", Style::default().add_modifier(Modifier::BOLD)))
-        } else if rest.starts_with('*') {
-            Some(("*", Style::default().add_modifier(Modifier::ITALIC)))
-        } else {
-            None
-        };
-        if let Some((marker, style)) = marker {
-            let after = &rest[marker.len()..];
-            if let Some(end) = after.find(marker) {
-                if end > 0 {
-                    if !plain.is_empty() {
-                        spans.push(Span::raw(std::mem::take(&mut plain)));
-                    }
-                    spans.push(Span::styled(after[..end].to_string(), style));
-                    i += marker.len() + end + marker.len();
-                    continue;
-                }
-            }
-        }
-        let ch = rest.chars().next().expect("non-empty");
-        plain.push(ch);
-        i += ch.len_utf8();
-    }
-    if !plain.is_empty() {
-        spans.push(Span::raw(plain));
-    }
-    if spans.is_empty() {
-        spans.push(Span::raw(String::new()));
-    }
-    spans
-}
-
 pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -500,60 +562,7 @@ pub(crate) fn job_elapsed(job: &Job) -> u64 {
     }
 }
 
-/// Standard API context windows. The longest matching fragment wins.
-/// An unknown model uses 128k so the meter fills early instead of
-/// pretending there is room that was never advertised.
-pub(crate) fn context_window(model_id: &str) -> u64 {
-    let id = model_id.to_ascii_lowercase();
-    const TABLE: &[(&str, u64)] = &[
-        ("claude", 200_000),
-        ("gemini", 1_048_576),
-        ("gpt-4.1", 1_047_576),
-        ("gpt-4o", 128_000),
-        ("gpt-4-turbo", 128_000),
-        ("gpt-5", 272_000),
-        ("o1", 200_000),
-        ("o3", 200_000),
-        ("o4", 200_000),
-        ("deepseek-reasoner", 64_000),
-        ("deepseek", 64_000),
-        ("grok", 131_072),
-        ("qwen", 131_072),
-        ("llama", 128_000),
-    ];
-    TABLE
-        .iter()
-        .filter(|(fragment, _)| id.contains(fragment))
-        .max_by_key(|(fragment, _)| fragment.len())
-        .map(|(_, window)| *window)
-        .unwrap_or(128_000)
-}
-
-/// `(tokens, estimated)`. A finished turn stores the provider's prompt
-/// size; before that, the transcript is counted at about four characters
-/// per token.
-pub(crate) fn context_used(session: &crate::session::Session) -> (u64, bool) {
-    if session.prompt_tokens > 0 {
-        return (session.prompt_tokens, false);
-    }
-    let chars: usize = session
-        .messages
-        .iter()
-        .map(|message| {
-            message.content.chars().count()
-                + message
-                    .reasoning
-                    .as_ref()
-                    .map(|text| text.chars().count())
-                    .unwrap_or(0)
-        })
-        .sum();
-    if chars == 0 {
-        (0, false)
-    } else {
-        ((chars / 4) as u64, true)
-    }
-}
+pub(crate) use crate::agent::context::context_used;
 
 pub(crate) fn context_bar(used: u64, window: u64) -> (String, String) {
     const CELLS: usize = 8;
@@ -595,18 +604,7 @@ pub(crate) fn fmt_duration(ms: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{context_bar, context_window, fmt_tokens};
-
-    #[test]
-    fn window_prefers_the_longest_fragment() {
-        assert_eq!(context_window("claude-sonnet-4-5"), 200_000);
-        assert_eq!(context_window("gpt-4.1"), 1_047_576);
-        assert_eq!(context_window("gpt-4o"), 128_000);
-        assert_eq!(context_window("gpt-5.2-codex"), 272_000);
-        assert_eq!(context_window("gemini-2.5-pro"), 1_048_576);
-        assert_eq!(context_window("deepseek-chat"), 64_000);
-        assert_eq!(context_window("some-local-model"), 128_000);
-    }
+    use super::{context_bar, fmt_tokens};
 
     #[test]
     fn token_labels_and_bar() {

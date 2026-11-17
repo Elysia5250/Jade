@@ -391,6 +391,7 @@ mod tests {
             label: None,
             group: DEFAULT_GROUP.into(),
             timeout_s: 30,
+            sandbox: envoy_proto::SandboxPolicy::Off,
         }
     }
 

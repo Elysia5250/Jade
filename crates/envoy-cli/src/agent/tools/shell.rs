@@ -2,7 +2,7 @@
 use super::resolve_path;
 use crate::agent::events::AgentEvent;
 use anyhow::{bail, Context, Result};
-use envoy_proto::{LogRecord, SubmitRequest, TaskSpec, DEFAULT_GROUP};
+use envoy_proto::{LogRecord, SandboxPolicy, SubmitRequest, TaskSpec, DEFAULT_GROUP};
 use envoy_service::{AgentDialer, Remote};
 use serde_json::Value;
 use std::path::Path;
@@ -15,6 +15,7 @@ pub(crate) async fn exec_tool(
     cwd: &Path,
     call_id: &str,
     args: &Value,
+    sandbox: SandboxPolicy,
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<(String, Option<i32>)> {
     let command = args["command"]
@@ -35,6 +36,7 @@ pub(crate) async fn exec_tool(
         label: None,
         group: DEFAULT_GROUP.to_string(),
         timeout_s,
+        sandbox,
     };
     let job = remote.submit(target, req).await?;
     let _ = tx.send(AgentEvent::ToolJob {

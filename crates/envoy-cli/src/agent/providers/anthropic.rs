@@ -2,8 +2,9 @@
 use super::sse::SseParser;
 use super::StreamReply;
 use crate::agent::events::AgentEvent;
-use crate::agent::tools::anthropic_tools_json;
+use crate::agent::tools::anthropic_tools_json_for;
 use crate::auth::{Credential, StoredProvider};
+use crate::permissions::PermissionEngine;
 use crate::session::{ChatMessage, ChatRole, ToolCall};
 use anyhow::{bail, Context, Result};
 use futures::StreamExt;
@@ -17,6 +18,8 @@ pub(crate) async fn stream_anthropic(
     model: &str,
     system: &str,
     history: &[ChatMessage],
+    permissions: Option<&PermissionEngine>,
+    extra_tools: &[Value],
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<StreamReply> {
     let url = format!("{}/messages", provider.base_url.trim_end_matches('/'));
@@ -72,7 +75,7 @@ pub(crate) async fn stream_anthropic(
         "max_tokens": 8192,
         "system": system,
         "messages": msgs,
-        "tools": anthropic_tools_json(),
+        "tools": anthropic_tools_json_for(permissions, extra_tools),
         "stream": true,
     });
 

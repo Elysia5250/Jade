@@ -2,8 +2,9 @@
 use super::sse::SseParser;
 use super::StreamReply;
 use crate::agent::events::AgentEvent;
-use crate::agent::tools::responses_tools_json;
+use crate::agent::tools::responses_tools_json_for;
 use crate::auth::{Credential, StoredProvider};
+use crate::permissions::PermissionEngine;
 use crate::session::{ChatMessage, ChatRole, ToolCall};
 use anyhow::{bail, Context, Result};
 use futures::StreamExt;
@@ -17,6 +18,8 @@ pub(crate) async fn stream_openai_codex(
     model: &str,
     system: &str,
     history: &[ChatMessage],
+    permissions: Option<&PermissionEngine>,
+    extra_tools: &[Value],
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<StreamReply> {
     let (token, account_id) = match &provider.credential {
@@ -70,7 +73,7 @@ pub(crate) async fn stream_openai_codex(
         "model": model,
         "instructions": system,
         "input": input,
-        "tools": responses_tools_json(),
+        "tools": responses_tools_json_for(permissions, extra_tools),
         "stream": true,
         "store": false,
     });

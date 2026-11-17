@@ -5,13 +5,15 @@
 
 mod asks;
 mod config;
+pub mod context;
 mod events;
 mod r#loop;
-mod prompt;
+pub(crate) mod prompt;
 mod providers;
-mod tools;
+pub(crate) mod tools;
 
 pub use asks::AskBroker;
 pub use config::TurnConfig;
+pub use context::CompactionTier;
 pub use events::{AgentEvent, AskOption};
 pub use r#loop::run_agent_turn;

@@ -1,4 +1,5 @@
 //! Agent event stream.
+use crate::permissions::PermissionMode;
 use crate::session::ChatMessage;
 use serde::{Deserialize, Serialize};
 
@@ -64,6 +65,39 @@ pub enum AgentEvent {
         context_tokens: u64,
     },
     TurnError(String),
+    /// Context compaction or handoff generation started.
+    Compacting {
+        auto: bool,
+        handoff: bool,
+    },
+    /// Compaction finished; daemon and UI replace model-visible messages while
+    /// preserving the visual transcript.
+    Compacted {
+        messages: Vec<ChatMessage>,
+        before_tokens: u64,
+        after_tokens: u64,
+        summary: String,
+        auto: bool,
+    },
+    /// A `/handoff` summary is ready to seed a clean session.
+    HandoffReady {
+        summary: String,
+        before_tokens: u64,
+        after_tokens: u64,
+        title: String,
+    },
+    /// Active session permission mode changed.
+    PermissionModeChanged {
+        mode: PermissionMode,
+    },
+    /// A workspace file was modified by `write` or `edit`.
+    FileChanged {
+        path: String,
+        before: String,
+        after: String,
+        added: usize,
+        removed: usize,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,4 +105,55 @@ pub struct AskOption {
     pub label: String,
     pub description: Option<String>,
     pub recommended: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::ChatRole;
+
+    #[test]
+    fn agent_events_round_trip_through_postcard() {
+        let samples = vec![
+            AgentEvent::Compacting {
+                auto: true,
+                handoff: false,
+            },
+            AgentEvent::Compacted {
+                messages: vec![ChatMessage {
+                    role: ChatRole::User,
+                    content: "<compacted_context>\nsummary\n</compacted_context>".into(),
+                    reasoning: None,
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                    tool_name: None,
+                }],
+                before_tokens: 180_000,
+                after_tokens: 24_000,
+                summary: "summary".into(),
+                auto: true,
+            },
+            AgentEvent::HandoffReady {
+                summary: "handoff body".into(),
+                before_tokens: 220_000,
+                after_tokens: 4_500,
+                title: "handoff: phase 2".into(),
+            },
+        ];
+        for ev in samples {
+            let bytes = postcard::to_allocvec(&ev).unwrap();
+            let decoded: AgentEvent = postcard::from_bytes(&bytes).unwrap();
+            match (&ev, &decoded) {
+                (
+                    AgentEvent::Compacted { before_tokens: a, .. },
+                    AgentEvent::Compacted { before_tokens: b, .. },
+                ) => assert_eq!(a, b),
+                (
+                    AgentEvent::HandoffReady { title: a, .. },
+                    AgentEvent::HandoffReady { title: b, .. },
+                ) => assert_eq!(a, b),
+                _ => {}
+            }
+        }
+    }
 }

@@ -2,8 +2,9 @@
 use super::sse::SseParser;
 use super::StreamReply;
 use crate::agent::events::AgentEvent;
-use crate::agent::tools::openai_tools_json;
+use crate::agent::tools::openai_tools_json_for;
 use crate::auth::{copilot_session_token, Credential, StoredProvider};
+use crate::permissions::PermissionEngine;
 use crate::session::{ChatMessage, ChatRole, ToolCall};
 use anyhow::{bail, Context, Result};
 use futures::StreamExt;
@@ -17,6 +18,8 @@ pub(crate) async fn stream_openai_chat(
     model: &str,
     system: &str,
     history: &[ChatMessage],
+    permissions: Option<&PermissionEngine>,
+    extra_tools: &[Value],
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<StreamReply> {
     let (bearer, base_url) = match &provider.credential {
@@ -78,7 +81,7 @@ pub(crate) async fn stream_openai_chat(
     let body = json!({
         "model": model,
         "messages": msgs,
-        "tools": openai_tools_json(),
+        "tools": openai_tools_json_for(permissions, extra_tools),
         "stream": true,
         "stream_options": { "include_usage": true },
     });

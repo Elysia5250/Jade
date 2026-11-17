@@ -12,13 +12,27 @@ impl App {
         }
         let mut fetching = false;
         if let Some((prov, _)) = resolve_active_provider(&self.data_dir) {
+            let dir = self.data_dir.clone();
+            tokio::spawn(async move {
+                let http = reqwest::Client::new();
+                crate::agent::context::refresh_models_dev_if_stale(&http, &dir).await;
+            });
             if matches!(prov.protocol, ProviderProtocol::OpenAiChat) {
                 if let Credential::ApiKey { key } = prov.credential {
                     let base = prov.base_url.clone();
+                    let dir = self.data_dir.clone();
+                    let pid = prov.id.clone();
                     let (tx, rx) = oneshot::channel();
                     tokio::spawn(async move {
                         let http = reqwest::Client::new();
-                        let list = fetch_openai_models(&http, &base, &key).await;
+                        let list = crate::agent::context::fetch_openai_models_with_caps(
+                            &http,
+                            Some(&dir),
+                            &pid,
+                            &base,
+                            &key,
+                        )
+                        .await;
                         let _ = tx.send(list);
                     });
                     self.models_rx = Some(rx);
@@ -134,6 +148,13 @@ impl App {
                 ),
                 Command::ToggleMode,
             ),
+            (
+                format!(
+                    "Cycle permission mode (now {})",
+                    self.perm_mode.label()
+                ),
+                Command::CyclePermission,
+            ),
             ("New session (/new)".to_string(), Command::NewSession),
             (
                 "Switch session (/sessions)".to_string(),
@@ -143,7 +164,8 @@ impl App {
                 "Expand / collapse output cards".to_string(),
                 Command::ToggleExpand,
             ),
-            ("Toggle sidebar".to_string(), Command::ToggleSidebar),
+            ("Toggle inspector panel (Ctrl+B)".to_string(), Command::ToggleSidebar),
+            ("Toggle mouse capture (/mouse)".to_string(), Command::ToggleMouseCapture),
             ("Switch theme".to_string(), Command::NextTheme),
             ("Cancel active turn / job".to_string(), Command::Cancel),
             ("Refresh".to_string(), Command::Refresh),

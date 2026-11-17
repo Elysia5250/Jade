@@ -1,128 +1,53 @@
-//! Daemon-side single-loop agent sessions.
-//!
-//! The console is a client: it sends prompts/steers/answers here and renders
-//! the event stream. A turn lives in the daemon, so closing the TUI does not
-//! kill it; an attach from a later TUI replays events from a cursor.
-//!
-//! Transport is a local Unix socket (`<data_dir>/agent.sock`, 0600) with the
-//! same postcard framing as the machine protocol. This is the console control
-//! plane, separate from `service_id = 16`.
+//! Daemon-side session store, turn runner, and manual `/compact` + `/handoff`.
 
+use super::protocol::{AgentReq, AgentResp, SendMode, SeqEvent, SessionInfo};
+use crate::agent::context::{generate_handoff, prepare_context, resolve_budget, TokenCalibration};
+use crate::agent::prompt::build_system_prompt;
 use crate::auth::resolve_active_provider;
 use crate::llm::{run_agent_turn, AgentEvent, AskBroker, TurnConfig};
+use crate::permissions::{PermissionEngine, PermissionMode};
 use crate::session::ChatMessage;
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use envoy_proto::codec::{read_framed, write_framed};
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 use tracing::debug;
 
-pub fn socket_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("agent.sock")
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SendMode {
-    /// Start a turn if idle, otherwise steer the running one.
-    Prompt,
-    /// Deliver at the next tool boundary.
-    Steer,
-    /// Deliver after the current run finishes.
-    FollowUp,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SeqEvent {
-    pub seq: u64,
-    pub event: AgentEvent,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AgentReq {
-    /// Create the session if missing and sync its history.
-    Ensure {
-        id: String,
-        cwd: PathBuf,
-        target: String,
-        history: Vec<ChatMessage>,
-    },
-    /// Ensure the session exists, then attach to its event stream. One round
-    /// trip so a reconnecting console cannot race the replay.
-    Resume {
-        id: String,
-        cwd: PathBuf,
-        target: String,
-        history: Vec<ChatMessage>,
-        from: u64,
-    },
-    Send {
-        id: String,
-        text: String,
-        mode: SendMode,
-    },
-    Attach {
-        id: String,
-        from: u64,
-    },
-    Interrupt {
-        id: String,
-    },
-    Answer {
-        id: String,
-        ask_id: u64,
-        label: String,
-    },
-    /// Remove the most recently queued follow-up and return it.
-    Recall {
-        id: String,
-    },
-    List,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AgentResp {
-    /// Replay payload for an attach: everything after `from`, plus whether a
-    /// turn is currently live in the daemon.
-    Snapshot { events: Vec<SeqEvent>, running: bool },
-    Event(SeqEvent),
-    Sessions(Vec<SessionInfo>),
-    /// A queued follow-up returned to the console, or `None` if the queue was
-    /// empty.
-    Recalled(Option<String>),
-    Ack,
-    Error(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionInfo {
-    pub id: String,
-    pub cwd: PathBuf,
-    pub target: String,
-    pub running: bool,
-    pub queued: usize,
-}
-
-struct Live {
+pub(crate) struct Live {
     cwd: PathBuf,
     target: String,
     messages: Vec<ChatMessage>,
     events: Vec<SeqEvent>,
     seq: u64,
-    running: bool,
+    pub(crate) running: bool,
     queued: VecDeque<String>,
     steer: Arc<Mutex<Vec<String>>>,
     asks: Arc<AskBroker>,
+    permissions: Arc<PermissionEngine>,
     subs: Vec<mpsc::UnboundedSender<SeqEvent>>,
     turn: Option<tokio::task::JoinHandle<()>>,
     pump: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Live {
-    fn new(cwd: PathBuf, target: String, messages: Vec<ChatMessage>) -> Self {
+    fn new(
+        data_dir: &Path,
+        id: &str,
+        cwd: PathBuf,
+        target: String,
+        messages: Vec<ChatMessage>,
+    ) -> Self {
+        let permissions = PermissionEngine::new(
+            data_dir.to_path_buf(),
+            cwd.clone(),
+            id.to_string(),
+            target.clone(),
+            PermissionMode::Default,
+        );
         Self {
             cwd,
             target,
@@ -133,6 +58,7 @@ impl Live {
             queued: VecDeque::new(),
             steer: Arc::new(Mutex::new(Vec::new())),
             asks: AskBroker::new(),
+            permissions,
             subs: Vec::new(),
             turn: None,
             pump: None,
@@ -163,11 +89,11 @@ impl Runtime {
         })
     }
 
-    fn session(&self, id: &str) -> Option<Arc<Mutex<Live>>> {
+    pub(crate) fn session(&self, id: &str) -> Option<Arc<Mutex<Live>>> {
         self.sessions.lock().unwrap().get(id).cloned()
     }
 
-    fn ensure(
+    pub(crate) fn ensure(
         self: &Arc<Self>,
         id: String,
         cwd: PathBuf,
@@ -175,11 +101,10 @@ impl Runtime {
         history: Vec<ChatMessage>,
     ) -> Arc<Mutex<Live>> {
         let mut map = self.sessions.lock().unwrap();
-        map.entry(id)
+        let data_dir = &self.data_dir;
+        map.entry(id.clone())
             .or_insert_with(|| {
-                let mut live = Live::new(cwd, target, history);
-                // A fresh runtime cannot know the client's old event cursor;
-                // this marker tells the client to rebuild its view.
+                let mut live = Live::new(data_dir, &id, cwd, target, history);
                 live.seq = 1;
                 live.events.push(SeqEvent {
                     seq: 1,
@@ -190,7 +115,6 @@ impl Runtime {
             .clone()
     }
 
-    /// Broadcast one event to every attached client and record it for replay.
     fn publish(&self, live: &mut Live, event: AgentEvent) {
         live.seq += 1;
         let seq = live.seq;
@@ -202,10 +126,9 @@ impl Runtime {
         live.subs.retain(|tx| tx.send(item.clone()).is_ok());
     }
 
-    /// Start the next turn from `live.messages` plus one user message.
     fn start_turn(self: &Arc<Self>, id: &str, live: Arc<Mutex<Live>>, prompt: Option<String>) {
         let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
-        let (cwd, target, history, asks, steer) = {
+        let (cwd, target, history, asks, steer, permissions) = {
             let mut state = live.lock().unwrap();
             if let Some(text) = prompt {
                 state.messages.push(ChatMessage {
@@ -231,6 +154,7 @@ impl Runtime {
                 state.messages.clone(),
                 state.asks.clone(),
                 state.steer.clone(),
+                state.permissions.clone(),
             )
         };
 
@@ -254,6 +178,7 @@ impl Runtime {
             history,
             asks,
             steer,
+            permissions,
         };
         debug!(session = %id, "turn start");
         let turn = tokio::spawn(run_agent_turn(cfg, tx));
@@ -266,13 +191,9 @@ impl Runtime {
                 let event = match rx.recv().await {
                     Some(event) => event,
                     None => {
-                        // The loop task panicked or ended without TurnDone.
-                        // Never leave the session stuck in `running`.
                         debug!(session = %id, "turn channel closed without a terminal event");
                         let mut state = pump_live.lock().unwrap();
                         state.running = false;
-                        // Drop queued work rather than replay it against a
-                        // transcript we never received.
                         state.queued.clear();
                         runtime.publish(
                             &mut state,
@@ -287,8 +208,12 @@ impl Runtime {
                     AgentEvent::TurnDone { .. } | AgentEvent::TurnError(_)
                 );
                 let mut state = pump_live.lock().unwrap();
-                if let AgentEvent::TurnDone { messages, .. } = &event {
-                    state.messages = messages.clone();
+                match &event {
+                    AgentEvent::TurnDone { messages, .. }
+                    | AgentEvent::Compacted { messages, .. } => {
+                        state.messages = messages.clone();
+                    }
+                    _ => {}
                 }
                 runtime.publish(&mut state, event);
                 if finished {
@@ -317,10 +242,6 @@ impl Runtime {
             let mut state = live.lock().unwrap();
             debug!(session = id, ?mode, running = state.running, "send");
             match mode {
-                // `Prompt` is the console's only "talk" verb: it starts a turn
-                // when idle and steers the live one. The TUI uses it for every
-                // enter, so a stale local `running` flag can never swallow the
-                // next prompt.
                 SendMode::Prompt | SendMode::Steer if state.running => {
                     state.steer.lock().unwrap().push(text.clone());
                     self.publish(
@@ -340,6 +261,79 @@ impl Runtime {
             }
         };
         self.start_turn(id, live, Some(start));
+    }
+
+    pub fn start_compact(
+        self: &Arc<Self>,
+        id: &str,
+        focus: Option<String>,
+        handoff: bool,
+    ) -> Result<()> {
+        let Some(live) = self.session(id) else {
+            bail!("no such session: {id}");
+        };
+        let Some((provider, model)) = resolve_active_provider(&self.data_dir) else {
+            bail!("no model configured: run /login");
+        };
+        let (cwd, target, mut messages) = {
+            let mut state = live.lock().unwrap();
+            if state.running {
+                bail!("session is busy; wait for the active turn to finish or interrupt first");
+            }
+            if state.messages.len() < 2 && !handoff {
+                bail!("nothing to compact yet");
+            }
+            if state.messages.is_empty() && handoff {
+                bail!("nothing to hand off yet");
+            }
+            state.running = true;
+            self.publish(
+                &mut state,
+                AgentEvent::Compacting {
+                    auto: false,
+                    handoff,
+                },
+            );
+            (
+                state.cwd.clone(),
+                state.target.clone(),
+                state.messages.clone(),
+            )
+        };
+
+        let runtime = Arc::clone(self);
+        let data_dir = self.data_dir.clone();
+        let task_live = Arc::clone(&live);
+        let task = tokio::spawn(async move {
+            let res = run_manual_context_op(
+                &data_dir,
+                &provider,
+                &model.model_id,
+                &target,
+                &cwd,
+                &mut messages,
+                focus.as_deref(),
+                handoff,
+            )
+            .await;
+
+            let mut state = task_live.lock().unwrap();
+            state.running = false;
+            match res {
+                Ok(ev) => {
+                    if let AgentEvent::Compacted { messages, .. } = &ev {
+                        state.messages = messages.clone();
+                    }
+                    runtime.publish(&mut state, ev);
+                }
+                Err(e) => {
+                    runtime.publish(&mut state, AgentEvent::TurnError(format!("{e:#}")));
+                }
+            }
+        });
+        let mut state = live.lock().unwrap();
+        state.turn = Some(task);
+        Ok(())
     }
 
     pub fn interrupt(&self, id: &str) {
@@ -377,6 +371,14 @@ impl Runtime {
             .and_then(|live| live.lock().unwrap().queued.pop_back())
     }
 
+    pub fn set_permission_mode(&self, id: &str, mode: PermissionMode) {
+        if let Some(live) = self.session(id) {
+            let mut state = live.lock().unwrap();
+            state.permissions.set_mode(mode);
+            self.publish(&mut state, AgentEvent::PermissionModeChanged { mode });
+        }
+    }
+
     pub fn list(&self) -> Vec<SessionInfo> {
         self.sessions
             .lock()
@@ -385,6 +387,59 @@ impl Runtime {
             .map(|(id, live)| live.lock().unwrap().info(id))
             .collect()
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_manual_context_op(
+    data_dir: &PathBuf,
+    provider: &crate::auth::StoredProvider,
+    model_id: &str,
+    target: &str,
+    cwd: &PathBuf,
+    messages: &mut Vec<ChatMessage>,
+    focus: Option<&str>,
+    handoff: bool,
+) -> Result<AgentEvent> {
+    let http = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .build()?;
+    let system = build_system_prompt(target, cwd);
+    if handoff {
+        let out = generate_handoff(&http, data_dir, provider, model_id, &system, messages, focus)
+            .await?;
+        return Ok(AgentEvent::HandoffReady {
+            summary: out.summary,
+            before_tokens: out.before_tokens,
+            after_tokens: out.after_tokens,
+            title: out.title,
+        });
+    }
+    let plan = resolve_budget(data_dir, &provider.id, model_id);
+    let outcome = prepare_context(
+        &http,
+        data_dir,
+        provider,
+        model_id,
+        target,
+        cwd,
+        &system,
+        messages,
+        TokenCalibration::default(),
+        &plan,
+        true,
+        focus,
+        None,
+    )
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("conversation is too short to compact further"))?;
+
+    Ok(AgentEvent::Compacted {
+        messages: outcome.messages,
+        before_tokens: outcome.before_tokens,
+        after_tokens: outcome.after_tokens,
+        summary: outcome.summary,
+        auto: false,
+    })
 }
 
 /// Serve the console control socket until cancelled.
@@ -412,7 +467,7 @@ where
 {
     let (mut rd, mut wr) = tokio::io::split(stream);
     let req: AgentReq = match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
+        Duration::from_secs(5),
         read_framed(&mut rd),
     )
     .await
@@ -457,6 +512,18 @@ where
         AgentReq::Recall { id } => {
             write_framed(&mut wr, &AgentResp::Recalled(runtime.recall(&id))).await?;
         }
+        AgentReq::Compact { id, focus } => match runtime.start_compact(&id, focus, false) {
+            Ok(()) => write_framed(&mut wr, &AgentResp::Ack).await?,
+            Err(e) => write_framed(&mut wr, &AgentResp::Error(format!("{e:#}"))).await?,
+        },
+        AgentReq::Handoff { id, focus } => match runtime.start_compact(&id, focus, true) {
+            Ok(()) => write_framed(&mut wr, &AgentResp::Ack).await?,
+            Err(e) => write_framed(&mut wr, &AgentResp::Error(format!("{e:#}"))).await?,
+        },
+        AgentReq::SetPermissionMode { id, mode } => {
+            runtime.set_permission_mode(&id, mode);
+            write_framed(&mut wr, &AgentResp::Ack).await?;
+        }
         AgentReq::List => {
             write_framed(&mut wr, &AgentResp::Sessions(runtime.list())).await?;
         }
@@ -487,8 +554,6 @@ where
     let (snapshot, running, mut rx) = {
         let mut state = live.lock().unwrap();
         debug!(session = %id, from, seq = state.seq, "attach");
-        // A cursor from before a daemon restart is meaningless: replay from
-        // the beginning, including the SessionReset marker.
         let from = if from > state.seq { 0 } else { from };
         let snapshot: Vec<SeqEvent> = state
             .events
@@ -508,116 +573,4 @@ where
         }
     }
     Ok(())
-}
-
-/// Open one request/response exchange with the daemon.
-pub async fn request(data_dir: &Path, req: &AgentReq) -> Result<AgentResp> {
-    let mut stream = tokio::net::UnixStream::connect(socket_path(data_dir))
-        .await
-        .with_context(|| {
-            format!(
-                "connecting to the agent runtime at {} (is `envoy serve` up?)",
-                socket_path(data_dir).display()
-            )
-        })?;
-    write_framed(&mut stream, req).await?;
-    let resp: AgentResp = read_framed(&mut stream).await?;
-    Ok(resp)
-}
-
-/// Fire-and-forget helper for send/interrupt/answer.
-pub async fn tell(data_dir: &Path, req: AgentReq) -> Result<()> {
-    request(data_dir, &req).await.map(|_| ()).inspect_err(|e| {
-        debug!(error = %e, "agent runtime is unreachable");
-    })
-}
-
-/// Attach (and create if needed) and forward the replay plus live events into
-/// `tx`. Sends an `Error` when the stream ends so the console can reconnect.
-pub async fn attach(
-    data_dir: PathBuf,
-    id: String,
-    cwd: PathBuf,
-    target: String,
-    history: Vec<ChatMessage>,
-    from: u64,
-    tx: mpsc::UnboundedSender<AgentResp>,
-) {
-    let path = socket_path(&data_dir);
-    let Ok(mut stream) = tokio::net::UnixStream::connect(&path).await else {
-        let _ = tx.send(AgentResp::Error("agent runtime is not running".into()));
-        return;
-    };
-    let req = AgentReq::Resume {
-        id,
-        cwd,
-        target,
-        history,
-        from,
-    };
-    if write_framed(&mut stream, &req).await.is_err() {
-        let _ = tx.send(AgentResp::Error("agent runtime is not accepting requests".into()));
-        return;
-    }
-    // The first frame is the replay snapshot. Do not sit forever on a daemon
-    // that accepted the socket but never answered.
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        read_framed::<_, AgentResp>(&mut stream),
-    )
-    .await
-    {
-        Ok(Ok(resp)) => {
-            if tx.send(resp).is_err() {
-                return;
-            }
-        }
-        Ok(Err(e)) => {
-            debug!(error = %e, "agent attach failed");
-            let _ = tx.send(AgentResp::Error("agent event stream closed".into()));
-            return;
-        }
-        Err(_) => {
-            let _ = tx.send(AgentResp::Error(
-                "agent runtime did not answer within 5s".into(),
-            ));
-            return;
-        }
-    }
-    loop {
-        match read_framed::<_, AgentResp>(&mut stream).await {
-            Ok(resp) => {
-                if tx.send(resp).is_err() {
-                    return;
-                }
-            }
-            Err(e) => {
-                debug!(error = %e, "agent event stream ended");
-                let _ = tx.send(AgentResp::Error("agent event stream closed".into()));
-                return;
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn recall_returns_queued_follow_ups_lifo() {
-        let runtime = Runtime::new(PathBuf::from("/tmp"));
-        let live = runtime.ensure(
-            "s1".into(),
-            PathBuf::from("/tmp"),
-            "local".into(),
-            Vec::new(),
-        );
-        live.lock().unwrap().running = true;
-        runtime.send("s1", "first".into(), SendMode::FollowUp);
-        runtime.send("s1", "second".into(), SendMode::FollowUp);
-        assert_eq!(runtime.recall("s1").as_deref(), Some("second"));
-        assert_eq!(runtime.recall("s1").as_deref(), Some("first"));
-        assert_eq!(runtime.recall("s1"), None);
-    }
 }

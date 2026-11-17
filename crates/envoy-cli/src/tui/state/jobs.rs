@@ -82,15 +82,11 @@ impl App {
 
 
     pub(in crate::tui) async fn attach_job_card(&mut self, remote: &Remote<AnyDialer>, job: Job) {
-        // If this job already has a card in the transcript, uncollapse and jump to it.
+        self.open_job_output(job.id);
         if let Some(pos) = self.session.items.iter().position(|it| {
             matches!(it, TranscriptItem::Tool { job_id: Some(id), .. } if *id == job.id)
         }) {
-            if let TranscriptItem::Tool { collapsed, .. } = &mut self.session.items[pos] {
-                *collapsed = false;
-            }
             self.selected_card = Some(pos);
-            self.focus = Focus::Transcript;
             return;
         }
         let card_id = self.session.alloc_id();
@@ -111,7 +107,7 @@ impl App {
             target: self.target.clone(),
             output: Vec::new(),
             status,
-            collapsed: false,
+            collapsed: true,
             duration_ms: Some(job_elapsed(&job)),
             exit_code,
             started_ms: job.created_ms,

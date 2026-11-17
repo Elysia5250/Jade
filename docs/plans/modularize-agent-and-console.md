@@ -21,8 +21,9 @@ context compaction and permissions behind their own modules.
 - [ ] Enable the hard file-size check with the split files removed from the
       baseline. (state, view and llm entries removed; auth/main/mcp/service
       remain.)
-- [ ] Context compaction module.
-- [ ] Permission module.
+- [x] Context compaction module (`agent/context/`, `/compact`, `/handoff`, `/budget`, vendor harness tiers, overflow retry, `runtime/` split).
+- [x] Permission module (`permissions/`, OS `bwrap` workspace sandbox, `Shift+Tab`, `/permissions`, `/plan`, `/trust`).
+- [x] Toolchain, Skills, and Bidirectional MCP (`glob`, `grep`, `webfetch`, `todo`, `skill`, `skills/`, `mcp/` server + stdio/HTTP-SSE client, `/mcp`, `/skill`).
 
 ## Constraints
 
@@ -33,10 +34,7 @@ context compaction and permissions behind their own modules.
 
 ## Next
 
-Phase 1 is complete through the agent split. Next is phase 2: add
-`agent/context/` (budget, pruning, structured summary, overflow retry) before
-permissions. `auth.rs`, `main.rs`, `mcp.rs` and two service files remain in
-the size baseline; split them opportunistically when they are touched.
+Phases 1, 2, 3, and 3.5 are complete. Only `auth.rs` and `conduit.rs` remain in `scripts/file-size-baseline.txt`; split them opportunistically when touched.
 
 ## Verification
 

@@ -1,4 +1,4 @@
-//! Prompt editor.
+//! Prompt editor with clean rounded framing and mode indicator.
 use crate::tui::*;
 
 pub(super) fn draw_editor(
@@ -18,9 +18,15 @@ pub(super) fn draw_editor(
     } else {
         theme.border
     };
+    let title = match app.mode {
+        InputMode::Agent => " Ask · /cmd · !shell ",
+        InputMode::Shell => " Shell · Tab agent ",
+    };
     let block = Block::default()
-        .borders(Borders::LEFT)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(frame_color))
+        .title(Span::styled(title, Style::default().fg(theme.dim)))
         .style(Style::default().bg(theme.panel));
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -39,10 +45,13 @@ pub(super) fn draw_editor(
     };
     let lines: Vec<Line> = if app.input.is_empty() {
         let placeholder = match app.mode {
-            InputMode::Agent => "Ask",
-            InputMode::Shell => "Run",
+            InputMode::Agent => "Ask anything… (Shift+Tab permissions, Ctrl+B panel)",
+            InputMode::Shell => "Run shell command…",
         };
-        vec![Line::styled(placeholder, Style::default().fg(theme.dim))]
+        vec![Line::styled(
+            truncate_width(placeholder, content.width as usize),
+            Style::default().fg(theme.dim),
+        )]
     } else {
         visual_lines[skip..end]
             .iter()

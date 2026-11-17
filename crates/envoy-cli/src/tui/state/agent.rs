@@ -151,8 +151,46 @@ impl App {
                     self.focus = Focus::Input;
                 }
                 UiNotice::Recalled(None) => {}
+                UiNotice::Toast(msg, err) => {
+                    self.set_toast(msg, err);
+                }
+                UiNotice::Notice(msg, err) => {
+                    self.push_notice(msg, err);
+                }
             }
         }
+    }
+
+    pub(in crate::tui) fn request_compact(&mut self, focus: &str, handoff: bool) {
+        if self.agent_offline || self.agent_stream.is_none() || !self.agent_ready {
+            self.set_toast("daemon offline — cannot run compaction", true);
+            return;
+        }
+        if self.agent_running {
+            self.set_toast("turn in progress; wait or interrupt first", true);
+            return;
+        }
+        let data_dir = self.data_dir.clone();
+        let id = self.session.id.clone();
+        let focus = (!focus.trim().is_empty()).then(|| focus.trim().to_string());
+        let notice = self.notice_tx.clone();
+        let req = if handoff {
+            AgentReq::Handoff { id, focus }
+        } else {
+            AgentReq::Compact { id, focus }
+        };
+        tokio::spawn(async move {
+            match runtime::request(&data_dir, &req).await {
+                Ok(AgentResp::Ack) => {}
+                Ok(AgentResp::Error(e)) => {
+                    let _ = notice.send(UiNotice::Toast(e, true));
+                }
+                Err(e) => {
+                    let _ = notice.send(UiNotice::Toast(format!("{e:#}"), true));
+                }
+                _ => {}
+            }
+        });
     }
 
 
@@ -197,6 +235,9 @@ impl App {
                     if !self.outbox.is_empty() {
                         self.set_toast("daemon back — sending queued prompt", false);
                         self.flush_outbox();
+                    }
+                    if self.perm_mode != PermissionMode::Default {
+                        self.push_permission_mode_to_daemon(self.perm_mode);
                     }
                 }
                 AgentResp::Event(item) => self.apply_event(item.seq, item.event),
@@ -439,7 +480,132 @@ impl App {
                 self.active_tool_items.clear();
                 self.pending_ask = None;
             }
+            AgentEvent::Compacting { auto, handoff } => {
+                let msg = if handoff {
+                    "generating handoff summary…"
+                } else if auto {
+                    "auto-compacting context…"
+                } else {
+                    "compacting context…"
+                };
+                self.agent_running = true;
+                self.set_toast(msg, false);
+            }
+            AgentEvent::Compacted {
+                messages,
+                before_tokens,
+                after_tokens,
+                summary: _,
+                auto,
+            } => {
+                self.session.messages = messages;
+                self.session.prompt_tokens = after_tokens;
+                let tag = if auto { "auto-compacted" } else { "compacted" };
+                let note = format!(
+                    "{tag} context: {} -> {} tokens (visual history kept)",
+                    fmt_tokens(before_tokens),
+                    fmt_tokens(after_tokens)
+                );
+                self.push_notice(note, false);
+                if !auto {
+                    self.agent_running = false;
+                    self.set_toast("context compacted", false);
+                }
+                self.session.touch();
+                self.persist_session();
+            }
+            AgentEvent::HandoffReady {
+                summary,
+                before_tokens,
+                after_tokens,
+                title,
+            } => {
+                self.persist_session();
+                let mut fresh = Session::new(self.session.cwd.clone(), self.target.clone());
+                fresh.title = title;
+                fresh.prompt_tokens = after_tokens;
+                fresh.messages = vec![
+                    ChatMessage {
+                        role: ChatRole::User,
+                        content: format!(
+                            "<handoff_context>\n{summary}\n</handoff_context>\n\n\
+                             [Started clean session via /handoff]"
+                        ),
+                        reasoning: None,
+                        tool_calls: Vec::new(),
+                        tool_call_id: None,
+                        tool_name: None,
+                    },
+                    ChatMessage {
+                        role: ChatRole::Assistant,
+                        content: "Ready to continue from the handoff summary.".into(),
+                        reasoning: None,
+                        tool_calls: Vec::new(),
+                        tool_call_id: None,
+                        tool_name: None,
+                    },
+                ];
+                let notice_id = fresh.alloc_id();
+                fresh.items.push(TranscriptItem::Notice {
+                    id: notice_id,
+                    text: format!(
+                        "handoff ready: {} -> {} tokens (clean session)",
+                        fmt_tokens(before_tokens),
+                        fmt_tokens(after_tokens)
+                    ),
+                    is_error: false,
+                });
+                let say_id = fresh.alloc_id();
+                fresh.items.push(TranscriptItem::Say {
+                    id: say_id,
+                    text: summary,
+                    level: "handoff".into(),
+                });
+                self.session = fresh;
+                self.selected_card = None;
+                self.follow = true;
+                self.expanded_explore_groups.clear();
+                self.transcript_cache.clear();
+                self.inspector = InspectorState::default();
+                self.reset_agent_view();
+                self.persist_session();
+                self.spawn_agent_attach();
+                self.set_toast("started clean handoff session", false);
+            }
+            AgentEvent::PermissionModeChanged { mode } => {
+                self.perm_mode = mode;
+            }
+            AgentEvent::FileChanged {
+                path,
+                before,
+                after,
+                added: _,
+                removed: _,
+            } => {
+                self.session.record_file_change(path, before, after);
+                self.workspace_index.invalidate();
+                self.transcript_cache.clear();
+                self.session.touch();
+                self.persist_session();
+            }
         }
+    }
+
+    pub(in crate::tui) fn set_permission_mode(&mut self, mode: PermissionMode) {
+        self.perm_mode = mode;
+        self.set_toast(format!("permissions: {}", mode.label()), false);
+        self.push_permission_mode_to_daemon(mode);
+    }
+
+    pub(in crate::tui) fn push_permission_mode_to_daemon(&self, mode: PermissionMode) {
+        if self.agent_offline || self.agent_stream.is_none() || !self.agent_ready {
+            return;
+        }
+        let data_dir = self.data_dir.clone();
+        let id = self.session.id.clone();
+        tokio::spawn(async move {
+            let _ = runtime::tell(&data_dir, AgentReq::SetPermissionMode { id, mode }).await;
+        });
     }
 
 

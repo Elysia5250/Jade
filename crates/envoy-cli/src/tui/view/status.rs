@@ -1,7 +1,7 @@
-//! Status line.
+//! Status line with clickable mode/permission badges and context bar.
 use crate::tui::*;
 
-pub(super) fn draw_status(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -11,9 +11,10 @@ pub(super) fn draw_status(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
     };
 
     let mut right_spans: Vec<Span> = Vec::new();
-    if let Some((_, model)) = resolve_active_provider(&app.data_dir) {
+    if let Some((prov, model)) = resolve_active_provider(&app.data_dir) {
         let (used, estimated) = context_used(&app.session);
-        let window = context_window(&model.model_id);
+        let budget = crate::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
+        let window = budget.compact_at;
         let ratio = if window == 0 {
             0.0
         } else {
@@ -38,8 +39,13 @@ pub(super) fn draw_status(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
         right_spans.push(Span::styled(filled, Style::default().fg(bar_color)));
         right_spans.push(Span::styled(empty, Style::default().fg(theme.border)));
         let mark = if estimated { "~" } else { "" };
+        let cap_suffix = if budget.compact_at + 64_000 < budget.hard_window {
+            format!("·{}", fmt_tokens(budget.hard_window))
+        } else {
+            String::new()
+        };
         right_spans.push(Span::styled(
-            format!("  {mark}{}/{}", fmt_tokens(used), fmt_tokens(window)),
+            format!("  {mark}{}/{}{cap_suffix}", fmt_tokens(used), fmt_tokens(window)),
             Style::default().fg(theme.dim),
         ));
     } else {
@@ -52,12 +58,21 @@ pub(super) fn draw_status(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
 
     let remote = app.target != "local" && !app.target.is_empty();
     let offline = app.agent_offline || !app.connected;
-    let toast = app.active_toast().map(|(msg, err)| {
-        (
-            format!("  {}", truncate_width(msg, 36)),
-            err,
-        )
-    });
+    let perm_badge = app.perm_mode.short_badge();
+    let perm_color = match app.perm_mode {
+        PermissionMode::Default => theme.dim,
+        PermissionMode::AcceptEdits => theme.ok,
+        PermissionMode::Plan => theme.accent,
+        PermissionMode::Auto => theme.warn,
+    };
+    let sandbox_label = if !remote {
+        Some(envoy_core::sandbox::backend_label())
+    } else {
+        None
+    };
+    let toast = app
+        .active_toast()
+        .map(|(msg, err)| (format!("  {}", truncate_width(msg, 36)), err));
     let target_label = format!("  {}", app.target);
     let offline_label = "  offline";
     let suffix_w = if let Some((label, _)) = &toast {
@@ -66,9 +81,32 @@ pub(super) fn draw_status(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
         (if remote { display_width(&target_label) } else { 0 })
             + (if offline { display_width(offline_label) } else { 0 })
     };
-    let mode_w = display_width(mode) + 2;
+    let sandbox_w = sandbox_label.map(|s| display_width(s) + 2).unwrap_or(0);
+    let mode_w = display_width(mode) + 2 + display_width(perm_badge) + 2 + sandbox_w;
     let cwd_budget = left_budget.saturating_sub(mode_w + suffix_w).max(1);
     let cwd = truncate_width(&app.cwd_label(), cwd_budget);
+
+    let mode_w_cells = display_width(mode) as u16;
+    app.hit_regions.push(HitRegion {
+        rect: Rect {
+            x: area.x,
+            y: area.y,
+            width: mode_w_cells,
+            height: 1,
+        },
+        target: HitTarget::CycleMode,
+    });
+    let perm_x = area.x + mode_w_cells + 2;
+    let perm_w_cells = display_width(perm_badge) as u16;
+    app.hit_regions.push(HitRegion {
+        rect: Rect {
+            x: perm_x,
+            y: area.y,
+            width: perm_w_cells,
+            height: 1,
+        },
+        target: HitTarget::CyclePermission,
+    });
 
     let mut left = vec![
         Span::styled(
@@ -78,8 +116,14 @@ pub(super) fn draw_status(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled(cwd.clone(), Style::default().fg(theme.text)),
+        Span::styled(perm_badge, Style::default().fg(perm_color)),
+        Span::raw("  "),
     ];
+    if let Some(sb) = sandbox_label {
+        left.push(Span::styled(sb, Style::default().fg(theme.dim)));
+        left.push(Span::raw("  "));
+    }
+    left.push(Span::styled(cwd.clone(), Style::default().fg(theme.text)));
     if let Some((label, err)) = toast {
         left.push(Span::styled(
             label,

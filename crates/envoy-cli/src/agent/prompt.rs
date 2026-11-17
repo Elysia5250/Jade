@@ -11,18 +11,24 @@ pub(crate) fn build_system_prompt(target: &str, cwd: &Path) -> String {
          - Reply in the same language as the user's most recent message. If the user writes Chinese, answer in Chinese; never switch to English just because the code or tool output is English.\n\
          - Be precise and concise. Do the work; never substitute a summary of what you would do for actually doing it.\n\
          - If a request is ambiguous, ask one short question before acting. If a command is destructive (delete, overwrite, force-push, chmod -R, kill), confirm first.\n\
-         - Prefer `read`/`edit`/`ls` over shell commands when inspecting or editing files. Relative paths resolve against the working directory.\n\
+         - Prefer `read`/`edit`/`ls`/`glob`/`grep` over shell commands when inspecting or editing files. Relative paths resolve against the working directory.\n\
          - Use `exec` with a small wait for long commands, then `job` to follow or cancel. Report exact commands, job ids and exit codes; never invent tool output.\n\
          - Answer in Markdown. Use tables for comparisons, but keep them narrow enough for a terminal.\n\
          - Use `say` for short progress notes the user should see while you work (one sentence). Do not use it to restate the request.\n\
          - Use `ask` when a decision is genuinely ambiguous or a command is destructive. Give 2-5 options, mark exactly one `recommended`, and keep the safe option recommended for destructive actions. If nobody answers within the timeout, the recommended option is taken.\n\n\
          ## Machine tools (run on the active target machine)\n\
          - `exec`: run a shell command (detached daemon job, streams output)\n\
-         - `read`: read a file\n\
+         - `read`: read a file by byte range or `start_line`/`line_count`\n\
          - `write`: write a whole file atomically\n\
          - `edit`: replace an exact snippet in a file\n\
          - `ls`: list a directory\n\
+         - `glob`: find files matching a glob pattern\n\
+         - `grep`: search file contents by regex\n\
          - `job`: inspect, follow logs of (action \"wait\"), or cancel detached jobs\n\
+         ## Agent & web tools\n\
+         - `webfetch`: fetch a public HTTP/HTTPS page with SSRF protection\n\
+         - `todo`: read or write the session task checklist\n\
+         - `skill`: load full instructions for an available skill\n\
          ## User tools (not machine operations)\n\
          - `say`: report progress to the user\n\
          - `ask`: ask the user to choose; blocks until answered or timeout",
@@ -33,6 +39,25 @@ pub(crate) fn build_system_prompt(target: &str, cwd: &Path) -> String {
     if let Some(extra) = project_instructions(cwd) {
         prompt.push_str("\n\n## Project instructions\n");
         prompt.push_str(&extra);
+    }
+    prompt
+}
+
+pub(crate) fn build_system_prompt_for_session(
+    target: &str,
+    cwd: &Path,
+    data_dir: &Path,
+    session_id: &str,
+) -> String {
+    let mut prompt = build_system_prompt(target, cwd);
+    let skills = crate::skills::discover_skills(data_dir, cwd);
+    if let Some(catalog) = crate::skills::format_skills_catalog(&skills) {
+        prompt.push_str("\n\n## Available skills (load full steps on demand with `skill`)\n");
+        prompt.push_str(&catalog);
+    }
+    if let Some(todos) = super::tools::todo::format_active_todos_xml(data_dir, session_id) {
+        prompt.push_str("\n\n## Active session checklist\n");
+        prompt.push_str(&todos);
     }
     prompt
 }

@@ -36,20 +36,24 @@ Envoy is a daemon-owned agent with a thin terminal client.
 
 ```text
 crates/envoy-cli/src/
-  main.rs                 CLI parsing and command dispatch only
+  main.rs                 CLI parsing and command dispatch
+  cli_ops.rs              Extracted CLI status, device, and file subcommands
   daemon.rs               daemon lifecycle
   session.rs              session/transcript persistence
-  runtime.rs              daemon-side session runtime + attach protocol
+  runtime/                daemon-side session runtime, client, attach protocol
   agent/
-    loop.rs               single agent loop, turn boundaries
-    prompt.rs             system prompt, project instructions
+    loop.rs               single agent loop, turn boundaries, overflow retry
+    prompt.rs             system prompt, project instructions, skills & todos injection
     events.rs             AgentEvent + round-trip tests
-    context/              token budget, pruning, summary compaction
-    tools/                fs, shell, job, say/ask
+    context/              catalog, tiered harness budgets, pruning, summary, tokens
+    tools/                fs, shell, search (glob/grep), web, todo, skill, say/ask
     providers/            openai-chat, openai-codex, anthropic, SSE
   permissions/            modes, rules, paths, shell, approval, audit
+  skills/                 SKILL.md discovery, frontmatter parser, trust gate
+  mcp/                    bidirectional MCP server (stdio) and client (stdio + HTTP/SSE)
   tui/
     mod.rs                terminal setup + run loop
+    commands.rs           slash command registry (/compact, /handoff, /budget, /permissions, /mcp, /skill, ...)
     state/                App state, split by concern
     view/                 pure rendering, split by screen region
     text.rs               wrapping/markdown helpers
@@ -61,29 +65,29 @@ should import from `agent` directly.
 
 ## Context lifecycle
 
-1. `build_system_prompt` produces the stable prefix.
-2. `ContextBudget` decides whether the model history fits.
-3. Cheap pruning drops stale tool output and binary payloads.
-4. `Compactor` summarizes the old head while keeping a recent tail.
-5. The summary is stored as a handoff and re-injected before the tail.
-6. The daemon emits compaction events; the TUI shows progress.
-7. Original messages remain persisted; only the model-visible history is
-   replaced.
+1. `build_system_prompt_for_session` produces the stable prefix with `<available_skills>` and `<active_todos>`.
+2. `context::catalog` + `context::budget` resolve physical caps (live `/models`, `models.dev`, 2026 catalog) and vendor-native harness compaction tiers (`/budget`).
+3. Stage 1 (`context::prune`) folds older tool outputs while keeping recent tail turns untouched.
+4. Stage 2 (`context::summary`) summarizes the old head across atomic `assistant(tool_calls)+tool` boundaries, keeping a recent tail, and supports `/handoff` clean session reset.
+5. One automatic overflow compaction retry runs if the provider rejects a prompt as too long, feeding back into `model_caps.json`.
+6. The daemon emits `Compacting`/`Compacted`/`HandoffReady` events; the TUI updates model history while keeping visual transcript items intact.
 
 ## Permission lifecycle
 
 1. A tool call is normalized (tool, action, resource).
-2. Mode + rules produce allow/ask/deny.
-3. A deny short-circuits; an ask creates an approval request.
-4. The OS sandbox enforces filesystem/network limits after approval.
-5. The decision and rule are written to the audit log.
+2. Explicit rule precedence (`Managed Deny > Local Deny > Hard Protected Guard > Managed Ask > Local Ask > Managed Allow > Local Allow > Mode Baseline`) produces `allow`/`ask`/`deny`.
+3. A `deny` short-circuits; an `ask` creates an approval request (`AskBroker`) or fails cleanly on non-interactive MCP stdio.
+4. `envoy-core::sandbox` (`bwrap --unshare-net` offline workspace sandbox by default for local `exec`) enforces filesystem/network limits after approval.
+5. The decision and sandbox mode are written to the audit log (`~/.envoy/audit/permissions.jsonl`).
 6. A rejection is returned to the model with actionable context.
 
 ## Where to look
 
-- Protocol: `crates/envoy-proto/src/lib.rs`, `crates/envoy-cli/src/runtime.rs`
-- Agent loop: `crates/envoy-cli/src/agent/loop.rs`
+- Protocol: `crates/envoy-proto/src/lib.rs`, `crates/envoy-cli/src/runtime/`
+- Sandbox & search: `crates/envoy-core/src/{sandbox,search}.rs`
+- Agent loop & tools: `crates/envoy-cli/src/agent/{loop.rs,tools/}`
 - Compaction: `crates/envoy-cli/src/agent/context/`
 - Permissions: `crates/envoy-cli/src/permissions/`
+- Skills & MCP: `crates/envoy-cli/src/{skills,mcp}/`
 - Console: `crates/envoy-cli/src/tui/`
 - Research and rationale: `docs/HARNESS-RESEARCH.md`

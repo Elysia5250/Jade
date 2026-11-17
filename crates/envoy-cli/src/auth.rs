@@ -140,6 +140,10 @@ pub struct ModelPrefs {
     pub theme: usize,
     #[serde(default)]
     pub show_sidebar: bool,
+    #[serde(default)]
+    pub budget_tier: crate::agent::CompactionTier,
+    #[serde(default)]
+    pub model_budgets: BTreeMap<String, u64>,
 }
 
 impl Default for ModelPrefs {
@@ -148,7 +152,9 @@ impl Default for ModelPrefs {
             active: None,
             recent: Vec::new(),
             theme: 0,
-            show_sidebar: false,
+            show_sidebar: true,
+            budget_tier: crate::agent::CompactionTier::Native,
+            model_budgets: BTreeMap::new(),
         }
     }
 }
@@ -211,13 +217,13 @@ pub const BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
             },
         ],
         models: &[
-            "gpt-5.2-codex",
-            "gpt-5.1-codex",
-            "gpt-5.1",
+            "gpt-6.1-sol",
+            "gpt-6.1-terra",
+            "gpt-6-astra",
+            "gpt-6-luna",
+            "gpt-5.6",
             "gpt-4.1",
             "o3",
-            "o4-mini",
-            "gpt-4o",
         ],
     },
     BuiltinProvider {
@@ -245,10 +251,10 @@ pub const BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
             },
         ],
         models: &[
-            "claude-sonnet-4-5-20250929",
-            "claude-opus-4-5-20251101",
-            "claude-haiku-4-5-20251001",
-            "claude-3-7-sonnet-20250219",
+            "claude-fable-5-2",
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
+            "claude-haiku-5-5",
         ],
     },
     BuiltinProvider {
@@ -263,7 +269,7 @@ pub const BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
             label: "GitHub Copilot (OAuth Device Code)",
             hint: "Sign in at github.com/login/device with your Copilot subscription",
         }],
-        models: &["gpt-4o", "claude-sonnet-4", "o3-mini", "gemini-2.5-pro"],
+        models: &["claude-fable-5-2", "gpt-6.1-sol", "gemini-4-carbon", "o3-mini"],
     },
     BuiltinProvider {
         id: "deepseek",
@@ -277,7 +283,7 @@ pub const BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
             label: "DeepSeek API Key",
             hint: "platform.deepseek.com API key",
         }],
-        models: &["deepseek-chat", "deepseek-reasoner"],
+        models: &["deepseek-v4.1-flash", "deepseek-v4-pro", "deepseek-reasoner"],
     },
     BuiltinProvider {
         id: "google",
@@ -291,7 +297,7 @@ pub const BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
             label: "Gemini API Key",
             hint: "Google AI Studio API key",
         }],
-        models: &["gemini-2.5-pro", "gemini-2.5-flash"],
+        models: &["gemini-4-carbon", "gemini-4-hydrogen", "gemini-4-argon"],
     },
     BuiltinProvider {
         id: "openrouter",
@@ -306,10 +312,10 @@ pub const BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
             hint: "openrouter.ai key",
         }],
         models: &[
-            "anthropic/claude-sonnet-4.5",
-            "openai/gpt-5",
-            "deepseek/deepseek-chat-v3-0324",
-            "google/gemini-2.5-pro",
+            "anthropic/claude-fable-5-2",
+            "openai/gpt-6.1-sol",
+            "google/gemini-4-hydrogen",
+            "deepseek/deepseek-v4.1-flash",
         ],
     },
     BuiltinProvider {
@@ -324,7 +330,7 @@ pub const BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
             label: "OpenCode API Key",
             hint: "opencode.ai API key (optional custom Base URL)",
         }],
-        models: &["claude-sonnet-4-5", "deepseek-v3", "gpt-5-nano"],
+        models: &["claude-sonnet-5-5", "deepseek-v4.1-flash", "gpt-6-luna"],
     },
     BuiltinProvider {
         id: "custom",
@@ -1309,34 +1315,6 @@ pub async fn ensure_fresh_provider(
     Ok(provider)
 }
 
-pub async fn fetch_openai_models(http: &reqwest::Client, base_url: &str, api_key: &str) -> Vec<String> {
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
-    let mut req = http.get(&url);
-    if !api_key.is_empty() {
-        req = req.bearer_auth(api_key);
-    }
-    let Ok(resp) = req.timeout(Duration::from_secs(8)).send().await else {
-        return Vec::new();
-    };
-    if !resp.status().is_success() {
-        return Vec::new();
-    }
-    let Ok(val) = resp.json::<serde_json::Value>().await else {
-        return Vec::new();
-    };
-    let mut models: Vec<String> = val["data"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|item| item["id"].as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    models.sort();
-    models.dedup();
-    models
-}
-
 // ------------------------------------------------------------------ Interactive CLI `envoy login`
 
 pub async fn cmd_auth_list(data_dir: &Path) -> Result<()> {
@@ -1640,7 +1618,7 @@ mod tests {
             updated_ms: now_ms(),
         };
         let model_ref = record_provider_login(&dir, sp, None).unwrap();
-        assert_eq!(model_ref.display(), "deepseek/deepseek-chat");
+        assert_eq!(model_ref.display(), "deepseek/deepseek-v4.1-flash");
 
         let loaded = load_auth(&dir);
         assert!(loaded.credentials.contains_key("deepseek"));
@@ -1657,7 +1635,7 @@ mod tests {
 
         let (active_prov, active_model) = resolve_active_provider(&dir).unwrap();
         assert_eq!(active_prov.id, "deepseek");
-        assert_eq!(active_model.model_id, "deepseek-chat");
+        assert_eq!(active_model.model_id, "deepseek-v4.1-flash");
 
         assert!(remove_provider(&dir, "deepseek").unwrap());
         assert!(load_auth(&dir).credentials.is_empty());
