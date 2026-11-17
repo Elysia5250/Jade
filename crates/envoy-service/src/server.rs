@@ -5,7 +5,7 @@
 //! affecting the job and reattach later at its last cursor.
 
 use crate::transport::AgentHost;
-use envoy_core::{audit, fs, gate, job, truncate, Jobs};
+use envoy_core::{audit, fs, gate, job, search, truncate, Jobs};
 use envoy_proto::codec::{read_framed, write_framed};
 use envoy_proto::{
     Call, ClientMsg, Hello, JobId, Op, Reply, AGENT_CHUNK, AGENT_VERSION,
@@ -215,6 +215,17 @@ where
             Err(e) => reply(wr, Reply::Failed { error: format!("{e:#}") }).await,
         },
         Op::Write { path, mode } => serve_write(rd, wr, &path, mode).await?,
+        Op::Glob {
+            root,
+            pattern,
+            max_results,
+        } => glob_op(&root, &pattern, max_results, wr).await?,
+        Op::Grep {
+            root,
+            pattern,
+            include,
+            max_results,
+        } => grep_op(&root, &pattern, include.as_deref(), max_results, wr).await?,
     }
     Ok(())
 }
@@ -429,8 +440,59 @@ fn describe(op: &Op) -> (&'static str, String) {
         Op::Write { path, .. } => path.clone(),
         Op::List { path } => path.clone(),
         Op::Edit { path, .. } => path.clone(),
+        Op::Glob { root, pattern, .. } => format!("{root}:{pattern}"),
+        Op::Grep { root, pattern, .. } => format!("{root}:{pattern}"),
     };
     (op.name(), detail)
+}
+
+async fn glob_op<W: AsyncWrite + Unpin>(
+    root: &str,
+    pattern: &str,
+    max_results: u32,
+    wr: &mut W,
+) -> Result<()> {
+    match search::glob_files(root, pattern, max_results).await {
+        Ok(paths) => {
+            reply(wr, Reply::GlobMatches { paths }).await;
+            reply(wr, Reply::Done { code: 0, ms: 0 }).await;
+        }
+        Err(e) => {
+            reply(
+                wr,
+                Reply::Failed {
+                    error: format!("{e:#}"),
+                },
+            )
+            .await;
+        }
+    }
+    Ok(())
+}
+
+async fn grep_op<W: AsyncWrite + Unpin>(
+    root: &str,
+    pattern: &str,
+    include: Option<&str>,
+    max_results: u32,
+    wr: &mut W,
+) -> Result<()> {
+    match search::grep_files(root, pattern, include, max_results).await {
+        Ok(matches) => {
+            reply(wr, Reply::GrepMatches { matches }).await;
+            reply(wr, Reply::Done { code: 0, ms: 0 }).await;
+        }
+        Err(e) => {
+            reply(
+                wr,
+                Reply::Failed {
+                    error: format!("{e:#}"),
+                },
+            )
+            .await;
+        }
+    }
+    Ok(())
 }
 
 /// Best-effort reply: a peer that hung up is not an error, it is a detach.

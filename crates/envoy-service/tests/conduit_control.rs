@@ -8,7 +8,7 @@
 use futures::SinkExt;
 use envoy_core::AgentConfig;
 use envoy_proto::codec::{read_framed, write_framed};
-use envoy_proto::{ClientMsg, Op, Reply, SubmitRequest, TaskSpec, DEFAULT_GROUP};
+use envoy_proto::{ClientMsg, Op, Reply, SandboxPolicy, SubmitRequest, TaskSpec, DEFAULT_GROUP};
 use envoy_service::{
     spawn_accept_pool, AgentServer, ConduitClient, ConduitDialer, Remote, StaticHost, WsByteStream,
 };
@@ -51,6 +51,7 @@ fn shell(command: &str) -> SubmitRequest {
         label: None,
         group: DEFAULT_GROUP.into(),
         timeout_s: 30,
+        sandbox: SandboxPolicy::Off,
     }
 }
 

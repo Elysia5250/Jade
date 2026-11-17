@@ -8,7 +8,9 @@ use crate::exec::{self, ExecSpec};
 use crate::fs;
 use crate::log::{self, JobLogs, LogWriter};
 use anyhow::{bail, Result};
-use envoy_proto::{Job, JobId, JobResult, JobState, SubmitRequest, DEFAULT_GROUP};
+use envoy_proto::{
+    Job, JobId, JobResult, JobState, SandboxPolicy, SubmitRequest, DEFAULT_GROUP,
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -31,6 +33,7 @@ struct Entry {
     job: Job,
     env: Vec<(String, String)>,
     timeout_s: u64,
+    sandbox: SandboxPolicy,
     pid_slot: Option<Arc<AtomicU32>>,
     cancel: Option<Arc<Notify>>,
     cancelled: bool,
@@ -96,6 +99,7 @@ impl Jobs {
                             job,
                             env: Vec::new(),
                             timeout_s: 0,
+                            sandbox: SandboxPolicy::Off,
                             pid_slot: None,
                             cancel: None,
                             cancelled: false,
@@ -148,6 +152,7 @@ impl Jobs {
             label,
             group,
             timeout_s,
+            sandbox,
         } = req;
         if spec.is_empty() {
             bail!("nothing to run");
@@ -187,6 +192,7 @@ impl Jobs {
                     job: job.clone(),
                     env,
                     timeout_s,
+                    sandbox,
                     pid_slot: None,
                     cancel: None,
                     cancelled: false,
@@ -282,7 +288,7 @@ impl Jobs {
 
     /// Start every queued job whose group has capacity.
     fn schedule(&self) {
-        let starts: Vec<(JobId, Job, Vec<(String, String)>, u64)> = {
+        let starts: Vec<(JobId, Job, Vec<(String, String)>, u64, SandboxPolicy)> = {
             let mut t = self.inner.table.lock().unwrap();
             let queued: Vec<JobId> = t
                 .jobs
@@ -313,7 +319,13 @@ impl Jobs {
                 }
                 let e = t.jobs.get_mut(&id).expect("id from the same map");
                 e.job.state = JobState::Running { since_ms: now_ms() };
-                starts.push((id, e.job.clone(), e.env.clone(), e.timeout_s));
+                starts.push((
+                    id,
+                    e.job.clone(),
+                    e.env.clone(),
+                    e.timeout_s,
+                    e.sandbox.clone(),
+                ));
             }
             starts
         };
@@ -321,12 +333,19 @@ impl Jobs {
             return;
         }
         self.persist();
-        for (id, job, env, timeout_s) in starts {
-            self.spawn(id, job, env, timeout_s);
+        for (id, job, env, timeout_s, sandbox) in starts {
+            self.spawn(id, job, env, timeout_s, sandbox);
         }
     }
 
-    fn spawn(&self, id: JobId, job: Job, env: Vec<(String, String)>, timeout_s: u64) {
+    fn spawn(
+        &self,
+        id: JobId,
+        job: Job,
+        env: Vec<(String, String)>,
+        timeout_s: u64,
+        sandbox: SandboxPolicy,
+    ) {
         let cancel = Arc::new(Notify::new());
         let pid_slot = Arc::new(AtomicU32::new(0));
         {
@@ -342,6 +361,7 @@ impl Jobs {
             cwd: job.cwd,
             env,
             timeout_s,
+            sandbox,
         };
         let path = self.inner.logs.path(id);
         let wake = self.inner.wake.clone();
@@ -453,6 +473,7 @@ mod tests {
             label: None,
             group: DEFAULT_GROUP.into(),
             timeout_s: 10,
+            sandbox: SandboxPolicy::Off,
         }
     }
 

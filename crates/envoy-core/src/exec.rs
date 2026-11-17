@@ -6,7 +6,8 @@
 //! the whole point of the interaction/execution split.
 
 use crate::log::LogWriter;
-use envoy_proto::{JobResult, AGENT_CHUNK, DEFAULT_EXEC_TIMEOUT, MAX_EXEC_TIMEOUT};
+use crate::sandbox;
+use envoy_proto::{JobResult, SandboxPolicy, AGENT_CHUNK, DEFAULT_EXEC_TIMEOUT, MAX_EXEC_TIMEOUT};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -22,6 +23,7 @@ pub struct ExecSpec {
     pub cwd: String,
     pub env: Vec<(String, String)>,
     pub timeout_s: u64,
+    pub sandbox: SandboxPolicy,
 }
 
 trait AsyncReadUnpin: tokio::io::AsyncRead + Unpin {}
@@ -45,10 +47,23 @@ pub async fn run_job(
         };
     }
 
-    let mut cmd = tokio::process::Command::new(&spec.argv[0]);
-    cmd.args(&spec.argv[1..]);
-    if !spec.cwd.is_empty() {
-        cmd.current_dir(&spec.cwd);
+    let prepared = match sandbox::prepare_command(&spec.argv, &spec.cwd, &spec.sandbox) {
+        Ok(p) => p,
+        Err(e) => {
+            return JobResult::FailedToSpawn {
+                error: format!("sandbox setup failed: {e:#}"),
+            }
+        }
+    };
+
+    let mut cmd = tokio::process::Command::new(&prepared.argv[0]);
+    cmd.args(&prepared.argv[1..]);
+    let effective_cwd = prepared
+        .cwd_override
+        .as_deref()
+        .unwrap_or(&spec.cwd);
+    if !effective_cwd.is_empty() {
+        cmd.current_dir(effective_cwd);
     }
     // Do not inherit the daemon's environment wholesale: a token in the
     // service's env must not leak into every remote command.
@@ -67,13 +82,18 @@ pub async fn run_job(
         use std::os::unix::process::CommandExt;
         // Own group: a shell's grandchildren die with it.
         cmd.as_std_mut().process_group(0);
+        if let Some(plan) = prepared.landlock {
+            unsafe {
+                cmd.as_std_mut().pre_exec(move || sandbox::apply_landlock_in_child(&plan));
+            }
+        }
     }
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             return JobResult::FailedToSpawn {
-                error: format!("spawn {}: {e}", spec.argv[0]),
+                error: format!("spawn {}: {e}", prepared.argv[0]),
             }
         }
     };
@@ -245,6 +265,7 @@ mod tests {
             cwd: std::env::temp_dir().to_string_lossy().to_string(),
             env: Vec::new(),
             timeout_s,
+            sandbox: SandboxPolicy::Off,
         }
     }
 
@@ -335,5 +356,59 @@ mod tests {
         .await;
         assert!(matches!(result, JobResult::FailedToSpawn { .. }), "{result:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sandbox_allows_cwd_write_while_protecting_git_env_and_outside_paths() {
+        if matches!(sandbox::probe_backend(), sandbox::SandboxBackend::None) {
+            return;
+        }
+        let work = tmpdir("sb-work");
+        let outside = tmpdir("sb-outside");
+        std::fs::create_dir_all(work.join(".git")).unwrap();
+        std::fs::write(work.join(".env"), "TOKEN=secret_val\n").unwrap();
+        let log_dir = tmpdir("sb-log");
+        let log_path = log_dir.join("1.log");
+        let log = LogWriter::create(log_path.clone(), Arc::new(Notify::new())).unwrap();
+
+        let script = format!(
+            "echo ok > allowed.txt; \
+             touch .git/hook 2>/dev/null && echo GIT_WRITABLE; \
+             touch {}/escape 2>/dev/null && echo OUTSIDE_WRITABLE; \
+             cat .env; echo done",
+            outside.display()
+        );
+        let res = run_job(
+            ExecSpec {
+                argv: vec!["sh".into(), "-c".into(), script],
+                cwd: work.display().to_string(),
+                env: Vec::new(),
+                timeout_s: 15,
+                sandbox: SandboxPolicy::WorkspaceWrite {
+                    cwd: work.display().to_string(),
+                    extra_rw: Vec::new(),
+                    allow_net: false,
+                },
+            },
+            log,
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(Notify::new()),
+        )
+        .await;
+        assert_eq!(res, JobResult::Success);
+        assert_eq!(std::fs::read_to_string(work.join("allowed.txt")).unwrap(), "ok\n");
+        assert!(!work.join(".git/hook").exists());
+        assert!(!outside.join("escape").exists());
+        let (recs, _) = read_from(&log_path, 0, 8192).unwrap();
+        let out: String = recs
+            .iter()
+            .map(|r| String::from_utf8_lossy(&r.data).to_string())
+            .collect();
+        assert!(!out.contains("GIT_WRITABLE"), "{out}");
+        assert!(!out.contains("OUTSIDE_WRITABLE"), "{out}");
+        assert!(!out.contains("secret_val"), "{out}");
+        let _ = std::fs::remove_dir_all(&work);
+        let _ = std::fs::remove_dir_all(&outside);
+        let _ = std::fs::remove_dir_all(&log_dir);
     }
 }

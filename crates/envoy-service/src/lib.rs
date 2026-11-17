@@ -7,14 +7,18 @@
 
 pub mod client;
 pub mod conduit;
+pub mod remote;
 pub mod server;
 pub mod transport;
 
 pub use client::{
-    cancel, edit, jobs, list, logs, open, probe, read, status, submit, write, Conn, Remote,
-    WriteStream,
+    cancel, edit, jobs, list, logs, open, probe, read, status, submit, write, Conn, WriteStream,
 };
-pub use envoy_proto::{Hello, Job, JobId, JobResult, JobState, LogRecord, SubmitRequest, TaskSpec};
+pub use envoy_proto::{
+    GrepHit, Hello, Job, JobId, JobResult, JobState, LogRecord, SandboxPolicy, SubmitRequest,
+    TaskSpec,
+};
+pub use remote::{glob, grep, Remote};
 pub use server::AgentServer;
 pub use conduit::{
     default_control_socket, spawn_accept_pool, ConduitClient, ConduitDialer, Device, DevicesReply,

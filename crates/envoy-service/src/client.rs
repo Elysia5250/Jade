@@ -3,11 +3,10 @@
 //! Nothing here holds a job open. `submit` returns the new job id, and `logs`
 //! is a cursor-based watch that can be opened, dropped and reopened at will.
 
-use crate::transport::{AgentDialer, BoxStream};
 use envoy_proto::codec::{read_framed, write_framed};
 use envoy_proto::{
     Call, Entry, Hello, Job, JobId, LogRecord, Op, Reply, SubmitRequest, AGENT_CHUNK,
-    AGENT_SERVICE_ID, AGENT_VERSION, READ_LIMIT,
+    AGENT_VERSION, READ_LIMIT,
 };
 use anyhow::{bail, Result};
 use std::time::Duration;
@@ -56,7 +55,7 @@ where
     }
 }
 
-async fn next_reply<S: AsyncRead + Unpin>(stream: &mut S, peer: &str) -> Result<Reply> {
+pub(crate) async fn next_reply<S: AsyncRead + Unpin>(stream: &mut S, peer: &str) -> Result<Reply> {
     match read_framed::<_, Reply>(stream).await {
         Ok(reply) => Ok(reply),
         Err(e) => bail!("{peer} closed the agent stream ({e})"),
@@ -321,113 +320,14 @@ where
     }
 }
 
-/// High-level client backed by any [`AgentDialer`] adapter.
-pub struct Remote<D> {
-    dialer: D,
-}
-
-impl<D: AgentDialer> Remote<D> {
-    pub fn new(dialer: D) -> Self {
-        Self { dialer }
-    }
-
-    pub fn dialer(&self) -> &D {
-        &self.dialer
-    }
-
-    async fn dial(&self, peer: &str) -> Result<BoxStream> {
-        self.dialer.open_stream(peer, AGENT_SERVICE_ID).await
-    }
-
-    pub async fn probe(&self, peer: &str) -> Result<Hello> {
-        probe(self.dial(peer).await?, peer).await
-    }
-
-    pub async fn submit(&self, peer: &str, req: SubmitRequest) -> Result<Job> {
-        submit(self.dial(peer).await?, peer, req).await
-    }
-
-    pub async fn jobs(&self, peer: &str) -> Result<Vec<Job>> {
-        jobs(self.dial(peer).await?, peer).await
-    }
-
-    pub async fn status(&self, peer: &str, id: JobId) -> Result<Job> {
-        status(self.dial(peer).await?, peer, id).await
-    }
-
-    pub async fn cancel(&self, peer: &str, id: JobId) -> Result<()> {
-        cancel(self.dial(peer).await?, peer, id).await
-    }
-
-    pub async fn logs<F>(
-        &self,
-        peer: &str,
-        id: JobId,
-        offset: u64,
-        follow: bool,
-        sink: F,
-    ) -> Result<(u64, Option<i32>)>
-    where
-        F: FnMut(&[LogRecord]),
-    {
-        logs(self.dial(peer).await?, peer, id, offset, follow, sink).await
-    }
-
-    pub async fn read(
-        &self,
-        peer: &str,
-        path: &str,
-        offset: u64,
-        limit: u64,
-    ) -> Result<(u64, u32, Vec<u8>)> {
-        read(self.dial(peer).await?, peer, path, offset, limit).await
-    }
-
-    pub async fn write(
-        &self,
-        peer: &str,
-        path: &str,
-        data: &[u8],
-        mode: Option<u32>,
-    ) -> Result<u64> {
-        write(self.dial(peer).await?, peer, path, data, mode).await
-    }
-
-    pub async fn edit(
-        &self,
-        peer: &str,
-        path: &str,
-        old: &str,
-        new: &str,
-        replace_all: bool,
-    ) -> Result<usize> {
-        edit(self.dial(peer).await?, peer, path, old, new, replace_all).await
-    }
-
-    /// Open a streaming write, for payloads too large to hold in memory.
-    pub async fn open_write(
-        &self,
-        peer: &str,
-        path: &str,
-        mode: Option<u32>,
-    ) -> Result<WriteStream<BoxStream>> {
-        let stream = self.dial(peer).await?;
-        WriteStream::open(stream, peer, path, mode).await
-    }
-
-    pub async fn list(&self, peer: &str, path: &str) -> Result<Vec<Entry>> {
-        list(self.dial(peer).await?, peer, path).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote::{glob, grep};
     use crate::server::AgentServer;
     use crate::transport::StaticHost;
     use envoy_core::AgentConfig;
-    use envoy_proto::JobResult;
-    use envoy_proto::{JobState, TaskSpec, DEFAULT_GROUP};
+    use envoy_proto::{JobResult, JobState, SandboxPolicy, TaskSpec, DEFAULT_GROUP};
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -461,7 +361,41 @@ mod tests {
             label: None,
             group: DEFAULT_GROUP.into(),
             timeout_s: 30,
+            sandbox: SandboxPolicy::Off,
         }
+    }
+
+    #[tokio::test]
+    async fn glob_and_grep_roundtrip_over_wire() {
+        let (dir, server) = server_with(true, &["caller-a"]);
+        let src = dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("lib.rs"), "pub fn hello() {}\n").unwrap();
+
+        let paths = glob(
+            serve_one(&server, "caller-a").await,
+            "caller-a",
+            dir.to_str().unwrap(),
+            "**/*.rs",
+            20,
+        )
+        .await
+        .unwrap();
+        assert_eq!(paths, vec!["src/lib.rs"]);
+
+        let hits = grep(
+            serve_one(&server, "caller-a").await,
+            "caller-a",
+            dir.to_str().unwrap(),
+            "pub fn hello",
+            Some("*.rs"),
+            20,
+        )
+        .await
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].line, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     async fn serve_one(server: &AgentServer, caller: &str) -> tokio::io::DuplexStream {

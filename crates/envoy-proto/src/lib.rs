@@ -76,6 +76,25 @@ impl TaskSpec {
     }
 }
 
+/// OS-level execution sandbox requested for a submitted job.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SandboxPolicy {
+    /// No OS sandbox wrapper.
+    #[default]
+    Off,
+    /// Read-only filesystem view (plus `/tmp`), optional network.
+    ReadOnly { cwd: String, allow_net: bool },
+    /// Workspace-writable sandbox (root read-only, `cwd` and `extra_rw` writable,
+    /// protected dirs read-only/hidden), network disabled by default.
+    WorkspaceWrite {
+        cwd: String,
+        extra_rw: Vec<String>,
+        allow_net: bool,
+    },
+    /// Unsandboxed full host access (explicitly approved).
+    DangerFullAccess,
+}
+
 /// Everything needed to enqueue a job.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubmitRequest {
@@ -88,6 +107,8 @@ pub struct SubmitRequest {
     pub group: String,
     /// Wall-clock cap; 0 means [`DEFAULT_EXEC_TIMEOUT`].
     pub timeout_s: u64,
+    /// OS sandbox policy for this job.
+    pub sandbox: SandboxPolicy,
 }
 
 /// Kind of a directory entry.
@@ -277,6 +298,19 @@ pub enum Op {
         /// Replace every occurrence; otherwise a non-unique `old` is an error.
         replace_all: bool,
     },
+    /// Recursively match file paths under `root`.
+    Glob {
+        root: String,
+        pattern: String,
+        max_results: u32,
+    },
+    /// Recursively search text files under `root` for `pattern`.
+    Grep {
+        root: String,
+        pattern: String,
+        include: Option<String>,
+        max_results: u32,
+    },
 }
 
 impl Op {
@@ -292,8 +326,18 @@ impl Op {
             Op::Write { .. } => "write",
             Op::List { .. } => "list",
             Op::Edit { .. } => "edit",
+            Op::Glob { .. } => "glob",
+            Op::Grep { .. } => "grep",
         }
     }
+}
+
+/// One matching line returned by [`Op::Grep`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GrepHit {
+    pub path: String,
+    pub line: u32,
+    pub text: String,
 }
 
 /// The first frame a client sends.
@@ -339,7 +383,11 @@ pub enum Reply {
     /// The file was rewritten in place; `replacements` is how many times the
     /// snippet was replaced.
     Edited { replacements: usize },
-    /// Terminal event for Probe/Read/List/Cancel/Write. `code` is 0 on success.
+    /// Matching relative paths from `Op::Glob`.
+    GlobMatches { paths: Vec<String> },
+    /// Matching text hits from `Op::Grep`.
+    GrepMatches { matches: Vec<GrepHit> },
+    /// Terminal event for Probe/Read/List/Cancel/Write/Glob/Grep. `code` is 0 on success.
     Done { code: i32, ms: u64 },
 }
 
@@ -361,6 +409,11 @@ mod tests {
                 label: Some("smoke".into()),
                 group: DEFAULT_GROUP.into(),
                 timeout_s: 7,
+                sandbox: SandboxPolicy::WorkspaceWrite {
+                    cwd: "/tmp".into(),
+                    extra_rw: vec!["/var/tmp".into()],
+                    allow_net: false,
+                },
             }),
         };
         let bytes = postcard::to_stdvec(&call).unwrap();
@@ -369,9 +422,39 @@ mod tests {
             Op::Submit(req) => {
                 assert_eq!(req.spec.display(), "echo hi");
                 assert_eq!(req.timeout_s, 7);
+                assert!(matches!(
+                    req.sandbox,
+                    SandboxPolicy::WorkspaceWrite { allow_net: false, .. }
+                ));
             }
             _ => panic!("wrong op"),
         }
+    }
+
+    #[test]
+    fn glob_and_grep_ops_and_replies_roundtrip_postcard() {
+        let glob_call = Call {
+            version: AGENT_VERSION,
+            op: Op::Glob {
+                root: "/tmp/proj".into(),
+                pattern: "src/**/*.rs".into(),
+                max_results: 50,
+            },
+        };
+        let bytes = postcard::to_stdvec(&glob_call).unwrap();
+        let back: Call = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(back.op.name(), "glob");
+
+        let grep_reply = Reply::GrepMatches {
+            matches: vec![GrepHit {
+                path: "src/lib.rs".into(),
+                line: 12,
+                text: "pub fn run()".into(),
+            }],
+        };
+        let rbytes = postcard::to_stdvec(&grep_reply).unwrap();
+        let rback: Reply = postcard::from_bytes(&rbytes).unwrap();
+        assert!(matches!(rback, Reply::GrepMatches { matches } if matches.len() == 1));
     }
 
     #[test]
