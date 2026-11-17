@@ -2,18 +2,23 @@
 
 pub mod budget;
 pub mod catalog;
+pub mod fetch;
+mod families;
+mod extract;
+mod mask;
 pub mod prune;
 pub mod summary;
 pub mod tokens;
 
 pub use budget::{resolve_budget, set_budget_tier, BudgetPlan, CompactionTier};
 pub use catalog::{
-    fetch_openai_models_with_caps, record_model_cap, refresh_models_dev_if_stale,
+    record_model_cap, refresh_models_dev_if_stale, store_listed_models, ListedModel,
 };
-pub use prune::{bound_tool_output, prune_old_tool_outputs};
+pub use fetch::fetch_provider_models;
+pub use prune::bound_tool_output;
 pub use summary::{assemble_compacted_messages, split_head_tail, summarize_messages};
 pub use tokens::{
-    context_used, estimate_turn_raw_tokens, estimate_turn_tokens, TokenCalibration,
+    context_used, estimate_turn_raw_tokens, estimate_turn_tokens, tools_overhead, TokenCalibration,
     BUILTIN_TOOLS_TOKENS_ESTIMATE,
 };
 
@@ -97,8 +102,9 @@ pub fn parse_overflow_limit(msg: &str) -> Option<u64> {
 
 /// Prepare `messages` before an LLM step:
 /// - Below `prune_at`: returns `Ok(None)`.
-/// - Above `prune_at`: runs Stage 1 cheap tool-output pruning first.
-/// - Still above `compact_at` (or `force = true`): runs Stage 2 summary compaction.
+/// - Above `prune_at`: masks old tool observations outside the protected tail.
+/// - Still above `compact_at` (or `force = true`): summarizes the head from the
+///   previous summary plus newly evicted notes.
 #[allow(clippy::too_many_arguments)]
 pub async fn prepare_context(
     http: &reqwest::Client,
@@ -111,31 +117,74 @@ pub async fn prepare_context(
     messages: &mut Vec<ChatMessage>,
     calibration: TokenCalibration,
     plan: &BudgetPlan,
+    tools_overhead: u64,
     force: bool,
     focus: Option<&str>,
     tx: Option<&mpsc::UnboundedSender<AgentEvent>>,
 ) -> Result<Option<CompactionOutcome>> {
-    let before_tokens =
-        estimate_turn_tokens(system, messages, BUILTIN_TOOLS_TOKENS_ESTIMATE, calibration);
+    let pinned = crate::agent::prompt::take_environment(messages);
+    let outcome = prepare_context_body(
+        http,
+        data_dir,
+        provider,
+        model_id,
+        target,
+        cwd,
+        system,
+        messages,
+        calibration,
+        plan,
+        tools_overhead,
+        force,
+        focus,
+        tx,
+    )
+    .await;
+    crate::agent::prompt::restore_environment(messages, pinned);
+    match outcome {
+        Ok(Some(mut out)) => {
+            out.messages = messages.clone();
+            Ok(Some(out))
+        }
+        other => other,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_context_body(
+    http: &reqwest::Client,
+    data_dir: &Path,
+    provider: &StoredProvider,
+    model_id: &str,
+    target: &str,
+    cwd: &Path,
+    system: &str,
+    messages: &mut Vec<ChatMessage>,
+    calibration: TokenCalibration,
+    plan: &BudgetPlan,
+    tools_overhead: u64,
+    force: bool,
+    focus: Option<&str>,
+    tx: Option<&mpsc::UnboundedSender<AgentEvent>>,
+) -> Result<Option<CompactionOutcome>> {
+    let before_tokens = estimate_turn_tokens(system, messages, tools_overhead, calibration);
 
     if !force && before_tokens <= plan.prune_at {
         return Ok(None);
     }
 
-    // Stage 1: cheap, local tool-output pruning.
-    let prune_report = prune_old_tool_outputs(messages, plan.tail_keep_tokens);
-    let after_prune =
-        estimate_turn_tokens(system, messages, BUILTIN_TOOLS_TOKENS_ESTIMATE, calibration);
+    let mask_report = mask::mask_old_observations(messages, plan.tail_keep_tokens, calibration);
+    let after_mask = estimate_turn_tokens(system, messages, tools_overhead, calibration);
 
-    if !force && after_prune <= plan.compact_at {
-        if prune_report.messages_pruned > 0 {
+    if !force && after_mask <= plan.compact_at {
+        if mask_report.messages_pruned > 0 {
             return Ok(Some(CompactionOutcome {
                 messages: messages.clone(),
                 before_tokens,
-                after_tokens: after_prune,
+                after_tokens: after_mask,
                 summary: format!(
-                    "Pruned {} older tool outputs (~{} -> ~{} tokens).",
-                    prune_report.messages_pruned, before_tokens, after_prune
+                    "Masked {} older tool outputs (~{} -> ~{} tokens).",
+                    mask_report.messages_pruned, before_tokens, after_mask
                 ),
                 pruned_only: true,
             }));
@@ -143,8 +192,7 @@ pub async fn prepare_context(
         return Ok(None);
     }
 
-    // Stage 2: split (head, tail) safely and generate structured handoff summary.
-    let (head, tail) = split_head_tail(messages, plan.tail_keep_tokens, force);
+    let (head, tail) = split_head_tail(messages, plan.tail_keep_tokens, force, calibration);
     if head.is_empty() {
         return Ok(None);
     }
@@ -157,20 +205,12 @@ pub async fn prepare_context(
     }
 
     let summary_text = summarize_messages(
-        http,
-        data_dir,
-        provider,
-        model_id,
-        system,
-        &head,
-        focus,
-        false,
+        http, data_dir, provider, model_id, system, &head, focus, false,
     )
     .await?;
 
     let compacted = assemble_compacted_messages(&summary_text, tail, target, cwd);
-    let after_tokens =
-        estimate_turn_tokens(system, &compacted, BUILTIN_TOOLS_TOKENS_ESTIMATE, calibration);
+    let after_tokens = estimate_turn_tokens(system, &compacted, tools_overhead, calibration);
     *messages = compacted.clone();
 
     Ok(Some(CompactionOutcome {
@@ -199,14 +239,7 @@ pub async fn generate_handoff(
         TokenCalibration::default(),
     );
     let summary = summarize_messages(
-        http,
-        data_dir,
-        provider,
-        model_id,
-        system,
-        messages,
-        focus,
-        true,
+        http, data_dir, provider, model_id, system, messages, focus, true,
     )
     .await?;
     let after_tokens = estimate_turn_tokens(
@@ -259,8 +292,12 @@ mod tests {
         assert!(is_context_overflow_error(
             "LLM API error (400): This model's maximum context length is 65536 tokens. However, your messages resulted in 70100 tokens."
         ));
-        assert!(is_context_overflow_error("Codex API error (400): context_length_exceeded"));
-        assert!(!is_context_overflow_error("LLM API error (429): rate limit reached"));
+        assert!(is_context_overflow_error(
+            "Codex API error (400): context_length_exceeded"
+        ));
+        assert!(!is_context_overflow_error(
+            "LLM API error (429): rate limit reached"
+        ));
 
         assert_eq!(
             parse_overflow_limit("This model's maximum context length is 65536 tokens."),

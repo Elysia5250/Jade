@@ -62,8 +62,11 @@ mod tests {
             name: "OpenAI".into(),
             protocol: crate::auth::ProviderProtocol::OpenAiChat,
             base_url: "https://api.openai.com/v1".into(),
-            credential: crate::auth::Credential::ApiKey { key: "sk-test".into() },
+            credential: crate::auth::Credential::ApiKey {
+                key: "sk-test".into(),
+            },
             custom_models: vec![],
+            model_routes: std::collections::BTreeMap::new(),
             updated_ms: 0,
         };
         crate::auth::record_provider_login(&dir, prov, Some("gpt-6-astra".into())).unwrap();

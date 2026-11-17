@@ -2,14 +2,23 @@
 use super::*;
 
 mod agent;
+mod agent_events;
+mod command_ops;
 mod commands;
+mod edit;
 mod input;
 mod jobs;
 mod login;
 mod modals;
+mod welcome;
 
 impl App {
-    pub(in crate::tui) fn new(data_dir: PathBuf, target: String, conduit: Option<PathBuf>, cwd: PathBuf) -> Self {
+    pub(in crate::tui) fn new(
+        data_dir: PathBuf,
+        target: String,
+        conduit: Option<PathBuf>,
+        cwd: PathBuf,
+    ) -> Self {
         let prefs = load_prefs(&data_dir);
         let has_provider = resolve_active_provider(&data_dir).is_some();
         let mode = if has_provider {
@@ -74,6 +83,7 @@ impl App {
             login_task: None,
             login_cancel: None,
             models_rx: None,
+            welcome: None,
             inspector: InspectorState::default(),
             workspace_index: links::WorkspaceIndex::default(),
             hit_regions: Vec::new(),
@@ -87,11 +97,9 @@ impl App {
         }
     }
 
-
     pub(in crate::tui) fn theme(&self) -> Theme {
         THEMES[self.theme].1
     }
-
 
     pub(in crate::tui) fn load_existing_session(&mut self, loaded: Session) {
         self.persist_session();
@@ -107,7 +115,6 @@ impl App {
         self.reset_agent_view();
     }
 
-
     pub(in crate::tui) fn reset_agent_view(&mut self) {
         self.agent_running = false;
         self.active_assistant_id = None;
@@ -119,7 +126,6 @@ impl App {
         self.agent_ready = false;
         self.agent_retry_at = Instant::now();
     }
-
 
     pub(in crate::tui) fn session_cwd_set(&mut self, cwd: PathBuf) {
         self.session.cwd = cwd;
@@ -134,7 +140,10 @@ impl App {
             .resolve_path(&self.session.cwd, &self.session.changed_files, raw_path)
             .unwrap_or_else(|| {
                 (
-                    links::normalize_display_path(&self.session.cwd, std::path::Path::new(raw_path)),
+                    links::normalize_display_path(
+                        &self.session.cwd,
+                        std::path::Path::new(raw_path),
+                    ),
                     None,
                 )
             });
@@ -160,13 +169,12 @@ impl App {
         }
 
         self.inspector.tab = InspectorTab::File;
-        self.inspector.scroll = target_line
-            .map(|l| l.saturating_sub(6) as u16)
-            .unwrap_or(0);
+        self.inspector.scroll = target_line.map(|l| l.saturating_sub(6) as u16).unwrap_or(0);
     }
 
     pub(in crate::tui) fn find_changed_file_index(&self, rel_or_abs: &str) -> Option<usize> {
-        let norm = links::normalize_display_path(&self.session.cwd, std::path::Path::new(rel_or_abs));
+        let norm =
+            links::normalize_display_path(&self.session.cwd, std::path::Path::new(rel_or_abs));
         self.session.changed_files.iter().position(|fc| {
             fc.path == rel_or_abs
                 || links::normalize_display_path(&self.session.cwd, std::path::Path::new(&fc.path))
@@ -216,11 +224,9 @@ impl App {
         self.inspector.force_open = true;
     }
 
-
     pub(in crate::tui) fn persist_session(&self) {
         let _ = save_session(&self.data_dir, &self.session);
     }
-
 
     pub(in crate::tui) fn save_ui_prefs(&self) {
         let mut prefs = load_prefs(&self.data_dir);
@@ -229,11 +235,9 @@ impl App {
         let _ = save_prefs(&self.data_dir, &prefs);
     }
 
-
     pub(in crate::tui) fn set_toast(&mut self, msg: impl Into<String>, err: bool) {
         self.toast = Some((msg.into(), err, Instant::now()));
     }
-
 
     pub(in crate::tui) fn active_toast(&self) -> Option<(&str, bool)> {
         let (msg, err, at) = self.toast.as_ref()?;
@@ -243,7 +247,6 @@ impl App {
             None
         }
     }
-
 
     pub(in crate::tui) fn push_notice(&mut self, text: impl Into<String>, is_error: bool) {
         let id = self.session.alloc_id();
@@ -256,11 +259,9 @@ impl App {
         self.follow = true;
     }
 
-
     pub(in crate::tui) fn cwd_label(&self) -> String {
         collapse_home(&self.session.cwd)
     }
-
 
     pub(in crate::tui) fn own_device_id(&self) -> String {
         self.status
@@ -268,7 +269,6 @@ impl App {
             .map(|s| s.device_id.clone())
             .unwrap_or_default()
     }
-
 
     pub(in crate::tui) fn switch_to(&mut self, target: String) {
         self.target = target.clone();

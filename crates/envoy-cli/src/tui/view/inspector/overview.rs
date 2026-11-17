@@ -73,8 +73,8 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
         for t in todos.iter().take(10) {
             let (glyph, color) = match t.status {
                 crate::agent::tools::todo::TodoStatus::Completed => ("✓", theme.ok),
-                crate::agent::tools::todo::TodoStatus::InProgress => ("●", theme.accent),
-                crate::agent::tools::todo::TodoStatus::Pending => ("○", theme.dim),
+                crate::agent::tools::todo::TodoStatus::InProgress => ("*", theme.accent),
+                crate::agent::tools::todo::TodoStatus::Pending => ("o", theme.dim),
             };
             let text = truncate_width(&t.content, w.saturating_sub(5));
             rows.push(LinkedLine::from_line(Line::from(vec![
@@ -89,7 +89,8 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
     push_section_header(&mut rows, "SESSION & CONTEXT", "", theme);
     if let Some((prov, model)) = resolve_active_provider(&app.data_dir) {
         let (used, est) = context_used(&app.session);
-        let budget = crate::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
+        let budget =
+            crate::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
         let (filled, empty) = context_bar(used, budget.compact_at);
         let mark = if est { "~" } else { "" };
         rows.push(LinkedLine::from_line(Line::from(vec![
@@ -117,7 +118,7 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
             Span::styled("  tokens  ", Style::default().fg(theme.dim)),
             Span::styled(
                 format!(
-                    "in {} · out {}",
+                    "in {} - out {}",
                     fmt_tokens(app.session.input_tokens),
                     fmt_tokens(app.session.output_tokens)
                 ),
@@ -138,7 +139,7 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
     push_section_header(
         &mut rows,
         "MCP & SKILLS",
-        &format!("{} mcp · {} skills", mcp.servers.len(), skills.len()),
+        &format!("{} mcp - {} skills", mcp.servers.len(), skills.len()),
         theme,
     );
     if mcp.servers.is_empty() && skills.is_empty() {
@@ -150,7 +151,7 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
         for srv in mcp.servers.iter().take(6) {
             let color = if srv.disabled { theme.dim } else { theme.ok };
             rows.push(LinkedLine::from_line(Line::from(vec![
-                Span::styled("  ● ", Style::default().fg(color)),
+                Span::styled("  * ", Style::default().fg(color)),
                 Span::styled(
                     truncate_width(&srv.name, w.saturating_sub(14)),
                     Style::default().fg(theme.text),
@@ -163,11 +164,14 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
         }
         if !skills.is_empty() {
             let names: Vec<&str> = skills.iter().take(4).map(|s| s.name.as_str()).collect();
-            let suffix = if skills.len() > 4 { "…" } else { "" };
+            let suffix = if skills.len() > 4 { "." } else { "" };
             rows.push(LinkedLine::from_line(Line::from(vec![
-                Span::styled("  ◆ skills: ", Style::default().fg(theme.secondary)),
+                Span::styled("  * skills: ", Style::default().fg(theme.secondary)),
                 Span::styled(
-                    truncate_width(&format!("{}{suffix}", names.join(", ")), w.saturating_sub(12)),
+                    truncate_width(
+                        &format!("{}{suffix}", names.join(", ")),
+                        w.saturating_sub(12),
+                    ),
                     Style::default().fg(theme.dim),
                 ),
             ])));
@@ -185,8 +189,8 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
     } else {
         for (idx, job) in app.jobs.iter().enumerate() {
             let (glyph, color) = match &job.state {
-                JobState::Queued { .. } => ("○", theme.warn),
-                JobState::Running { .. } => ("●", theme.ok),
+                JobState::Queued { .. } => ("o", theme.warn),
+                JobState::Running { .. } => ("*", theme.ok),
                 JobState::Done { result, .. } if result.ok() => ("✓", theme.dim),
                 JobState::Done { .. } => ("✗", theme.bad),
             };
@@ -218,9 +222,7 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
 fn push_section_header(rows: &mut Vec<LinkedLine>, title: &str, meta: &str, theme: &Theme) {
     let mut spans = vec![Span::styled(
         format!(" {title}"),
-        Style::default()
-            .fg(theme.dim)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
     )];
     if !meta.is_empty() {
         spans.push(Span::styled(

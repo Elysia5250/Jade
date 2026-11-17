@@ -26,9 +26,7 @@ use cli_ops::{
     cmd_status, cmd_write,
 };
 use envoy_core::{parse_mode, AgentConfigStore};
-use envoy_proto::{
-    Job, JobState, SandboxPolicy, SubmitRequest, TaskSpec, DEFAULT_GROUP,
-};
+use envoy_proto::{Job, JobState, SandboxPolicy, SubmitRequest, TaskSpec, DEFAULT_GROUP};
 use envoy_service::{
     default_control_socket, dialer_for, spawn_accept_pool, AgentDialer, AgentServer, ConduitClient,
     Remote,
@@ -259,9 +257,7 @@ pub(crate) struct Ctx {
 
 impl Ctx {
     pub(crate) fn conduit_socket(&self) -> PathBuf {
-        self.conduit
-            .clone()
-            .unwrap_or_else(default_control_socket)
+        self.conduit.clone().unwrap_or_else(default_control_socket)
     }
 
     pub(crate) async fn remote(&self) -> Result<Remote<AnyDialer>> {
@@ -331,6 +327,7 @@ async fn main() -> Result<()> {
             ctx.cwd.clone(),
             cli.continue_last,
             cli.session.clone(),
+            cli.cwd.is_none() && !cli.continue_last && cli.session.is_none(),
         )
         .await;
     };
@@ -374,9 +371,11 @@ async fn main() -> Result<()> {
             limit,
             path,
         } => cmd_read(&ctx, &path, offset, limit).await,
-        Commands::Write { mode, path, content } => {
-            cmd_write(&ctx, &path, content, &mode).await
-        }
+        Commands::Write {
+            mode,
+            path,
+            content,
+        } => cmd_write(&ctx, &path, content, &mode).await,
         Commands::Ls { path } => cmd_ls(&ctx, &path).await,
         Commands::Copy {
             from,
@@ -393,6 +392,7 @@ async fn main() -> Result<()> {
                 ctx.cwd.clone(),
                 cli.continue_last,
                 cli.session.clone(),
+                cli.cwd.is_none() && !cli.continue_last && cli.session.is_none(),
             )
             .await
         }
@@ -471,7 +471,10 @@ async fn cmd_daemon(data_dir: &Path, cmd: DaemonCmd) -> Result<()> {
                 return Ok(());
             }
             daemon::ensure(data_dir).await?;
-            println!("daemon started ({})", daemon::socket_path(data_dir).display());
+            println!(
+                "daemon started ({})",
+                daemon::socket_path(data_dir).display()
+            );
             Ok(())
         }
         DaemonCmd::Stop => {

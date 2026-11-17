@@ -3,7 +3,7 @@ use super::openai_url_preview;
 use crate::tui::*;
 
 impl App {
-pub(in crate::tui) fn start_login_method(&mut self, provider_idx: usize, method_idx: usize) {
+    pub(in crate::tui) fn start_login_method(&mut self, provider_idx: usize, method_idx: usize) {
         let prov = &BUILTIN_PROVIDERS[provider_idx];
         let method = prov.methods[method_idx];
         match method.kind {
@@ -14,7 +14,7 @@ pub(in crate::tui) fn start_login_method(&mut self, provider_idx: usize, method_
                     provider_idx,
                     key: String::new(),
                     base_url: prov.default_base_url.to_string(),
-                    model: prov.models.first().copied().unwrap_or("").to_string(),
+                    model: String::new(),
                     focus_field: 0,
                     reveal: false,
                     error: None,
@@ -78,7 +78,8 @@ pub(in crate::tui) fn start_login_method(&mut self, provider_idx: usize, method_
                                             let _ = tx_task.send(LoginEvent::Success(sp, None));
                                         }
                                         Err(e) => {
-                                            let _ = tx_task.send(LoginEvent::Error(format!("{e:#}")));
+                                            let _ =
+                                                tx_task.send(LoginEvent::Error(format!("{e:#}")));
                                         }
                                     }
                                 }
@@ -136,8 +137,8 @@ pub(in crate::tui) fn start_login_method(&mut self, provider_idx: usize, method_
                 self.modal = Some(Modal::Login(LoginModal::OAuthDevice {
                     provider_name: prov.name.to_string(),
                     verification_uri: "https://auth.openai.com/codex/device".into(),
-                    user_code: "requesting…".into(),
-                    status: "Requesting device code from OpenAI…".into(),
+                    user_code: "requesting.".into(),
+                    status: "Requesting device code from OpenAI.".into(),
                     error: None,
                 }));
             }
@@ -198,8 +199,8 @@ pub(in crate::tui) fn start_login_method(&mut self, provider_idx: usize, method_
                 self.modal = Some(Modal::Login(LoginModal::OAuthDevice {
                     provider_name: prov.name.to_string(),
                     verification_uri: "https://github.com/login/device".into(),
-                    user_code: "requesting…".into(),
-                    status: "Requesting device code from GitHub…".into(),
+                    user_code: "requesting.".into(),
+                    status: "Requesting device code from GitHub.".into(),
                     error: None,
                 }));
             }

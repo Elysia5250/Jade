@@ -3,12 +3,13 @@
 use super::config::TurnConfig;
 use super::context::{
     estimate_turn_raw_tokens, is_context_overflow_error, parse_overflow_limit, prepare_context,
-    record_model_cap, refresh_models_dev_if_stale, resolve_budget, TokenCalibration,
-    BUILTIN_TOOLS_TOKENS_ESTIMATE,
+    record_model_cap, refresh_models_dev_if_stale, resolve_budget, tools_overhead, TokenCalibration,
 };
 use super::events::AgentEvent;
-use super::prompt::build_system_prompt_for_session;
-use super::providers::{stream_anthropic, stream_openai_chat, stream_openai_codex, StreamReply};
+use super::prompt::{build_system_prompt, environment_note, sync_environment};
+use super::providers::{
+    anthropic_max_tokens, stream_anthropic, stream_openai_chat, stream_openai_codex, StreamReply,
+};
 use super::tools::run_tool_call;
 use crate::auth::{ensure_fresh_provider, ProviderProtocol, StoredProvider};
 use crate::daemon;
@@ -66,21 +67,14 @@ async fn execute_turn(
     if cfg.target == "local" || cfg.target.is_empty() {
         daemon::ensure(&cfg.data_dir).await?;
     }
-    let remote: Remote<Box<dyn AgentDialer>> = Remote::new(dialer_for(
-        &cfg.data_dir,
-        &cfg.target,
-        cfg.conduit.clone(),
-    ));
+    let remote: Remote<Box<dyn AgentDialer>> =
+        Remote::new(dialer_for(&cfg.data_dir, &cfg.target, cfg.conduit.clone()));
 
     let mcp = McpManager::connect_configured(&cfg.data_dir, &cfg.cwd).await;
     let extra_tools = mcp.extra_tool_schemas();
 
-    let system = build_system_prompt_for_session(
-        &cfg.target,
-        &cfg.cwd,
-        &cfg.data_dir,
-        cfg.permissions.session_id(),
-    );
+    let system = build_system_prompt(&cfg.target, &cfg.cwd);
+    let overhead = tools_overhead(extra_tools.len());
     let mut plan = resolve_budget(&cfg.data_dir, &cfg.provider.id, &cfg.model.model_id);
 
     for step in 0..MAX_TOOL_STEPS {
@@ -90,6 +84,8 @@ async fn execute_turn(
             });
         }
         provider = ensure_fresh_provider(&http, &cfg.data_dir, provider).await?;
+        let note = environment_note(&cfg.data_dir, &cfg.cwd, cfg.permissions.session_id());
+        sync_environment(&mut messages, note.as_deref());
 
         if let Some(outcome) = prepare_context(
             &http,
@@ -102,6 +98,7 @@ async fn execute_turn(
             &mut messages,
             calibration,
             &plan,
+            overhead,
             false,
             None,
             Some(tx),
@@ -119,7 +116,7 @@ async fn execute_turn(
             }
         }
 
-        let raw_est = estimate_turn_raw_tokens(&system, &messages, BUILTIN_TOOLS_TOKENS_ESTIMATE);
+        let raw_est = estimate_turn_raw_tokens(&system, &messages, overhead);
         let reply = call_provider_with_overflow_retry(
             &http,
             &cfg,
@@ -211,6 +208,7 @@ async fn call_provider_with_overflow_retry(
     plan: &mut super::context::BudgetPlan,
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<StreamReply> {
+    let max_tokens = turn_max_tokens(cfg);
     let first = dispatch_stream(
         http,
         provider,
@@ -219,6 +217,7 @@ async fn call_provider_with_overflow_retry(
         messages,
         Some(&cfg.permissions),
         extra_tools,
+        max_tokens,
         tx,
     )
     .await;
@@ -254,6 +253,7 @@ async fn call_provider_with_overflow_retry(
         messages,
         calibration,
         plan,
+        tools_overhead(extra_tools.len()),
         true,
         None,
         Some(tx),
@@ -279,9 +279,19 @@ async fn call_provider_with_overflow_retry(
         messages,
         Some(&cfg.permissions),
         extra_tools,
+        max_tokens,
         tx,
     )
     .await
+}
+
+fn turn_max_tokens(cfg: &TurnConfig) -> u32 {
+    let cap = super::context::catalog::resolve_model_cap(
+        &cfg.data_dir,
+        &cfg.provider.id,
+        &cfg.model.model_id,
+    );
+    anthropic_max_tokens(cap.max_output)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -293,13 +303,15 @@ async fn dispatch_stream(
     messages: &[ChatMessage],
     permissions: Option<&crate::permissions::PermissionEngine>,
     extra_tools: &[serde_json::Value],
+    max_tokens: u32,
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<StreamReply> {
+    let provider = provider.routed_for(model_id);
     match provider.protocol {
         ProviderProtocol::OpenAiChat => {
             stream_openai_chat(
                 http,
-                provider,
+                &provider,
                 model_id,
                 system,
                 messages,
@@ -312,7 +324,7 @@ async fn dispatch_stream(
         ProviderProtocol::OpenAiCodex => {
             stream_openai_codex(
                 http,
-                provider,
+                &provider,
                 model_id,
                 system,
                 messages,
@@ -325,12 +337,13 @@ async fn dispatch_stream(
         ProviderProtocol::Anthropic => {
             stream_anthropic(
                 http,
-                provider,
+                &provider,
                 model_id,
                 system,
                 messages,
                 permissions,
                 extra_tools,
+                max_tokens,
                 tx,
             )
             .await
@@ -398,8 +411,11 @@ mod tests {
             name: "Test".into(),
             protocol: ProviderProtocol::OpenAiChat,
             base_url: format!("http://{addr}/v1"),
-            credential: Credential::ApiKey { key: "sk-test".into() },
+            credential: Credential::ApiKey {
+                key: "sk-test".into(),
+            },
             custom_models: vec![],
+            model_routes: std::collections::BTreeMap::new(),
             updated_ms: 0,
         };
         let mut history = vec![

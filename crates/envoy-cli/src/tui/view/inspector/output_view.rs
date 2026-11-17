@@ -11,10 +11,9 @@ pub(super) fn draw_output_view(frame: &mut Frame, app: &mut App, theme: &Theme, 
         .and_then(|id| app.session.items.iter().find(|i| i.id() == id))
         .or_else(|| {
             app.inspector.output_job_id.and_then(|jid| {
-                app.session
-                    .items
-                    .iter()
-                    .find(|i| matches!(i, TranscriptItem::Tool { job_id: Some(j), .. } if *j == jid))
+                app.session.items.iter().find(
+                    |i| matches!(i, TranscriptItem::Tool { job_id: Some(j), .. } if *j == jid),
+                )
             })
         })
         .or_else(|| {
@@ -38,8 +37,8 @@ pub(super) fn draw_output_view(frame: &mut Frame, app: &mut App, theme: &Theme, 
     }) = tool_item
     {
         let (glyph, color) = match status {
-            CardStatus::Queued => ("○", theme.warn),
-            CardStatus::Running => ("●", theme.ok),
+            CardStatus::Queued => ("o", theme.warn),
+            CardStatus::Running => ("*", theme.ok),
             CardStatus::Done => ("✓", theme.ok),
             CardStatus::Error => ("✗", theme.bad),
         };
@@ -59,23 +58,23 @@ pub(super) fn draw_output_view(frame: &mut Frame, app: &mut App, theme: &Theme, 
             ),
         ]));
         let sub = if subtitle.is_empty() {
-            meta.join(" · ")
+            meta.join(" - ")
         } else {
-            format!("{subtitle}  ·  {}", meta.join(" · "))
+            format!("{subtitle}  -  {}", meta.join(" - "))
         };
         lines.push(Line::styled(
             format!("   {}", truncate_width(&sub, w.saturating_sub(4))),
             Style::default().fg(theme.dim),
         ));
         lines.push(Line::styled(
-            "─".repeat(w),
+            "-".repeat(w),
             Style::default().fg(theme.border),
         ));
 
         if output.is_empty() {
             lines.push(Line::styled(
                 if *status == CardStatus::Running {
-                    "   (streaming / waiting for output…)"
+                    "   (streaming / waiting for output.)"
                 } else {
                     "   (no output)"
                 },
@@ -118,10 +117,7 @@ pub(super) fn draw_inspect_view(frame: &mut Frame, app: &mut App, theme: &Theme,
         .inspector
         .inspect_item_id
         .and_then(|id| app.session.items.iter().find(|i| i.id() == id))
-        .or_else(|| {
-            app.selected_card
-                .and_then(|idx| app.session.items.get(idx))
-        });
+        .or_else(|| app.selected_card.and_then(|idx| app.session.items.get(idx)));
 
     if let Some(TranscriptItem::Tool {
         call_id,
@@ -147,18 +143,24 @@ pub(super) fn draw_inspect_view(frame: &mut Frame, app: &mut App, theme: &Theme,
             Style::default().fg(theme.dim),
         ));
         lines.push(Line::styled(
-            format!("   title   : {}", truncate_width(title, w.saturating_sub(13))),
+            format!(
+                "   title   : {}",
+                truncate_width(title, w.saturating_sub(13))
+            ),
             Style::default().fg(theme.text),
         ));
         if !subtitle.is_empty() {
             lines.push(Line::styled(
-                format!("   detail  : {}", truncate_width(subtitle, w.saturating_sub(13))),
+                format!(
+                    "   detail  : {}",
+                    truncate_width(subtitle, w.saturating_sub(13))
+                ),
                 Style::default().fg(theme.text),
             ));
         }
         lines.push(Line::styled(
             format!(
-                "   status  : {:?} · target={target} · exit={:?} · dur={}ms",
+                "   status  : {:?} - target={target} - exit={:?} - dur={}ms",
                 status,
                 exit_code,
                 duration_ms.unwrap_or(0)
@@ -166,7 +168,7 @@ pub(super) fn draw_inspect_view(frame: &mut Frame, app: &mut App, theme: &Theme,
             Style::default().fg(theme.dim),
         ));
         lines.push(Line::styled(
-            "─".repeat(w),
+            "-".repeat(w),
             Style::default().fg(theme.border),
         ));
         for o in output {
@@ -201,14 +203,12 @@ pub(super) fn draw_inspect_view(frame: &mut Frame, app: &mut App, theme: &Theme,
         lines.push(Line::from(""));
         lines.push(Line::styled(
             format!(" MCP SERVERS ({})", mcp.servers.len()),
-            Style::default()
-                .fg(theme.dim)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
         ));
         for srv in &mcp.servers {
             lines.push(Line::styled(
                 format!(
-                    "   • {} [{}]{}",
+                    "   * {} [{}]{}",
                     srv.name,
                     srv.scope.label(),
                     if srv.disabled { " (disabled)" } else { "" }
@@ -219,9 +219,7 @@ pub(super) fn draw_inspect_view(frame: &mut Frame, app: &mut App, theme: &Theme,
         lines.push(Line::from(""));
         lines.push(Line::styled(
             format!(" SKILLS ({})", skills.len()),
-            Style::default()
-                .fg(theme.dim)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
         ));
         for sk in &skills {
             for wrapped in wrap_text(

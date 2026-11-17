@@ -34,7 +34,11 @@ fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
 }
 
 fn click_at(app: &mut App, col: u16, row: u16) {
-    app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), col, row));
+    app.handle_mouse(mouse_event(
+        MouseEventKind::Down(MouseButton::Left),
+        col,
+        row,
+    ));
     app.handle_mouse(mouse_event(MouseEventKind::Up(MouseButton::Left), col, row));
 }
 
@@ -53,7 +57,11 @@ fn inspector_opens_by_default_and_remembers_dragged_width() {
     assert!(default_overview_w >= 36);
 
     // Drag divider left to column 54 to widen Inspector.
-    app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), div_x, 5));
+    app.handle_mouse(mouse_event(
+        MouseEventKind::Down(MouseButton::Left),
+        div_x,
+        5,
+    ));
     assert!(app.inspector.dragging_divider);
     app.handle_mouse(mouse_event(MouseEventKind::Drag(MouseButton::Left), 54, 5));
     app.handle_mouse(mouse_event(MouseEventKind::Up(MouseButton::Left), 54, 5));
@@ -62,7 +70,10 @@ fn inspector_opens_by_default_and_remembers_dragged_width() {
 
     render_text(&mut terminal, &mut app);
     let dragged_w = app.inspector.last_area.width;
-    assert!(dragged_w > default_overview_w + 10, "dragged_w={dragged_w}, default={default_overview_w}");
+    assert!(
+        dragged_w > default_overview_w + 10,
+        "dragged_w={dragged_w}, default={default_overview_w}"
+    );
 
     // Switching tabs and toggling Ctrl+B off & on preserves dragged width.
     app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT));
@@ -145,7 +156,10 @@ fn clicking_underlined_file_link_opens_diff_or_file_preview() {
     app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
     assert_eq!(app.inspector.diff_layout, diff::DiffLayout::Split);
     let split_out = render_text(&mut terminal, &mut app);
-    assert!(split_out.contains("│"), "split divider missing:\n{split_out}");
+    assert!(
+        split_out.contains("|"),
+        "split divider missing:\n{split_out}"
+    );
 
     // Click unmodified README.md:2 link -> opens File tab with line preview.
     let readme_hit = app
@@ -158,7 +172,14 @@ fn clicking_underlined_file_link_opens_diff_or_file_preview() {
     assert_eq!(app.inspector.tab, InspectorTab::File);
     assert_eq!(app.inspector.file_line, Some(2));
     let file_out = render_text(&mut terminal, &mut app);
-    assert!(file_out.contains("line two here"), "file preview missing:\n{file_out}");
+    assert!(
+        file_out.contains("line two here"),
+        "file preview missing:\n{file_out}"
+    );
+    assert!(
+        file_out.contains(" | "),
+        "file gutter should use an ascii bar:\n{file_out}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -209,11 +230,11 @@ fn cursor_style_collapsed_explore_group_and_reasoning_expand_on_click() {
     let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
     let collapsed_text = render_text(&mut terminal, &mut app);
     assert!(
-        collapsed_text.contains("▸ Thought"),
+        collapsed_text.contains("> Thought"),
         "expected collapsed thought line:\n{collapsed_text}"
     );
     assert!(
-        collapsed_text.contains("▸ Explored 3 ops (read ×2, grep ×1)"),
+        collapsed_text.contains("> Explored 3 ops (read x2, grep x1)"),
         "expected grouped explore summary line:\n{collapsed_text}"
     );
     assert!(
@@ -266,7 +287,10 @@ async fn inline_ask_keeps_inspector_visible_and_accepts_click() {
     let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
     let text = render_text(&mut terminal, &mut app);
     assert!(text.contains("Approve network?"));
-    assert!(text.contains("1 Overview"), "Inspector must stay visible beside inline ask");
+    assert!(
+        text.contains("1 Overview"),
+        "Inspector must stay visible beside inline ask"
+    );
 
     let opt_hit = app
         .hit_regions

@@ -12,6 +12,13 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
+pub(crate) fn anthropic_max_tokens(max_output: Option<u64>) -> u32 {
+    match max_output {
+        Some(n) if n >= 256 => n.min(128_000) as u32,
+        _ => 8192,
+    }
+}
+
 pub(crate) async fn stream_anthropic(
     http: &reqwest::Client,
     provider: &StoredProvider,
@@ -20,6 +27,7 @@ pub(crate) async fn stream_anthropic(
     history: &[ChatMessage],
     permissions: Option<&PermissionEngine>,
     extra_tools: &[Value],
+    max_tokens: u32,
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<StreamReply> {
     let url = format!("{}/messages", provider.base_url.trim_end_matches('/'));
@@ -72,7 +80,7 @@ pub(crate) async fn stream_anthropic(
 
     let body = json!({
         "model": model,
-        "max_tokens": 8192,
+        "max_tokens": max_tokens.max(256),
         "system": system,
         "messages": msgs,
         "tools": anthropic_tools_json_for(permissions, extra_tools),

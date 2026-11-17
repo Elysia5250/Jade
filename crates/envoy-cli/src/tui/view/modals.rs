@@ -83,11 +83,7 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
                 .min(20);
             let popup = centered_rect(area, width, height);
             frame.render_widget(Clear, popup);
-            let title = if m.fetching {
-                " model "
-            } else {
-                " model "
-            };
+            let title = if m.fetching { " model " } else { " model " };
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.accent))
@@ -110,10 +106,10 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
             let rows: Vec<ListItem> = filtered
                 .iter()
                 .map(|item| {
-                    let is_active = active
-                        .as_ref()
-                        .is_some_and(|a| a.provider_id == item.provider_id && a.model_id == item.model_id);
-                    let dot = if is_active { "● " } else { "  " };
+                    let is_active = active.as_ref().is_some_and(|a| {
+                        a.provider_id == item.provider_id && a.model_id == item.model_id
+                    });
+                    let dot = if is_active { "* " } else { "  " };
                     ListItem::new(Line::from(vec![
                         Span::styled(
                             dot,
@@ -165,16 +161,16 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
                 s.sessions
                     .iter()
                     .map(|item| {
-                        let cur = if item.id == app.session.id { "● " } else { "  " };
+                        let cur = if item.id == app.session.id {
+                            "* "
+                        } else {
+                            "  "
+                        };
                         ListItem::new(Line::from(vec![
                             Span::styled(cur, Style::default().fg(theme.ok)),
                             Span::raw(format!("{:<32} ", truncate_chars(&item.title, 30))),
                             Span::styled(
-                                format!(
-                                    "{} · {} items",
-                                    collapse_home(&item.cwd),
-                                    item.item_count
-                                ),
+                                format!("{} - {} items", collapse_home(&item.cwd), item.item_count),
                                 Style::default().fg(theme.dim),
                             ),
                         ]))
@@ -196,13 +192,7 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
     }
 }
 
-fn draw_login_modal(
-    frame: &mut Frame,
-    app: &App,
-    theme: &Theme,
-    area: Rect,
-    login: &LoginModal,
-) {
+fn draw_login_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, login: &LoginModal) {
     match login {
         LoginModal::SelectProvider { filter, selected } => {
             let providers = app.filtered_login_providers(filter);
@@ -217,10 +207,7 @@ fn draw_login_modal(
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    " login ",
-                    Style::default().fg(theme.accent),
-                ));
+                .title(Span::styled(" login ", Style::default().fg(theme.accent)));
             let inner = block.inner(popup);
             frame.render_widget(block, popup);
 
@@ -248,7 +235,10 @@ fn draw_login_modal(
                             format!(" {:<20} ", p.name),
                             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(format!("{:<32} ", p.subtitle), Style::default().fg(theme.dim)),
+                        Span::styled(
+                            format!("{:<32} ", p.subtitle),
+                            Style::default().fg(theme.dim),
+                        ),
                         Span::styled(badge, Style::default().fg(theme.ok)),
                     ]))
                 })
@@ -270,15 +260,14 @@ fn draw_login_modal(
         } => {
             let prov = &BUILTIN_PROVIDERS[*provider_idx];
             let width = 72u16.min(area.width.saturating_sub(4));
-            let height = ((prov.methods.len() as u16) * 2 + 4)
-                .min(area.height.saturating_sub(2));
+            let height = ((prov.methods.len() as u16) * 2 + 4).min(area.height.saturating_sub(2));
             let popup = centered_rect(area, width, height);
             frame.render_widget(Clear, popup);
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.accent))
                 .title(Span::styled(
-                    format!(" {} — Select auth method (Esc back/close) ", prov.name),
+                    format!(" {} - Select auth method (Esc back/close) ", prov.name),
                     Style::default().fg(theme.accent),
                 ));
             let inner = block.inner(popup);
@@ -323,7 +312,7 @@ fn draw_login_modal(
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.accent))
                 .title(Span::styled(
-                    format!(" {} — API Key ", prov.name),
+                    format!(" {} - API Key ", prov.name),
                     Style::default().fg(theme.accent),
                 ));
             let inner = block.inner(popup);
@@ -332,12 +321,14 @@ fn draw_login_modal(
             let masked = if *reveal || key.is_empty() {
                 key.clone()
             } else {
-                "•".repeat(key.chars().count())
+                "*".repeat(key.chars().count())
             };
             let field = |idx: usize, label: &str, val: &str| {
-                let marker = if *focus_field == idx { "▸ " } else { "  " };
+                let marker = if *focus_field == idx { "> " } else { "  " };
                 let style = if *focus_field == idx {
-                    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.dim)
                 };
@@ -353,7 +344,7 @@ fn draw_login_modal(
                 field(2, "Model:", model),
                 Line::from(""),
                 Line::styled(
-                    "  Tab switch field · Ctrl+R reveal · Enter save · Esc cancel",
+                    "  Tab switch field - Ctrl+R reveal - Enter save - Esc cancel",
                     Style::default().fg(theme.dim),
                 ),
             ];
@@ -395,12 +386,14 @@ fn draw_login_modal(
             let masked_key = if key.is_empty() {
                 "(optional)".to_string()
             } else {
-                "•".repeat(key.chars().count())
+                "*".repeat(key.chars().count())
             };
             let field = |idx: usize, label: &str, val: &str| {
-                let marker = if *focus_field == idx { "▸ " } else { "  " };
+                let marker = if *focus_field == idx { "> " } else { "  " };
                 let style = if *focus_field == idx {
-                    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.dim)
                 };
@@ -418,7 +411,7 @@ fn draw_login_modal(
                 field(4, "Model ID:", model),
                 Line::from(""),
                 Line::styled(
-                    "  Tab field · ←/→ protocol · Enter save · Esc cancel",
+                    "  Tab field - <-/-> protocol - Enter save - Esc cancel",
                     Style::default().fg(theme.dim),
                 ),
             ];
@@ -446,7 +439,7 @@ fn draw_login_modal(
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.accent))
                 .title(Span::styled(
-                    format!(" {provider_name} — OAuth Browser "),
+                    format!(" {provider_name} - OAuth Browser "),
                     Style::default().fg(theme.accent),
                 ));
             let inner = block.inner(popup);
@@ -506,12 +499,10 @@ fn draw_login_modal(
             frame.render_widget(block, popup);
 
             let w = inner.width.saturating_sub(4) as usize;
-            let mut lines = vec![
-                Line::styled(
-                    "  Open this URL in your browser to authorize:",
-                    Style::default().fg(theme.dim),
-                ),
-            ];
+            let mut lines = vec![Line::styled(
+                "  Open this URL in your browser to authorize:",
+                Style::default().fg(theme.dim),
+            )];
             for chunk in wrap_text(url, w) {
                 lines.push(Line::styled(
                     format!("  {chunk}"),
@@ -521,7 +512,7 @@ fn draw_login_modal(
             lines.push(Line::from(""));
             lines.push(Line::styled(
                 if *busy {
-                    "  Exchanging authorization code…"
+                    "  Exchanging authorization code."
                 } else {
                     "  Paste the `code#state` (or callback URL) and press Enter:"
                 },
@@ -553,7 +544,7 @@ fn draw_login_modal(
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.accent))
                 .title(Span::styled(
-                    format!(" {provider_name} — Device Flow "),
+                    format!(" {provider_name} - Device Flow "),
                     Style::default().fg(theme.accent),
                 ));
             let inner = block.inner(popup);
@@ -563,15 +554,16 @@ fn draw_login_modal(
                 Line::from(""),
                 Line::from(vec![
                     Span::styled("  1. Open:  ", Style::default().fg(theme.dim)),
-                    Span::styled(verification_uri.clone(), Style::default().fg(theme.secondary)),
+                    Span::styled(
+                        verification_uri.clone(),
+                        Style::default().fg(theme.secondary),
+                    ),
                 ]),
                 Line::from(vec![
                     Span::styled("  2. Code:  ", Style::default().fg(theme.dim)),
                     Span::styled(
                         user_code.clone(),
-                        Style::default()
-                            .fg(theme.ok)
-                            .add_modifier(Modifier::BOLD),
+                        Style::default().fg(theme.ok).add_modifier(Modifier::BOLD),
                     ),
                 ]),
                 Line::from(""),

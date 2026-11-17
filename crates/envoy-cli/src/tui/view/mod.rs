@@ -10,6 +10,7 @@ mod queued;
 mod sidebar;
 mod status;
 mod transcript;
+mod welcome;
 
 use ask::{ask_inline_height, draw_ask};
 use editor::draw_editor;
@@ -19,6 +20,7 @@ use queued::draw_queued;
 use sidebar::draw_sidebar;
 use status::draw_status;
 use transcript::draw_transcript;
+use welcome::draw_workspace_picker;
 
 pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     let theme = app.theme();
@@ -26,10 +28,12 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     app.hit_regions.clear();
     app.workspace_index.ensure_fresh(&app.session.cwd);
 
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme.bg)),
-        area,
-    );
+    frame.render_widget(Block::default().style(Style::default().bg(theme.bg)), area);
+
+    if app.welcome.is_some() {
+        draw_workspace_picker(frame, app, &theme, area);
+        return;
+    }
 
     let show_inspector =
         app.show_sidebar && (area.width >= 104 || (app.inspector.force_open && area.width >= 76));
@@ -69,7 +73,7 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
 
     if let Some(dx) = divider_x {
         let active = app.inspector.dragging_divider || app.inspector.hover_divider;
-        let glyph = if active { "┃" } else { "│" };
+        let glyph = "|";
         let fg = if active { theme.accent } else { theme.border };
         let div_lines: Vec<Line> = (0..area.height)
             .map(|_| Line::styled(glyph, Style::default().fg(fg)))
@@ -219,11 +223,7 @@ fn snapshot_screen_lines(buf: &ratatui::buffer::Buffer, out: &mut Vec<Vec<String
 pub(super) fn push_blank_linked(lines: &mut Vec<LinkedLine>) {
     let already = lines
         .last()
-        .map(|line| {
-            line.spans
-                .iter()
-                .all(|s| s.span.content.trim().is_empty())
-        })
+        .map(|line| line.spans.iter().all(|s| s.span.content.trim().is_empty()))
         .unwrap_or(true);
     if !already {
         lines.push(LinkedLine::from_line(Line::from("")));

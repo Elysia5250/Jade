@@ -19,8 +19,8 @@ pub(super) fn draw_editor(
         theme.border
     };
     let title = match app.mode {
-        InputMode::Agent => " Ask · /cmd · !shell ",
-        InputMode::Shell => " Shell · Tab agent ",
+        InputMode::Agent => " Ask - /cmd - !shell ",
+        InputMode::Shell => " Shell - Tab agent ",
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -45,8 +45,8 @@ pub(super) fn draw_editor(
     };
     let lines: Vec<Line> = if app.input.is_empty() {
         let placeholder = match app.mode {
-            InputMode::Agent => "Ask anything… (Shift+Tab permissions, Ctrl+B panel)",
-            InputMode::Shell => "Run shell command…",
+            InputMode::Agent => "Ask anything. (Shift+Tab permissions, Ctrl+B panel)",
+            InputMode::Shell => "Run shell command.",
         };
         vec![Line::styled(
             truncate_width(placeholder, content.width as usize),

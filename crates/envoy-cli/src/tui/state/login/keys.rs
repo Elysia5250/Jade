@@ -2,7 +2,7 @@
 use crate::tui::*;
 
 impl App {
-pub(in crate::tui) fn handle_login_key(&mut self, login: LoginModal, key: KeyEvent) {
+    pub(in crate::tui) fn handle_login_key(&mut self, login: LoginModal, key: KeyEvent) {
         if key.code == KeyCode::Esc {
             self.cancel_login_bg();
             return;
@@ -40,7 +40,10 @@ pub(in crate::tui) fn handle_login_key(&mut self, login: LoginModal, key: KeyEve
                     }
                     _ => {}
                 }
-                self.modal = Some(Modal::Login(LoginModal::SelectProvider { filter, selected }));
+                self.modal = Some(Modal::Login(LoginModal::SelectProvider {
+                    filter,
+                    selected,
+                }));
             }
             LoginModal::SelectMethod {
                 provider_idx,
@@ -118,6 +121,7 @@ pub(in crate::tui) fn handle_login_key(&mut self, login: LoginModal, key: KeyEve
                                     key: api_key.trim().to_string(),
                                 },
                                 custom_models,
+                                model_routes: std::collections::BTreeMap::new(),
                                 updated_ms: now_ms(),
                             };
                             let chosen = if model.trim().is_empty() {
@@ -127,19 +131,8 @@ pub(in crate::tui) fn handle_login_key(&mut self, login: LoginModal, key: KeyEve
                             };
                             match record_provider_login(&self.data_dir, sp, chosen) {
                                 Ok(mref) => {
-                                    self.mode = InputMode::Agent;
-                                    self.set_toast(
-                                        format!("connected {} · {}", prov.name, mref.display()),
-                                        false,
-                                    );
-                                    self.push_notice(
-                                        format!(
-                                            "Connected to {} (api_key). Active model: {}",
-                                            prov.name,
-                                            mref.display()
-                                        ),
-                                        false,
-                                    );
+                                    let name = prov.name.to_string();
+                                    self.finish_login(&name, "api_key", &mref);
                                     return;
                                 }
                                 Err(e) => error = Some(format!("{e:#}")),
@@ -226,6 +219,7 @@ pub(in crate::tui) fn handle_login_key(&mut self, login: LoginModal, key: KeyEve
                                     key: api_key.trim().to_string(),
                                 },
                                 custom_models: vec![model.trim().to_string()],
+                                model_routes: std::collections::BTreeMap::new(),
                                 updated_ms: now_ms(),
                             };
                             let pname = sp.name.clone();
@@ -237,7 +231,7 @@ pub(in crate::tui) fn handle_login_key(&mut self, login: LoginModal, key: KeyEve
                                 Ok(mref) => {
                                     self.mode = InputMode::Agent;
                                     self.set_toast(
-                                        format!("connected {pname} · {}", mref.display()),
+                                        format!("connected {pname} - {}", mref.display()),
                                         false,
                                     );
                                     self.push_notice(
@@ -320,7 +314,7 @@ pub(in crate::tui) fn handle_login_key(&mut self, login: LoginModal, key: KeyEve
                             self.login_rx = Some(rx);
                             self.login_task = Some(handle);
                             busy = true;
-                            status = "Exchanging authorization code…".into();
+                            status = "Exchanging authorization code.".into();
                             error = None;
                         }
                         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {

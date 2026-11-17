@@ -6,7 +6,7 @@ mod openai_chat;
 mod openai_codex;
 mod sse;
 
-pub(crate) use anthropic::stream_anthropic;
+pub(crate) use anthropic::{anthropic_max_tokens, stream_anthropic};
 pub(crate) use openai_chat::stream_openai_chat;
 pub(crate) use openai_codex::stream_openai_codex;
 

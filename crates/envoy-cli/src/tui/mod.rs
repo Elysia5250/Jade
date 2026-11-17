@@ -30,11 +30,11 @@ pub(crate) use types::*;
 
 #[allow(unused_imports)] // re-exported for the state and view modules
 pub(crate) use crate::auth::{
-    anthropic_authorize_url, available_models, bind_openai_callback_listener,
-    effective_providers, exchange_anthropic_code, exchange_openai_code, extract_query_param,
-    generate_pkce, load_prefs, open_browser,
-    poll_github_copilot_device, poll_openai_device_auth, random_state, record_provider_login,
-    remove_provider, resolve_active_provider, save_prefs, set_active_model, slugify_provider_id,
+    anthropic_authorize_url, available_models, bind_openai_callback_listener, effective_providers,
+    exchange_anthropic_code, exchange_openai_code, extract_query_param, generate_pkce,
+    is_retired_model, load_prefs, open_browser, poll_github_copilot_device,
+    poll_openai_device_auth, random_state, record_provider_login, remove_provider,
+    resolve_active_provider, save_prefs, set_active_model, slugify_provider_id,
     start_github_copilot_device, start_openai_device_auth, wait_openai_browser_callback,
     AuthMethodKind, AvailableModel, Credential, ModelRef, ProviderProtocol, StoredProvider,
     BUILTIN_PROVIDERS,
@@ -46,11 +46,13 @@ pub(crate) use crate::permissions::{
 };
 pub(crate) use crate::runtime::{self, AgentReq, AgentResp, SendMode};
 pub(crate) use crate::session::{
-    delete_session, latest_session_for_cwd, list_sessions, load_session, save_session, CardStatus,
-    ChatMessage, ChatRole, Session, SessionSummary, TranscriptItem,
+    delete_session, latest_session_for_cwd, list_sessions, load_session, recent_workspaces,
+    save_session, CardStatus, ChatMessage, ChatRole, Session, SessionSummary, TranscriptItem,
 };
 pub(crate) use anyhow::{bail, Result};
-pub(crate) use envoy_proto::{Job, JobId, JobState, LogRecord, SubmitRequest, TaskSpec, DEFAULT_GROUP};
+pub(crate) use envoy_proto::{
+    Job, JobId, JobState, LogRecord, SubmitRequest, TaskSpec, DEFAULT_GROUP,
+};
 pub(crate) use envoy_service::{
     default_control_socket, dialer_for, AgentDialer, ConduitClient, Remote, Status,
 };
@@ -65,7 +67,7 @@ pub(crate) use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, EndSynchronizedUpdate,
     EnterAlternateScreen, LeaveAlternateScreen,
 };
-pub(crate) use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+pub(crate) use ratatui::layout::{Constraint, Direction, Layout, Rect};
 pub(crate) use ratatui::style::{Modifier, Style};
 pub(crate) use ratatui::text::{Line, Span};
 pub(crate) use ratatui::widgets::{
@@ -83,6 +85,20 @@ pub(crate) const LEADER_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) type AnyDialer = Box<dyn AgentDialer>;
 
+/// True when the active provider has no usable model id, or still lists a
+/// retired DeepSeek id. Those ids 400 on `/chat/completions`.
+fn model_list_needs_fetch(data_dir: &std::path::Path) -> bool {
+    let Some((prov, model)) = resolve_active_provider(data_dir) else {
+        return false;
+    };
+    model.model_id.is_empty()
+        || prov.custom_models.is_empty()
+        || prov
+            .custom_models
+            .iter()
+            .any(|id| is_retired_model(&prov.id, id))
+}
+
 pub async fn run(
     data_dir: PathBuf,
     target: String,
@@ -90,6 +106,7 @@ pub async fn run(
     cwd: PathBuf,
     continue_last: bool,
     session_id: Option<String>,
+    pick_workspace: bool,
 ) -> Result<()> {
     if !stdout().is_terminal() {
         bail!("`envoy` opens a console; use a subcommand for scripts (envoy jobs)");
@@ -100,7 +117,15 @@ pub async fn run(
     let mut remote: Remote<AnyDialer> =
         Remote::new(dialer_for(&data_dir, &target, conduit.clone()));
 
-    let mut app = App::new(data_dir.clone(), target.clone(), conduit.clone(), cwd.clone());
+    let mut app = App::new(
+        data_dir.clone(),
+        target.clone(),
+        conduit.clone(),
+        cwd.clone(),
+    );
+    if pick_workspace {
+        app.open_welcome();
+    }
     if let Some(id) = session_id {
         if let Ok(loaded) = load_session(&data_dir, &id) {
             app.load_existing_session(loaded);
@@ -117,7 +142,15 @@ pub async fn run(
     }
 
     // The turn lives in the daemon; the console attaches to its stream.
-    app.spawn_agent_attach();
+    // A welcome screen picks the directory first, so the attach waits.
+    if app.welcome.is_none() {
+        app.spawn_agent_attach();
+    }
+    // An empty list, or a stored DeepSeek id that the API retired, would 400
+    // on the next turn. Fetch before the user sends anything.
+    if model_list_needs_fetch(&app.data_dir) {
+        app.spawn_model_refresh();
+    }
 
     let mut tui = Tui::enter()?;
     app.refresh(&remote).await;
@@ -169,6 +202,10 @@ pub async fn run(
                                 false,
                             );
                         }
+                        Action::SetMouseCapture(on) => {
+                            tui.set_mouse_capture(on);
+                            app.mouse_capture = on;
+                        }
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -185,7 +222,10 @@ pub async fn run(
         app.drain_login_events();
         app.drain_model_events();
 
-        if app.agent_stream.is_none() && Instant::now() >= app.agent_retry_at {
+        if app.welcome.is_none()
+            && app.agent_stream.is_none()
+            && Instant::now() >= app.agent_retry_at
+        {
             app.spawn_agent_attach();
         }
 
@@ -240,6 +280,9 @@ pub(crate) enum Action {
     Switch(String),
     AttachJob(Job),
     ToggleMouseCapture,
+    /// Set mouse capture to an absolute value. The event loop applies it to
+    /// the terminal; `run_command` only records the choice.
+    SetMouseCapture(bool),
 }
 
 #[derive(Clone)]
@@ -250,9 +293,22 @@ pub(crate) enum Command {
     OpenSessions,
     NewSession,
     ToggleMode,
-    CyclePermission,
+    OpenModePicker,
+    OpenPermissionPicker,
+    OpenThemePicker,
+    OpenTrustPicker,
+    OpenSidebarPicker,
+    OpenMousePicker,
+    OpenBudgetPicker,
+    SetMode(InputMode),
+    SetPermission(PermissionMode),
+    SetTheme(usize),
+    SetTrust(bool),
+    SetSidebar(bool),
+    ResetSidebar,
+    SetMouse(bool),
+    SetBudget(&'static str),
     ToggleExpand,
-    ToggleMouseCapture,
     Cancel,
     ToggleSidebar,
     NextTheme,
@@ -451,7 +507,8 @@ pub(crate) struct App {
     login_cancel: Option<oneshot::Sender<()>>,
 
     // Remote /models fetch
-    models_rx: Option<oneshot::Receiver<Vec<String>>>,
+    models_rx: Option<oneshot::Receiver<(String, Vec<crate::agent::context::ListedModel>)>>,
+    welcome: Option<Welcome>,
 
     // Universal right inspector, clickable links, and mouse selection
     inspector: InspectorState,
@@ -523,10 +580,7 @@ impl Tui {
 impl Drop for Tui {
     fn drop(&mut self) {
         if self.enhanced_keys {
-            let _ = execute!(
-                self.terminal.backend_mut(),
-                PopKeyboardEnhancementFlags
-            );
+            let _ = execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags);
         }
         if self.mouse_capture {
             let _ = execute!(self.terminal.backend_mut(), DisableMouseCapture);

@@ -37,7 +37,7 @@ pub(in crate::tui) fn draw_inspector(frame: &mut Frame, app: &mut App, theme: &T
         .split(inner);
 
     draw_tab_bar(frame, app, theme, chunks[0]);
-    let sep = "─".repeat(chunks[1].width as usize);
+    let sep = "-".repeat(chunks[1].width as usize);
     frame.render_widget(
         Paragraph::new(Line::styled(sep, Style::default().fg(theme.border))),
         chunks[1],
@@ -74,7 +74,11 @@ fn draw_tab_bar(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         let style = if active {
             Style::default()
                 .fg(if focused { theme.bg } else { theme.accent })
-                .bg(if focused { theme.accent } else { theme.selection })
+                .bg(if focused {
+                    theme.accent
+                } else {
+                    theme.selection
+                })
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.dim)
@@ -92,7 +96,7 @@ fn draw_tab_bar(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         cursor_x += w;
     }
 
-    let close_label = "[×]";
+    let close_label = "[x]";
     let close_w = display_width(close_label) as u16;
     if cursor_x + close_w < area.x + area.width {
         let close_x = area.x + area.width - close_w;
@@ -149,6 +153,17 @@ pub(super) fn push_linked_rows(
             }
             cursor_x = cursor_x.saturating_add(sw);
             line_spans.push(ls.span.clone());
+        }
+        if let Some(st) = row.line_style {
+            let used: usize = row
+                .spans
+                .iter()
+                .map(|s| display_width(&s.span.content))
+                .sum();
+            let pad = (area.width as usize).saturating_sub(used);
+            if pad > 0 {
+                line_spans.push(Span::styled(" ".repeat(pad), st));
+            }
         }
         let mut l = Line::from(line_spans);
         if let Some(st) = row.line_style {

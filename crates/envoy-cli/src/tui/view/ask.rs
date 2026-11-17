@@ -30,7 +30,7 @@ pub(super) fn draw_ask(frame: &mut Frame, app: &mut App, theme: &Theme, area: Re
         .deadline
         .saturating_duration_since(Instant::now())
         .as_secs();
-    let title = format!(" ask · {left}s · ↑/↓ Enter ");
+    let title = format!(" ask - {left}s - up/down Enter ");
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -69,7 +69,7 @@ pub(super) fn draw_ask(frame: &mut Frame, app: &mut App, theme: &Theme, area: Re
             });
         }
         let chosen = index == ask.selected;
-        let marker = if chosen { " ▸ " } else { "   " };
+        let marker = if chosen { " > " } else { "   " };
         let style = if chosen {
             Style::default()
                 .fg(theme.accent)
@@ -88,7 +88,10 @@ pub(super) fn draw_ask(frame: &mut Frame, app: &mut App, theme: &Theme, area: Re
         ));
         if let Some(desc) = &option.description {
             lines.push(Line::styled(
-                format!("     {}", truncate_width(desc, inner.width.saturating_sub(6) as usize)),
+                format!(
+                    "     {}",
+                    truncate_width(desc, inner.width.saturating_sub(6) as usize)
+                ),
                 Style::default().fg(theme.dim),
             ));
         }

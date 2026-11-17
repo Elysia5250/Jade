@@ -163,11 +163,14 @@ fn native_harness_trigger(
     let id = model_id.to_ascii_lowercase();
     let hard = cap.context_window.max(16_384);
 
-    if has_small_model_tag(&id) {
-        return ((hard / 2).min(96_000).min(max_trigger), "small-50%");
-    }
+    // Claude and Gemini first so a haiku-4 id is not swallowed by the small-model tag.
+    // The small-model tag stays ahead of OpenAI and the open families so names like
+    // gpt-4o-mini and qwen2.5-7b keep the tighter cap.
     if let Some((target, profile)) = match_claude_or_gemini(&id, hard, max_trigger) {
         return (target, profile);
+    }
+    if has_small_model_tag(&id) {
+        return ((hard / 2).min(96_000).min(max_trigger), "small-50%");
     }
     if let Some((target, profile)) = match_openai_or_grok(&id, hard, max_trigger) {
         return (target, profile);
@@ -270,7 +273,7 @@ fn match_cn_or_open_family(
 ) -> Option<(u64, &'static str)> {
     if id.contains("deepseek") {
         if hard >= 700_000 {
-            return Some((272_000u64.min(max_trigger), "deepseek-272k"));
+            return Some((window_fraction(hard, max_trigger), "deepseek-60pct"));
         }
         if id.contains("reasoner") || hard <= 80_000 {
             return Some(((hard * 55 / 100).min(36_000).min(max_trigger), "deepseek-r1-36k"));
@@ -279,7 +282,7 @@ fn match_cn_or_open_family(
     }
     if id.contains("qwen") {
         if (id.contains("qwen4") || id.contains("qwen3.8-max")) && hard >= 700_000 {
-            return Some((272_000u64.min(max_trigger), "qwen-flagship-272k"));
+            return Some((window_fraction(hard, max_trigger), "qwen-flagship-60pct"));
         }
         if (id.contains("flash") || id.contains("2.4t")) && hard >= 200_000 {
             return Some((160_000u64.min(max_trigger), "qwen-flash-160k"));
@@ -290,7 +293,7 @@ fn match_cn_or_open_family(
     }
     if id.contains("kimi") {
         if id.contains("kimi-k3") && hard >= 700_000 {
-            return Some((272_000u64.min(max_trigger), "kimi-k3-272k"));
+            return Some((window_fraction(hard, max_trigger), "kimi-k3-60pct"));
         }
         if hard >= 100_000 {
             return Some((72_000u64.min(max_trigger), "kimi-legacy-72k"));
@@ -298,7 +301,7 @@ fn match_cn_or_open_family(
     }
     if id.contains("glm") {
         if id.contains("glm-5") && hard >= 700_000 {
-            return Some((272_000u64.min(max_trigger), "glm-5-272k"));
+            return Some((window_fraction(hard, max_trigger), "glm-5-60pct"));
         }
         if hard >= 100_000 {
             return Some((72_000u64.min(max_trigger), "glm-legacy-72k"));
@@ -320,12 +323,16 @@ fn conservative_fallback_trigger(
     } else if hard <= 131_072 {
         hard * 55 / 100
     } else {
-        128_000
+        hard * 60 / 100
     };
     if let Some(cliff) = pricing_cliff {
         target = target.min(cliff * 90 / 100);
     }
     (target.min(max_trigger).max(8_192), "conservative-fallback")
+}
+
+fn window_fraction(hard: u64, max_trigger: u64) -> u64 {
+    (hard * 60 / 100).min(max_trigger)
 }
 
 fn has_small_model_tag(id: &str) -> bool {
@@ -411,13 +418,13 @@ mod tests {
         assert_eq!(sol.compact_at, 384_000);
         assert_eq!(luna.compact_at, 180_000);
 
-        // DeepSeek / Qwen4 / Kimi-K3 / GLM-5 sweet spot at 272k
+        // Large windows without a published harness line use 60% of the physical window.
         let ds_v4 = plan_for_cap("deepseek-v4.1-flash", &cap_or("deepseek-v4.1-flash", 1_000_000), CompactionTier::Native);
         let qwen4 = plan_for_cap("qwen4-max", &cap_or("qwen4-max", 1_000_000), CompactionTier::Native);
         let glm5 = plan_for_cap("glm-5.3", &cap_or("glm-5.3", 1_048_576), CompactionTier::Native);
-        assert_eq!(ds_v4.compact_at, 272_000);
-        assert_eq!(qwen4.compact_at, 272_000);
-        assert_eq!(glm5.compact_at, 272_000);
+        assert_eq!(ds_v4.compact_at, 600_000);
+        assert_eq!(qwen4.compact_at, 600_000);
+        assert_eq!(glm5.compact_at, 1_048_576 * 60 / 100);
 
         // Legacy, small-parameter, and unknown models are much more conservative
         let ds_r1 = plan_for_cap("deepseek-reasoner", &cap_or("deepseek-reasoner", 65_536), CompactionTier::Native);
@@ -429,7 +436,21 @@ mod tests {
         assert_eq!(mini.compact_at, 64_000);
         assert_eq!(qwen_7b.compact_at, 65_536);
         assert_eq!(unknown_64k.compact_at, 36_044);
-        assert_eq!(unknown_1m.compact_at, 128_000);
+        assert_eq!(unknown_1m.compact_at, 600_000);
+
+        let haiku4 = plan_for_cap(
+            "claude-haiku-4-5",
+            &ModelCap {
+                context_window: 1_000_000,
+                max_output: Some(64_000),
+                pricing_cliff: None,
+                source: "test".into(),
+                updated_ms: 0,
+            },
+            CompactionTier::Native,
+        );
+        assert_eq!(haiku4.compact_at, 200_000);
+        assert_eq!(haiku4.harness_profile, "claude-haiku-200k");
 
         // Focused / Balanced clamp cleanly
         assert_eq!(

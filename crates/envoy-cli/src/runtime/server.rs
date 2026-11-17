@@ -1,7 +1,9 @@
 //! Daemon-side session store, turn runner, and manual `/compact` + `/handoff`.
 
 use super::protocol::{AgentReq, AgentResp, SendMode, SeqEvent, SessionInfo};
-use crate::agent::context::{generate_handoff, prepare_context, resolve_budget, TokenCalibration};
+use crate::agent::context::{
+    generate_handoff, prepare_context, resolve_budget, tools_overhead, TokenCalibration,
+};
 use crate::agent::prompt::build_system_prompt;
 use crate::auth::resolve_active_provider;
 use crate::llm::{run_agent_turn, AgentEvent, AskBroker, TurnConfig};
@@ -426,6 +428,7 @@ async fn run_manual_context_op(
         messages,
         TokenCalibration::default(),
         &plan,
+        tools_overhead(0),
         true,
         focus,
         None,

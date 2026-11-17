@@ -2,5 +2,4 @@
 # Format: repo-relative path<TAB>current max lines.
 # These entries are a debt list: remove an entry once the file is split, and
 # never raise a number to make a failing check pass.
-crates/envoy-cli/src/auth.rs	1666
 crates/envoy-service/src/conduit.rs	801

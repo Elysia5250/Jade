@@ -91,7 +91,6 @@ pub(crate) fn complete_directories(cwd: &Path, raw: &str) -> Vec<(String, String
 
 // ------------------------------------------------------------------ drawing
 
-
 pub(crate) fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
     Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
@@ -106,7 +105,7 @@ pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-        out.push('…');
+        out.push('.');
         out
     }
 }
@@ -117,6 +116,16 @@ pub(crate) fn char_width(c: char) -> usize {
 
 pub(crate) fn display_width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
+}
+
+/// Pad with spaces so a highlighted row is exactly `width` columns.
+pub(crate) fn pad_to_width(text: &str, width: usize) -> String {
+    let used = display_width(text);
+    if used >= width {
+        truncate_width(text, width)
+    } else {
+        format!("{text}{}", " ".repeat(width - used))
+    }
 }
 
 pub(crate) fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
@@ -156,7 +165,11 @@ pub(crate) fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     out
 }
 
-pub(crate) fn layout_editor_text(input: &str, cursor_chars: usize, max_width: usize) -> (Vec<String>, usize, usize) {
+pub(crate) fn layout_editor_text(
+    input: &str,
+    cursor_chars: usize,
+    max_width: usize,
+) -> (Vec<String>, usize, usize) {
     let max_width = max_width.max(8);
     let mut lines = Vec::new();
     let mut cur = String::new();
@@ -222,16 +235,16 @@ pub(crate) fn render_markdown_linked(
                 code_lang = Lang::from_hint(lang);
                 out.push(LinkedLine::from_line(Line::styled(
                     if lang.is_empty() {
-                        " ┌──".to_string()
+                        " +--".to_string()
                     } else {
-                        format!(" ┌─ {lang}")
+                        format!(" +- {lang}")
                     },
                     Style::default().fg(theme.border),
                 )));
             } else {
                 code_lang = Lang::Plain;
                 out.push(LinkedLine::from_line(Line::styled(
-                    " └──",
+                    " +--",
                     Style::default().fg(theme.border),
                 )));
             }
@@ -241,7 +254,7 @@ pub(crate) fn render_markdown_linked(
         if in_code {
             let shown = truncate_width(raw, width.saturating_sub(4));
             let mut spans = vec![LinkedSpan {
-                span: Span::styled(" │ ", Style::default().fg(theme.border)),
+                span: Span::styled(" | ", Style::default().fg(theme.border)),
                 target: None,
             }];
             let code_spans = highlight_code_line(
@@ -286,7 +299,7 @@ pub(crate) fn render_markdown_linked(
             let linked = inline_spans_linked(item, theme, cwd, changed, index);
             let wrapped = wrap_linked_spans(
                 LinkedSpan {
-                    span: Span::styled(" • ", Style::default().fg(theme.accent)),
+                    span: Span::styled(" * ", Style::default().fg(theme.accent)),
                     target: None,
                 },
                 LinkedSpan {
@@ -404,7 +417,9 @@ pub(crate) fn truncate_width(text: &str, max: usize) -> String {
     for ch in text.chars() {
         let w = char_width(ch);
         if width + w > max {
-            out.push('…');
+            if width + 1 <= max {
+                out.push('.');
+            }
             return out;
         }
         out.push(ch);
@@ -482,26 +497,26 @@ pub(crate) fn render_table<'a>(
     }
 
     let border = Style::default().fg(theme.border);
-    let mut top = String::from(" ┌");
-    for (c, w) in widths.iter().enumerate() {
-        top.push_str(&"─".repeat(*w + 2));
-        top.push(if c + 1 == cols { '┐' } else { '┬' });
+    let mut top = String::from(" +");
+    for w in &widths {
+        top.push_str(&"-".repeat(*w + 2));
+        top.push('+');
     }
     out.push(Line::styled(top, border));
     push_table_row(out, &header, &widths, &aligns, theme, true);
-    let mut mid = String::from(" ├");
-    for (c, w) in widths.iter().enumerate() {
-        mid.push_str(&"─".repeat(*w + 2));
-        mid.push(if c + 1 == cols { '┤' } else { '┼' });
+    let mut mid = String::from(" +");
+    for w in &widths {
+        mid.push_str(&"-".repeat(*w + 2));
+        mid.push('+');
     }
     out.push(Line::styled(mid, border));
     for row in &rows {
         push_table_row(out, row, &widths, &aligns, theme, false);
     }
-    let mut bottom = String::from(" └");
-    for (c, w) in widths.iter().enumerate() {
-        bottom.push_str(&"─".repeat(*w + 2));
-        bottom.push(if c + 1 == cols { '┘' } else { '┴' });
+    let mut bottom = String::from(" +");
+    for w in &widths {
+        bottom.push_str(&"-".repeat(*w + 2));
+        bottom.push('+');
     }
     out.push(Line::styled(bottom, border));
     consumed
@@ -523,7 +538,7 @@ pub(crate) fn push_table_row<'a>(
     } else {
         Style::default().fg(theme.text)
     };
-    let mut spans = vec![Span::styled(" │ ", border)];
+    let mut spans = vec![Span::styled(" | ", border)];
     for (c, width) in widths.iter().enumerate() {
         let raw = cells.get(c).map(String::as_str).unwrap_or("");
         let shown = truncate_width(raw, *width);
@@ -539,7 +554,7 @@ pub(crate) fn push_table_row<'a>(
             text_style,
         ));
         spans.push(Span::styled(
-            if c + 1 == widths.len() { " │" } else { " │ " },
+            if c + 1 == widths.len() { " |" } else { " | " },
             border,
         ));
     }
@@ -576,7 +591,7 @@ pub(crate) fn context_bar(used: u64, window: u64) -> (String, String) {
     } else {
         ((ratio * CELLS as f64).ceil() as usize).clamp(1, CELLS)
     };
-    ("█".repeat(filled), "░".repeat(CELLS - filled))
+    ("#".repeat(filled), "-".repeat(CELLS - filled))
 }
 
 pub(crate) fn fmt_tokens(n: u64) -> String {
@@ -612,10 +627,15 @@ mod tests {
         assert_eq!(fmt_tokens(12_400), "12.4k");
         assert_eq!(fmt_tokens(50_000), "50k");
         assert_eq!(fmt_tokens(1_048_576), "1.0m");
-        assert_eq!(context_bar(0, 200_000), (String::new(), "░".repeat(8)));
+        assert_eq!(context_bar(0, 200_000), (String::new(), "-".repeat(8)));
         let (filled, empty) = context_bar(50_000, 200_000);
         assert_eq!(filled.chars().count() + empty.chars().count(), 8);
         assert!(!filled.is_empty());
+        let bar = format!("{filled}{empty}");
+        assert!(bar.is_ascii());
+        assert_eq!(super::display_width(&bar), 8);
+        let row = super::pad_to_width("> current   /tmp/project", 40);
+        assert_eq!(super::display_width(&row), 40);
+        assert!(row.is_ascii());
     }
 }
-

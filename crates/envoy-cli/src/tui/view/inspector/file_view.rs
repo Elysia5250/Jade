@@ -61,9 +61,7 @@ pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
     let mut header_spans = vec![LinkedSpan {
         span: Span::styled(
             format!(" {header_title}"),
-            Style::default()
-                .fg(theme.text)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         ),
         target: None,
     }];
@@ -82,7 +80,7 @@ pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
             target: Some(HitTarget::SelectInspectorTab(InspectorTab::Diff)),
         });
     }
-    let sep = "─".repeat(header_area.width as usize);
+    let sep = "-".repeat(header_area.width as usize);
     push_linked_rows(
         frame,
         app,
@@ -128,7 +126,6 @@ pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
     let text = String::from_utf8_lossy(capped);
     let lang = Lang::from_path(&abs);
     let target_line = app.inspector.file_line;
-    let code_budget = body_area.width.saturating_sub(7).max(8) as usize;
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (idx, raw) in text.lines().enumerate() {
@@ -140,16 +137,19 @@ pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
             theme.panel
         };
         let num_fg = if is_target { theme.accent } else { theme.dim };
-        let shown = truncate_width(raw, code_budget);
-        let mut spans = vec![Span::styled(
-            format!("{lineno:>4} │ "),
-            Style::default().fg(num_fg).bg(bg),
-        )];
-        let code_spans = highlight_code_line(&shown, lang, theme, Style::default().fg(theme.text).bg(bg));
+        let gutter = format!("{lineno:>4} | ");
+        let gutter_w = display_width(&gutter);
+        let shown = truncate_width(
+            raw,
+            (body_area.width as usize).saturating_sub(gutter_w).max(1),
+        );
+        let mut spans = vec![Span::styled(gutter, Style::default().fg(num_fg).bg(bg))];
+        let code_spans =
+            highlight_code_line(&shown, lang, theme, Style::default().fg(theme.text).bg(bg));
         for sp in code_spans {
             spans.push(Span::styled(sp.content.into_owned(), sp.style.bg(bg)));
         }
-        let used = 7 + display_width(&shown);
+        let used = gutter_w + display_width(&shown);
         if used < body_area.width as usize {
             spans.push(Span::styled(
                 " ".repeat(body_area.width as usize - used),

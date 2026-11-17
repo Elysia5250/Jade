@@ -5,6 +5,7 @@ use envoy_proto::JobId;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Line;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InspectorTab {
@@ -150,4 +151,20 @@ impl LinkedLine {
             line_style: None,
         }
     }
+}
+
+/// Startup workspace picker. Shown before the console attaches to a directory.
+pub(crate) struct Welcome {
+    pub(crate) rows: Vec<WelcomeRow>,
+    pub(crate) selected: usize,
+    pub(crate) path_mode: bool,
+    pub(crate) path: String,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Clone)]
+pub(crate) enum WelcomeRow {
+    Here(PathBuf),
+    Recent(PathBuf, String),
+    OpenPath,
 }

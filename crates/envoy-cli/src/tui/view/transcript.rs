@@ -50,10 +50,14 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
             let all_collapsed = (start..end).all(|i| {
                 matches!(
                     app.session.items[i],
-                    TranscriptItem::Tool { collapsed: true, .. }
+                    TranscriptItem::Tool {
+                        collapsed: true,
+                        ..
+                    }
                 )
             });
-            if end - start >= 2 && all_collapsed && !app.expanded_explore_groups.contains(&first_id) {
+            if end - start >= 2 && all_collapsed && !app.expanded_explore_groups.contains(&first_id)
+            {
                 lines.push(render_explore_group(
                     &app.session.items[start..end],
                     width,
@@ -76,7 +80,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
                 for raw_line in text.lines() {
                     for wrapped in wrap_text(raw_line, width.saturating_sub(2)) {
                         lines.push(LinkedLine::from_line(Line::from(vec![
-                            Span::styled("▌ ", bar_style),
+                            Span::styled("| ", bar_style),
                             Span::styled(wrapped, Style::default().fg(theme.text)),
                         ])));
                     }
@@ -92,11 +96,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
                 error,
                 ..
             } => {
-                if text.trim().is_empty()
-                    && reasoning.is_empty()
-                    && *done
-                    && error.is_none()
-                {
+                if text.trim().is_empty() && reasoning.is_empty() && *done && error.is_none() {
                     idx += 1;
                     continue;
                 }
@@ -112,14 +112,14 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
                             .unwrap_or("");
                         let label = if !*done && !tail.is_empty() {
                             format!(
-                                "{} Thinking · {}",
+                                "{} Thinking - {}",
                                 spinner(),
                                 truncate_width(tail, width.saturating_sub(16))
                             )
                         } else if !*done {
-                            format!("{} Thinking…", spinner())
+                            format!("{} Thinking.", spinner())
                         } else {
-                            "▸ Thought".to_string()
+                            "> Thought".to_string()
                         };
                         lines.push(LinkedLine::from_linked(vec![LinkedSpan {
                             span: Span::styled(label, Style::default().fg(theme.dim)),
@@ -127,7 +127,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
                         }]));
                     } else {
                         lines.push(LinkedLine::from_linked(vec![LinkedSpan {
-                            span: Span::styled("▾ Thinking", Style::default().fg(theme.dim)),
+                            span: Span::styled("v Thinking", Style::default().fg(theme.dim)),
                             target: Some(HitTarget::ToggleReasoning(*id)),
                         }]));
                         for rline in reasoning.lines() {
@@ -144,7 +144,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
                 if text.trim().is_empty() {
                     if !*done && reasoning.is_empty() {
                         lines.push(LinkedLine::from_line(Line::styled(
-                            format!("{} Thinking…", spinner()),
+                            format!("{} Thinking.", spinner()),
                             Style::default().fg(theme.dim),
                         )));
                     } else if !*done {
@@ -241,7 +241,10 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
                     let total = output.len();
                     let preview_start = if total > 50 && *status != CardStatus::Running {
                         lines.push(LinkedLine::from_line(Line::styled(
-                            format!("  … ({} earlier lines — click [out] for full log)", total - 40),
+                            format!(
+                                "  . ({} earlier lines - click [out] for full log)",
+                                total - 40
+                            ),
                             Style::default().fg(theme.dim),
                         )));
                         total - 40
@@ -255,7 +258,10 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
                             Style::default().fg(theme.text)
                         };
                         for w in wrap_text(&out_line.text, width.saturating_sub(4)) {
-                            lines.push(LinkedLine::from_line(Line::styled(format!("    {w}"), style)));
+                            lines.push(LinkedLine::from_line(Line::styled(
+                                format!("    {w}"),
+                                style,
+                            )));
                         }
                     }
                 }
@@ -273,7 +279,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
                     );
                     let wrapped = wrap_linked_spans(
                         LinkedSpan {
-                            span: Span::styled("· ", style),
+                            span: Span::styled("- ", style),
                             target: None,
                         },
                         LinkedSpan {
@@ -307,7 +313,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
                     );
                     let wrapped = wrap_linked_spans(
                         LinkedSpan {
-                            span: Span::styled("· ", Style::default().fg(theme.accent)),
+                            span: Span::styled("- ", Style::default().fg(theme.accent)),
                             target: None,
                         },
                         LinkedSpan {
@@ -398,7 +404,7 @@ fn render_explore_group(
     }
     let summary: String = counts
         .iter()
-        .map(|(n, c)| format!("{n} ×{c}"))
+        .map(|(n, c)| format!("{n} x{c}"))
         .collect::<Vec<_>>()
         .join(", ");
     let elapsed = if any_running {
@@ -412,13 +418,16 @@ fn render_explore_group(
     } else if any_err {
         ("✗", theme.bad)
     } else {
-        ("▸", theme.dim)
+        (">", theme.dim)
     };
 
     let text = if any_running {
         format!(
-            "Exploring · {}  ({summary})  {elapsed}",
-            truncate_width(latest_title, width.saturating_sub(summary.len() + 22).max(8))
+            "Exploring - {}  ({summary})  {elapsed}",
+            truncate_width(
+                latest_title,
+                width.saturating_sub(summary.len() + 22).max(8)
+            )
         )
     } else {
         format!("Explored {} ops ({summary})  {elapsed}", group.len())
@@ -462,7 +471,7 @@ fn render_tool_header(
     is_selected: bool,
 ) -> LinkedLine {
     let (glyph, glyph_style) = match status {
-        CardStatus::Queued => ("○", Style::default().fg(theme.warn)),
+        CardStatus::Queued => ("o", Style::default().fg(theme.warn)),
         CardStatus::Running => (spinner(), Style::default().fg(theme.accent)),
         CardStatus::Done => ("✓", Style::default().fg(theme.ok)),
         CardStatus::Error => ("✗", Style::default().fg(theme.bad)),
@@ -479,8 +488,12 @@ fn render_tool_header(
 
     // Check if this tool acts directly on a file path (`edit`, `write`, `read`, `ls`)
     let file_verb = match name {
-        "edit" => title.strip_prefix("edit ").map(|p| ("Edited", "Editing", p)),
-        "write" => title.strip_prefix("write ").map(|p| ("Wrote", "Writing", p)),
+        "edit" => title
+            .strip_prefix("edit ")
+            .map(|p| ("Edited", "Editing", p)),
+        "write" => title
+            .strip_prefix("write ")
+            .map(|p| ("Wrote", "Writing", p)),
         "read" => title.strip_prefix("read ").map(|p| ("Read", "Reading", p)),
         _ => None,
     };
@@ -504,9 +517,11 @@ fn render_tool_header(
                 diff_badge = format!("  +{} -{}", fc.added, fc.removed);
             }
         }
-        let meta = format!("  {}", meta_parts.join(" · "));
+        let meta = format!("  {}", meta_parts.join(" - "));
         let budget = width
-            .saturating_sub(display_width(verb) + display_width(&diff_badge) + display_width(&meta) + 4)
+            .saturating_sub(
+                display_width(verb) + display_width(&diff_badge) + display_width(&meta) + 4,
+            )
             .max(10);
 
         spans.push(LinkedSpan {
@@ -545,7 +560,7 @@ fn render_tool_header(
                 .rev()
                 .map(|l| l.text.trim())
                 .find(|l| !l.is_empty())
-                .map(|l| format!(" · {l}"))
+                .map(|l| format!(" - {l}"))
                 .unwrap_or_default()
         } else {
             String::new()
@@ -555,7 +570,7 @@ fn render_tool_header(
         } else {
             ""
         };
-        let meta = format!("  {}", meta_parts.join(" · "));
+        let meta = format!("  {}", meta_parts.join(" - "));
         let reserved = 2 + display_width(&meta) + display_width(out_pill);
         let title_budget = width.saturating_sub(reserved).max(10);
         let main_label = if !live_tail.is_empty() {
@@ -612,7 +627,12 @@ fn draw_welcome(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let mut rows = vec![
         Line::from(""),
         Line::from(vec![
-            Span::styled("  Envoy  ", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  Envoy  ",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(
                 truncate_width(&app.cwd_label(), w.saturating_sub(12)),
                 Style::default().fg(theme.text),
@@ -621,11 +641,17 @@ fn draw_welcome(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     ];
 
     if let Some((prov, model)) = resolve_active_provider(&app.data_dir) {
-        let budget = crate::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
+        let budget =
+            crate::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
         rows.push(Line::from(vec![
             Span::styled("  model  ", Style::default().fg(theme.dim)),
             Span::styled(
-                format!("{}  ({} · compact {})", model.model_id, budget.tier, fmt_tokens(budget.compact_at)),
+                format!(
+                    "{}  ({} - compact {})",
+                    model.model_id,
+                    budget.tier,
+                    fmt_tokens(budget.compact_at)
+                ),
                 Style::default().fg(theme.secondary),
             ),
         ]));
@@ -642,7 +668,7 @@ fn draw_welcome(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         Span::styled("  tools  ", Style::default().fg(theme.dim)),
         Span::styled(
             format!(
-                "{} mcp · {} skills · perm:{}",
+                "{} mcp - {} skills - perm:{}",
                 mcp.servers.len(),
                 skills.len(),
                 app.perm_mode.label()
@@ -653,14 +679,14 @@ fn draw_welcome(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     rows.push(Line::from(""));
     rows.push(Line::styled(
         truncate_width(
-            "  Click any underlined file link to review in the right Inspector · Drag divider to resize",
+            "  Click any underlined file link to review in the right Inspector - Drag divider to resize",
             w,
         ),
         Style::default().fg(theme.dim),
     ));
     rows.push(Line::styled(
         truncate_width(
-            "  Shift+Tab permissions · Ctrl+B panel · Ctrl+O expand · / commands",
+            "  Shift+Tab permissions - Ctrl+B panel - Ctrl+O expand - / commands",
             w,
         ),
         Style::default().fg(theme.dim),

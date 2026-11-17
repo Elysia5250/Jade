@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -295,7 +296,12 @@ impl Session {
         }
     }
 
-    pub fn record_file_change(&mut self, path: String, before: String, after: String) -> (usize, usize) {
+    pub fn record_file_change(
+        &mut self,
+        path: String,
+        before: String,
+        after: String,
+    ) -> (usize, usize) {
         let now = now_ms();
         if let Some(existing) = self.changed_files.iter_mut().find(|f| f.path == path) {
             existing.after = after;
@@ -419,6 +425,34 @@ pub fn list_sessions(data_dir: &Path) -> Vec<SessionSummary> {
     out
 }
 
+/// One row per directory, keeping the newest session title.
+pub struct WorkspaceHit {
+    pub cwd: PathBuf,
+    pub title: String,
+    pub updated_ms: u64,
+}
+
+pub fn recent_workspaces(data_dir: &Path) -> Vec<WorkspaceHit> {
+    let mut best: BTreeMap<PathBuf, WorkspaceHit> = BTreeMap::new();
+    for summary in list_sessions(data_dir) {
+        let key = std::fs::canonicalize(&summary.cwd).unwrap_or_else(|_| summary.cwd.clone());
+        let hit = best.entry(key.clone()).or_insert(WorkspaceHit {
+            cwd: key,
+            title: String::new(),
+            updated_ms: 0,
+        });
+        if summary.updated_ms >= hit.updated_ms {
+            hit.updated_ms = summary.updated_ms;
+            hit.title = summary.title;
+            hit.cwd = std::fs::canonicalize(&summary.cwd).unwrap_or(summary.cwd);
+        }
+    }
+    let mut rows: Vec<_> = best.into_values().collect();
+    rows.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms));
+    rows.truncate(12);
+    rows
+}
+
 pub fn latest_session_for_cwd(data_dir: &Path, cwd: &Path) -> Option<Session> {
     let list = list_sessions(data_dir);
     let canon = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
@@ -430,7 +464,8 @@ pub fn latest_session_for_cwd(data_dir: &Path, cwd: &Path) -> Option<Session> {
             }
         }
     }
-    list.first().and_then(|s| load_session(data_dir, &s.id).ok())
+    list.first()
+        .and_then(|s| load_session(data_dir, &s.id).ok())
 }
 
 fn new_session_id(now_ms: u64) -> String {

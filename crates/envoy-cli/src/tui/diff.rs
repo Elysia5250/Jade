@@ -115,7 +115,10 @@ fn render_unified<'a>(
                     Span::styled(num_str, Style::default().fg(theme.dim).bg(base_bg)),
                     Span::styled(
                         format!("{marker} "),
-                        Style::default().fg(fg).bg(base_bg).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(fg)
+                            .bg(base_bg)
+                            .add_modifier(Modifier::BOLD),
                     ),
                 ];
                 let code_budget = width.saturating_sub(8).max(8);
@@ -133,11 +136,13 @@ fn render_unified<'a>(
                             .bg(word_bg)
                             .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(if change.tag() == ChangeTag::Equal {
-                            theme.text
-                        } else {
-                            fg
-                        }).bg(base_bg)
+                        Style::default()
+                            .fg(if change.tag() == ChangeTag::Equal {
+                                theme.text
+                            } else {
+                                fg
+                            })
+                            .bg(base_bg)
                     };
                     spans.push(Span::styled(slice, st));
                 }
@@ -205,10 +210,19 @@ fn render_split<'a>(
 
         for op in group {
             for change in diff.iter_changes(&op) {
-                let text = change.value().trim_end_matches(&['\n', '\r'][..]).to_string();
+                let text = change
+                    .value()
+                    .trim_end_matches(&['\n', '\r'][..])
+                    .to_string();
                 match change.tag() {
                     ChangeTag::Equal => {
-                        flush_split_pair(&mut left_rows, &mut right_rows, code_w, theme, &mut lines);
+                        flush_split_pair(
+                            &mut left_rows,
+                            &mut right_rows,
+                            code_w,
+                            theme,
+                            &mut lines,
+                        );
                         let old_i = change.old_index().map(|i| i + 1);
                         let new_i = change.new_index().map(|i| i + 1);
                         lines.push(format_split_row(
@@ -267,7 +281,7 @@ fn format_split_row(
 ) -> Line<'static> {
     let mut spans = Vec::new();
     push_split_half(&mut spans, left, code_w, theme);
-    spans.push(Span::styled(" │ ", Style::default().fg(theme.border)));
+    spans.push(Span::styled(" | ", Style::default().fg(theme.border)));
     push_split_half(&mut spans, right, code_w, theme);
     Line::from(spans)
 }

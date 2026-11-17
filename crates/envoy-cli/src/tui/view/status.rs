@@ -13,7 +13,8 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
     let mut right_spans: Vec<Span> = Vec::new();
     if let Some((prov, model)) = resolve_active_provider(&app.data_dir) {
         let (used, estimated) = context_used(&app.session);
-        let budget = crate::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
+        let budget =
+            crate::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
         let window = budget.compact_at;
         let ratio = if window == 0 {
             0.0
@@ -28,7 +29,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
             theme.accent
         };
         if app.agent_running {
-            right_spans.push(Span::styled("● ", Style::default().fg(theme.accent)));
+            right_spans.push(Span::styled("* ", Style::default().fg(theme.accent)));
         }
         right_spans.push(Span::styled(
             model.model_id.clone(),
@@ -40,12 +41,16 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
         right_spans.push(Span::styled(empty, Style::default().fg(theme.border)));
         let mark = if estimated { "~" } else { "" };
         let cap_suffix = if budget.compact_at + 64_000 < budget.hard_window {
-            format!("·{}", fmt_tokens(budget.hard_window))
+            format!("~{}", fmt_tokens(budget.hard_window))
         } else {
             String::new()
         };
         right_spans.push(Span::styled(
-            format!("  {mark}{}/{}{cap_suffix}", fmt_tokens(used), fmt_tokens(window)),
+            format!(
+                "  {mark}{}/{}{cap_suffix}",
+                fmt_tokens(used),
+                fmt_tokens(window)
+            ),
             Style::default().fg(theme.dim),
         ));
     } else {
@@ -78,8 +83,15 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
     let suffix_w = if let Some((label, _)) = &toast {
         display_width(label)
     } else {
-        (if remote { display_width(&target_label) } else { 0 })
-            + (if offline { display_width(offline_label) } else { 0 })
+        (if remote {
+            display_width(&target_label)
+        } else {
+            0
+        }) + (if offline {
+            display_width(offline_label)
+        } else {
+            0
+        })
     };
     let sandbox_w = sandbox_label.map(|s| display_width(s) + 2).unwrap_or(0);
     let mode_w = display_width(mode) + 2 + display_width(perm_badge) + 2 + sandbox_w;
@@ -111,9 +123,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
     let mut left = vec![
         Span::styled(
             mode,
-            Style::default()
-                .fg(mode_color)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(perm_badge, Style::default().fg(perm_color)),
@@ -131,19 +141,28 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
         ));
     } else {
         if remote && left_budget > mode_w + display_width(&cwd) + 4 {
-            left.push(Span::styled(target_label, Style::default().fg(theme.secondary)));
+            left.push(Span::styled(
+                target_label,
+                Style::default().fg(theme.secondary),
+            ));
         }
         if offline {
             left.push(Span::styled(offline_label, Style::default().fg(theme.bad)));
         }
     }
 
-    let left_area = Rect {
-        width: area.width.saturating_sub(right_w),
-        ..area
-    };
-    frame.render_widget(Paragraph::new(Line::from(left)), left_area);
-    if right_w > 0 {
-        frame.render_widget(Paragraph::new(right).alignment(Alignment::Right), area);
+    let right_w_cells: usize = right.spans.iter().map(|s| display_width(&s.content)).sum();
+    let max_left = (area.width as usize)
+        .saturating_sub(right_w_cells)
+        .saturating_sub(1);
+    let mut left_w: usize = left.iter().map(|s| display_width(&s.content)).sum();
+    while left_w > max_left && left.len() > 1 {
+        left.pop();
+        left_w = left.iter().map(|s| display_width(&s.content)).sum();
     }
+    let gap = (area.width as usize).saturating_sub(left_w + right_w_cells);
+    let mut spans = left;
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.extend(right.spans);
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

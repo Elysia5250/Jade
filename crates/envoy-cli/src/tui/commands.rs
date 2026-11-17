@@ -52,7 +52,7 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     },
     SlashCommand {
         name: "permissions",
-        aliases: &["perm"],
+        aliases: &["permission", "perm"],
         args: "[mode|allow <rule>|deny <rule>]",
         about: "inspect or set permission mode and rules",
     },

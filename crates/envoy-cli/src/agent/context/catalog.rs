@@ -16,6 +16,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const UNKNOWN_FALLBACK_WINDOW: u64 = 65_536;
 const MODELS_DEV_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
+/// Family-table lookup. The table lives in `families` so this file stays under the size cap.
+pub fn builtin_model_cap(model_id: &str) -> Option<ModelCap> {
+    super::families::builtin_model_cap(model_id)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelCap {
     pub context_window: u64,
@@ -141,77 +146,6 @@ pub fn parse_size_suffix(model_id: &str) -> Option<u64> {
     None
 }
 
-/// Built-in 2026-11 model family capability table. Longest fragment wins.
-pub fn builtin_model_cap(model_id: &str) -> Option<ModelCap> {
-    let id = model_id.to_ascii_lowercase();
-    struct Rule {
-        frag: &'static str,
-        window: u64,
-        max_out: Option<u64>,
-        cliff: Option<u64>,
-    }
-    const TABLE: &[Rule] = &[
-        // Anthropic Claude 5 / Fable / Mythos (1M context, 128K output)
-        Rule { frag: "claude-fable", window: 1_000_000, max_out: Some(128_000), cliff: None },
-        Rule { frag: "claude-mythos", window: 1_000_000, max_out: Some(128_000), cliff: None },
-        Rule { frag: "claude-opus-5", window: 1_000_000, max_out: Some(128_000), cliff: None },
-        Rule { frag: "claude-sonnet-5", window: 1_000_000, max_out: Some(128_000), cliff: None },
-        Rule { frag: "claude-haiku-5", window: 1_000_000, max_out: Some(128_000), cliff: None },
-        // Anthropic Claude 3.x / 4.x (200K context)
-        Rule { frag: "claude", window: 200_000, max_out: Some(64_000), cliff: None },
-        // Google Gemini 4 / 2.5 / 3 (1M unified context)
-        Rule { frag: "gemini-4", window: 1_048_576, max_out: Some(65_536), cliff: None },
-        Rule { frag: "gemini", window: 1_048_576, max_out: Some(65_536), cliff: None },
-        // OpenAI GPT-6 / GPT-5.5+ (1.05M raw, 272K billing cliff)
-        Rule { frag: "gpt-6", window: 1_050_000, max_out: Some(128_000), cliff: Some(272_000) },
-        Rule { frag: "gpt-5.6", window: 1_050_000, max_out: Some(128_000), cliff: Some(272_000) },
-        Rule { frag: "gpt-5.5", window: 1_050_000, max_out: Some(128_000), cliff: Some(272_000) },
-        Rule { frag: "gpt-5", window: 400_000, max_out: Some(128_000), cliff: Some(272_000) },
-        Rule { frag: "gpt-4.1", window: 1_047_576, max_out: Some(32_768), cliff: None },
-        Rule { frag: "gpt-4o", window: 128_000, max_out: Some(16_384), cliff: None },
-        Rule { frag: "gpt-4-turbo", window: 128_000, max_out: Some(4_096), cliff: None },
-        Rule { frag: "o1", window: 200_000, max_out: Some(100_000), cliff: None },
-        Rule { frag: "o3", window: 200_000, max_out: Some(100_000), cliff: None },
-        Rule { frag: "o4", window: 200_000, max_out: Some(100_000), cliff: None },
-        // DeepSeek V4 (1M) vs legacy R1/Chat
-        Rule { frag: "deepseek-v4", window: 1_000_000, max_out: Some(384_000), cliff: None },
-        Rule { frag: "deepseek-flash", window: 1_000_000, max_out: Some(384_000), cliff: None },
-        Rule { frag: "deepseek-reasoner", window: 65_536, max_out: Some(32_768), cliff: None },
-        Rule { frag: "deepseek", window: 131_072, max_out: Some(32_768), cliff: None },
-        // Qwen4 / Qwen3.8
-        Rule { frag: "qwen4", window: 1_000_000, max_out: Some(262_144), cliff: None },
-        Rule { frag: "qwen3.8-max", window: 1_000_000, max_out: Some(131_072), cliff: None },
-        Rule { frag: "qwen3.8-flash-next", window: 262_144, max_out: Some(131_072), cliff: None },
-        Rule { frag: "qwen3.8-flash", window: 1_000_000, max_out: Some(131_072), cliff: None },
-        Rule { frag: "qwen3.8-2.4t", window: 262_144, max_out: Some(131_072), cliff: None },
-        Rule { frag: "qwen", window: 131_072, max_out: Some(32_768), cliff: None },
-        // xAI Grok
-        Rule { frag: "grok-4.7", window: 500_000, max_out: None, cliff: Some(200_000) },
-        Rule { frag: "grok-4.6", window: 500_000, max_out: None, cliff: Some(200_000) },
-        Rule { frag: "grok-4.5", window: 500_000, max_out: None, cliff: Some(200_000) },
-        Rule { frag: "grok-4.3", window: 1_000_000, max_out: None, cliff: Some(200_000) },
-        Rule { frag: "grok-4.20", window: 1_000_000, max_out: None, cliff: Some(200_000) },
-        Rule { frag: "grok-build", window: 256_000, max_out: None, cliff: None },
-        Rule { frag: "grok", window: 131_072, max_out: None, cliff: None },
-        // Moonshot Kimi & Z.ai GLM
-        Rule { frag: "kimi-k3", window: 1_048_576, max_out: Some(128_000), cliff: None },
-        Rule { frag: "kimi", window: 131_072, max_out: None, cliff: None },
-        Rule { frag: "glm-5", window: 1_048_576, max_out: Some(131_072), cliff: None },
-        Rule { frag: "glm", window: 131_072, max_out: None, cliff: None },
-        Rule { frag: "llama", window: 128_000, max_out: None, cliff: None },
-    ];
-    TABLE
-        .iter()
-        .filter(|r| id.contains(r.frag))
-        .max_by_key(|r| r.frag.len())
-        .map(|r| ModelCap {
-            context_window: r.window,
-            max_output: r.max_out,
-            pricing_cliff: r.cliff,
-            source: "builtin".into(),
-            updated_ms: 0,
-        })
-}
 
 /// Record a user or error-discovered override into `model_caps.json`.
 pub fn record_model_cap(
@@ -239,19 +173,192 @@ pub fn record_model_cap(
     let _ = save_caps(data_dir, &cache);
 }
 
-/// Fetch OpenAI-compatible `/models`, return sorted IDs, and persist any
-/// advertised context/output limits into `model_caps.json`.
-pub async fn fetch_openai_models_with_caps(
+/// One model advertised by a provider's `/models` document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedModel {
+    pub id: String,
+    pub route: Option<crate::auth::ModelRoute>,
+}
+
+/// Parse an OpenAI-style `{ "data": [ { "id", "api"? } ] }` document.
+/// An empty `api` object keeps the provider default. A non-empty block with no
+/// chat, messages, or responses URL we can call is omitted.
+pub fn parse_listed_models(value: &Value) -> Vec<ListedModel> {
+    let Some(arr) = value["data"].as_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for item in arr {
+        let Some(id) = item["id"].as_str().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        match item.get("api").and_then(Value::as_object) {
+            Some(obj) if obj.is_empty() => out.push(ListedModel {
+                id: id.to_string(),
+                route: None,
+            }),
+            Some(_) => {
+                let Some(route) = route_from_api_block(&item["api"]) else {
+                    continue;
+                };
+                out.push(ListedModel {
+                    id: id.to_string(),
+                    route: Some(route),
+                });
+            }
+            None => out.push(ListedModel {
+                id: id.to_string(),
+                route: None,
+            }),
+        }
+    }
+    out
+}
+
+fn absolute_http_url(base: &str) -> bool {
+    reqwest::Url::parse(base.trim())
+        .ok()
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some())
+}
+
+fn http_route_base(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    let base = obj.get(key)?.get("base_url")?.as_str()?.trim();
+    absolute_http_url(base).then(|| base.trim_end_matches('/').to_string())
+}
+
+fn route_from_api_block(api: &Value) -> Option<crate::auth::ModelRoute> {
+    let obj = api.as_object()?;
+    if let Some(base_url) = http_route_base(obj, "chat-completions") {
+        return Some(crate::auth::ModelRoute {
+            protocol: crate::auth::ProviderProtocol::OpenAiChat,
+            base_url,
+        });
+    }
+    if let Some(base_url) = http_route_base(obj, "messages") {
+        return Some(crate::auth::ModelRoute {
+            protocol: crate::auth::ProviderProtocol::Anthropic,
+            base_url,
+        });
+    }
+    if let Some(base) = http_route_base(obj, "responses") {
+        let base_url = if base.ends_with("/responses") {
+            base
+        } else {
+            format!("{base}/responses")
+        };
+        return Some(crate::auth::ModelRoute {
+            protocol: crate::auth::ProviderProtocol::OpenAiCodex,
+            base_url,
+        });
+    }
+    None
+}
+
+/// Drop ids the provider still lists but no longer accepts.
+pub fn usable_listed_models(provider_id: &str, mut models: Vec<ListedModel>) -> Vec<ListedModel> {
+    models.retain(|m| !crate::auth::is_retired_model(provider_id, &m.id));
+    let mut seen = Vec::new();
+    models.retain(|m| {
+        if seen.iter().any(|id: &String| id == &m.id) {
+            return false;
+        }
+        seen.push(m.id.clone());
+        true
+    });
+    models.sort_by(|a, b| a.id.cmp(&b.id));
+    models
+}
+
+fn preferred_listed_id(provider_id: &str, ids: &[String]) -> Option<String> {
+    if provider_id == "deepseek" {
+        if let Some(id) = ids.iter().find(|id| id.as_str() == "deepseek-flash") {
+            return Some(id.clone());
+        }
+    }
+    ids.first().cloned()
+}
+
+/// Save a fetched list onto the provider and point the active model at a live id.
+pub fn store_listed_models(
+    data_dir: &Path,
+    provider_id: &str,
+    listed: &[ListedModel],
+) -> anyhow::Result<Option<crate::auth::ModelRef>> {
+    use crate::auth::{load_auth, load_prefs, save_auth, save_prefs, ModelRef};
+    if listed.is_empty() {
+        return Ok(None);
+    }
+    let mut auth = load_auth(data_dir);
+    let Some(prov) = auth.credentials.get_mut(provider_id) else {
+        return Ok(None);
+    };
+    let mut ids = Vec::new();
+    prov.model_routes.clear();
+    for model in listed {
+        if ids.iter().any(|id: &String| id == &model.id) {
+            continue;
+        }
+        ids.push(model.id.clone());
+        if let Some(route) = model
+            .route
+            .clone()
+            .filter(|route| absolute_http_url(&route.base_url))
+        {
+            prov.model_routes.insert(model.id.clone(), route);
+        }
+    }
+    prov.custom_models = ids.clone();
+    save_auth(data_dir, &auth)?;
+
+    let mut prefs = load_prefs(data_dir);
+    let points_here = prefs
+        .active
+        .as_ref()
+        .is_some_and(|active| active.provider_id == provider_id);
+    if !points_here && prefs.active.is_some() {
+        return Ok(None);
+    }
+    let keep = prefs.active.as_ref().is_some_and(|active| {
+        !active.model_id.is_empty()
+            && !crate::auth::is_retired_model(&active.provider_id, &active.model_id)
+            && ids.iter().any(|id| id == &active.model_id)
+    });
+    let chosen = if keep {
+        prefs.active.clone()
+    } else {
+        preferred_listed_id(provider_id, &ids).map(|model_id| ModelRef {
+            provider_id: provider_id.to_string(),
+            model_id,
+        })
+    };
+    if let Some(mref) = &chosen {
+        prefs.active = Some(mref.clone());
+        prefs.recent.retain(|r| r != mref);
+        prefs.recent.insert(0, mref.clone());
+        prefs.recent.truncate(12);
+        save_prefs(data_dir, &prefs)?;
+    }
+    Ok(chosen)
+}
+
+/// Fetch `/models`, persist advertised context limits, and return callable ids.
+pub async fn fetch_listed_models(
     http: &reqwest::Client,
     data_dir: Option<&Path>,
     provider_id: &str,
+    protocol: crate::auth::ProviderProtocol,
     base_url: &str,
     api_key: &str,
-) -> Vec<String> {
+) -> Vec<ListedModel> {
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let mut req = http.get(&url);
     if !api_key.is_empty() {
-        req = req.bearer_auth(api_key);
+        req = match protocol {
+            crate::auth::ProviderProtocol::Anthropic => req
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01"),
+            _ => req.bearer_auth(api_key),
+        };
     }
     let Ok(resp) = req.timeout(Duration::from_secs(8)).send().await else {
         return Vec::new();
@@ -262,44 +369,50 @@ pub async fn fetch_openai_models_with_caps(
     let Ok(val) = resp.json::<Value>().await else {
         return Vec::new();
     };
-    let mut models = Vec::new();
+    remember_caps_from_models(data_dir, provider_id, &val);
+    usable_listed_models(provider_id, parse_listed_models(&val))
+}
+
+pub(crate) fn remember_caps_from_models(data_dir: Option<&Path>, provider_id: &str, val: &Value) {
+    let Some(arr) = val["data"].as_array() else {
+        return;
+    };
     let mut discovered = Vec::new();
-    if let Some(arr) = val["data"].as_array() {
-        for item in arr {
-            let Some(id) = item["id"].as_str() else {
-                continue;
-            };
-            models.push(id.to_string());
-            if let Some(ctx) = extract_context_from_model_json(item) {
-                let max_out = extract_output_from_model_json(item);
-                discovered.push((id.to_string(), ctx, max_out));
-            }
+    for item in arr {
+        let Some(id) = item["id"].as_str() else {
+            continue;
+        };
+        if let Some(ctx) = extract_context_from_model_json(item) {
+            let max_out = extract_output_from_model_json(item);
+            discovered.push((id.to_string(), ctx, max_out));
         }
     }
-    if let Some(dir) = data_dir.filter(|_| !discovered.is_empty()) {
-        let mut cache = load_caps(dir);
-        let ts = now_ms();
-        for (id, ctx, max_out) in discovered {
-            let key = cap_key(provider_id, &id);
-            if cache.models.get(&key).is_some_and(|c| c.source == "override") {
-                continue;
-            }
-            cache.models.insert(
-                key,
-                ModelCap {
-                    context_window: ctx,
-                    max_output: max_out,
-                    pricing_cliff: builtin_model_cap(&id).and_then(|c| c.pricing_cliff),
-                    source: "api".into(),
-                    updated_ms: ts,
-                },
-            );
+    let Some(dir) = data_dir.filter(|_| !discovered.is_empty()) else {
+        return;
+    };
+    let mut cache = load_caps(dir);
+    let ts = now_ms();
+    for (id, ctx, max_out) in discovered {
+        let key = cap_key(provider_id, &id);
+        if cache
+            .models
+            .get(&key)
+            .is_some_and(|c| c.source == "override")
+        {
+            continue;
         }
-        let _ = save_caps(dir, &cache);
+        cache.models.insert(
+            key,
+            ModelCap {
+                context_window: ctx,
+                max_output: max_out,
+                pricing_cliff: builtin_model_cap(&id).and_then(|c| c.pricing_cliff),
+                source: "api".into(),
+                updated_ms: ts,
+            },
+        );
     }
-    models.sort();
-    models.dedup();
-    models
+    let _ = save_caps(dir, &cache);
 }
 
 fn extract_context_from_model_json(item: &Value) -> Option<u64> {
@@ -321,7 +434,11 @@ fn extract_context_from_model_json(item: &Value) -> Option<u64> {
 }
 
 fn extract_output_from_model_json(item: &Value) -> Option<u64> {
-    for key in ["max_output_tokens", "max_completion_tokens", "output_token_limit"] {
+    for key in [
+        "max_output_tokens",
+        "max_completion_tokens",
+        "output_token_limit",
+    ] {
         if let Some(v) = item[key].as_u64().filter(|&n| n > 0) {
             return Some(v);
         }
@@ -413,5 +530,86 @@ mod tests {
         assert_eq!(context_window("glm-5.3"), 1_048_576);
         assert_eq!(context_window("my-local-model-32k"), 32_768);
         assert_eq!(context_window("unknown-relay-model"), 65_536);
+    }
+
+    #[test]
+    fn drops_retired_deepseek_ids_and_keeps_live_ones() {
+        let raw = serde_json::json!({
+            "data": [
+                {"id": "deepseek-chat"},
+                {"id": "deepseek-flash"},
+                {"id": "deepseek-reasoner"},
+                {"id": "deepseek-v4-pro"},
+                {"id": "deepseek-chat"}
+            ]
+        });
+        let usable = usable_listed_models("deepseek", parse_listed_models(&raw));
+        let ids: Vec<&str> = usable.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["deepseek-flash", "deepseek-v4-pro"]);
+    }
+
+    #[test]
+    fn routes_opencode_models_by_api_block() {
+        let raw = serde_json::json!({
+            "data": [
+                {"id": "glm-5", "api": {"chat-completions": {"base_url": "https://opencode.ai/inference/openai/v1"}}},
+                {"id": "claude-haiku-5-5", "api": {"messages": {"base_url": "https://opencode.ai/inference/anthropic/v1"}}},
+                {"id": "gpt-6-luna", "api": {"responses": {"base_url": "https://opencode.ai/inference/go/openai/v1"}}},
+                {"id": "gemini-4-argon", "api": {"generate-content": {"base_url": "https://opencode.ai/inference/google/v1beta"}}}
+            ]
+        });
+        let listed = parse_listed_models(&raw);
+        let ids: Vec<&str> = listed.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["glm-5", "claude-haiku-5-5", "gpt-6-luna"]);
+        assert_eq!(
+            listed[2].route.as_ref().map(|r| r.base_url.as_str()),
+            Some("https://opencode.ai/inference/go/openai/v1/responses")
+        );
+        assert!(matches!(
+            listed[1].route.as_ref().map(|r| r.protocol),
+            Some(crate::auth::ProviderProtocol::Anthropic)
+        ));
+    }
+
+    #[test]
+    fn stored_list_becomes_the_active_model() {
+        let dir = std::env::temp_dir().join(format!("envoy-models-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sp = crate::auth::StoredProvider {
+            id: "deepseek".into(),
+            name: "DeepSeek".into(),
+            protocol: crate::auth::ProviderProtocol::OpenAiChat,
+            base_url: "https://api.deepseek.com/v1".into(),
+            credential: crate::auth::Credential::ApiKey { key: "sk".into() },
+            custom_models: vec!["deepseek-chat".into()],
+            model_routes: BTreeMap::new(),
+            updated_ms: 0,
+        };
+        crate::auth::record_provider_login(&dir, sp, Some("deepseek-chat".into())).unwrap();
+        let listed = usable_listed_models(
+            "deepseek",
+            parse_listed_models(&serde_json::json!({
+                "data": [
+                    {"id": "deepseek-chat"},
+                    {"id": "deepseek-reasoner"},
+                    {"id": "deepseek-v4-pro"},
+                    {"id": "deepseek-flash"}
+                ]
+            })),
+        );
+        let active = store_listed_models(&dir, "deepseek", &listed)
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.model_id, "deepseek-flash");
+        let ids: Vec<_> = crate::auth::available_models(&dir)
+            .into_iter()
+            .map(|m| m.model_id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec!["deepseek-flash".to_string(), "deepseek-v4-pro".to_string()]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

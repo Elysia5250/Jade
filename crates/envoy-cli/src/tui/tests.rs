@@ -33,7 +33,12 @@ fn job(id: JobId, state: JobState) -> Job {
 fn opens_with_input_focused_and_welcome_screen() {
     use ratatui::backend::TestBackend;
     let dir = tmpdir();
-    let mut app = App::new(dir.clone(), "local".into(), None, PathBuf::from("/tmp/project"));
+    let mut app = App::new(
+        dir.clone(),
+        "local".into(),
+        None,
+        PathBuf::from("/tmp/project"),
+    );
     app.connected = true;
     assert_eq!(app.focus, Focus::Input);
 
@@ -74,13 +79,19 @@ fn status_line_shows_model_workspace_and_context() {
                 key: "sk-test".into(),
             },
             custom_models: Vec::new(),
+            model_routes: std::collections::BTreeMap::new(),
             updated_ms: now_ms(),
         },
         Some("claude-sonnet-4-5".into()),
     )
     .unwrap();
 
-    let mut app = App::new(dir.clone(), "local".into(), None, PathBuf::from("/tmp/project"));
+    let mut app = App::new(
+        dir.clone(),
+        "local".into(),
+        None,
+        PathBuf::from("/tmp/project"),
+    );
     app.connected = true;
     app.session.prompt_tokens = 50_000;
     assert_eq!(app.mode, InputMode::Agent);
@@ -114,7 +125,10 @@ fn slash_menu_filters_completes_and_opens_login() {
     assert_eq!(app.input, "/login");
 
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(matches!(app.modal, Some(Modal::Login(LoginModal::SelectProvider { .. }))));
+    assert!(matches!(
+        app.modal,
+        Some(Modal::Login(LoginModal::SelectProvider { .. }))
+    ));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -144,7 +158,7 @@ fn login_api_key_flow_persists_and_enables_agent_mode() {
     assert_eq!(app.mode, InputMode::Agent);
     let (prov, model) = resolve_active_provider(&dir).unwrap();
     assert_eq!(prov.id, "deepseek");
-    assert_eq!(model.model_id, "deepseek-v4.1-flash");
+    assert!(model.model_id.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -247,7 +261,10 @@ fn renders_transcript_cards_and_sidebar() {
     app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert!(matches!(
         app.session.items[1],
-        TranscriptItem::Tool { collapsed: true, .. }
+        TranscriptItem::Tool {
+            collapsed: true,
+            ..
+        }
     ));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -288,6 +305,7 @@ async fn context_budget_compacted_and_handoff_render_cleanly() {
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
         credential: Credential::ApiKey { key: "k".into() },
         custom_models: vec![],
+        model_routes: std::collections::BTreeMap::new(),
         updated_ms: 0,
     };
     record_provider_login(&dir, prov, Some("gemini-4-hydrogen".into())).unwrap();
@@ -307,21 +325,35 @@ async fn context_budget_compacted_and_handoff_render_cleanly() {
     let draw_text = |app: &mut App| -> String {
         let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
         terminal.draw(|frame| view::draw(frame, app)).unwrap();
-        terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect()
+        let buf = terminal.backend().buffer().clone();
+        let width = buf.area.width;
+        let rows: Vec<String> = (0..buf.area.height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect();
+        if let Some(status) = rows.iter().find(|row| row.contains("~1.0m")) {
+            assert!(
+                status.contains("agent"),
+                "status row clipped the left side:\n{status}"
+            );
+            assert_eq!(
+                display_width(status),
+                width as usize,
+                "status row:\n{status}"
+            );
+        }
+        rows.concat()
     };
 
     let first = draw_text(&mut app);
-    assert!(first.contains("50k/512k·1.0m"), "status bar:\n{first}");
+    assert!(first.contains("50k/512k~1.0m"), "status bar:\n{first}");
 
     app.run_slash("/budget focused");
     let second = draw_text(&mut app);
-    assert!(second.contains("50k/200k·1.0m"), "status bar:\n{second}");
+    assert!(second.contains("50k/200k~1.0m"), "status bar:\n{second}");
 
     let old_id = app.session.id.clone();
     app.apply_event(
@@ -342,7 +374,11 @@ async fn context_budget_compacted_and_handoff_render_cleanly() {
         },
     );
     assert_eq!(app.session.messages.len(), 1);
-    assert!(app.session.items.iter().any(|i| matches!(i, TranscriptItem::User { .. })));
+    assert!(app
+        .session
+        .items
+        .iter()
+        .any(|i| matches!(i, TranscriptItem::User { .. })));
 
     app.apply_event(
         2,
@@ -355,7 +391,9 @@ async fn context_budget_compacted_and_handoff_render_cleanly() {
     );
     assert_ne!(app.session.id, old_id);
     assert_eq!(app.session.messages.len(), 2);
-    assert!(app.session.messages[0].content.contains("<handoff_context>"));
+    assert!(app.session.messages[0]
+        .content
+        .contains("<handoff_context>"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -382,5 +420,154 @@ fn permission_mode_cycles_on_shift_tab_and_renders_status_badge() {
         .map(|c| c.symbol())
         .collect();
     assert!(text.contains("perm:plan"), "status bar:\n{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn slash_choices_open_a_picker_instead_of_cycling() {
+    let dir = tmpdir();
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    assert_eq!(app.perm_mode, PermissionMode::Default);
+    assert_eq!(app.mode, InputMode::Shell);
+
+    app.run_slash("/permission");
+    {
+        let Some(Modal::Picker(picker)) = app.modal.as_ref() else {
+            panic!("expected a permission picker");
+        };
+        assert_eq!(picker.title, "permissions");
+        assert_eq!(picker.selected, 0);
+        assert!(picker
+            .items
+            .iter()
+            .any(|(label, _)| label.contains("accept-edits")));
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.modal.is_none());
+    assert_eq!(app.perm_mode, PermissionMode::AcceptEdits);
+
+    app.run_slash("/permissions plan");
+    assert!(app.modal.is_none());
+    assert_eq!(app.perm_mode, PermissionMode::Plan);
+
+    app.run_slash("/mode");
+    {
+        let Some(Modal::Picker(picker)) = app.modal.as_ref() else {
+            panic!("expected a mode picker");
+        };
+        assert_eq!(picker.selected, 1);
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.mode, InputMode::Agent);
+
+    app.run_slash("/theme");
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.theme, 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn welcome_picker_selects_a_recent_workspace() {
+    use ratatui::backend::TestBackend;
+    let dir = tmpdir();
+    let here = dir.join("here");
+    let other = dir.join("other");
+    std::fs::create_dir_all(&here).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let mut saved = Session::new(other.clone(), "local".into());
+    saved.title = "other workspace".into();
+    saved.updated_ms = now_ms();
+    let item_id = saved.alloc_id();
+    saved.items.push(TranscriptItem::User {
+        id: item_id,
+        text: "hello".into(),
+        mode: "Agent".into(),
+        cwd: other.display().to_string(),
+        ts_ms: now_ms(),
+    });
+    save_session(&dir, &saved).unwrap();
+
+    let mut app = App::new(dir.clone(), "local".into(), None, here.clone());
+    app.open_welcome();
+    assert_eq!(app.welcome.as_ref().unwrap().rows.len(), 3);
+    assert_eq!(app.welcome.as_ref().unwrap().selected, 0);
+
+    let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
+    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(text.contains("Pick a workspace"), "{text}");
+    assert!(text.contains("open a path"), "{text}");
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.welcome.as_ref().unwrap().path_mode);
+    for ch in dir.join("missing").display().to_string().chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let err = app
+        .welcome
+        .as_ref()
+        .unwrap()
+        .error
+        .clone()
+        .unwrap_or_default();
+    assert!(err.contains("not a directory"), "{err}");
+
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+    assert_eq!(app.welcome.as_ref().unwrap().selected, 1);
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.welcome.is_none());
+    assert_eq!(
+        std::fs::canonicalize(&app.session.cwd).unwrap(),
+        std::fs::canonicalize(&other).unwrap()
+    );
+    assert_eq!(app.session.id, saved.id);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn welcome_without_a_saved_session_mints_a_new_id() {
+    let dir = tmpdir();
+    let here = dir.join("here");
+    let fresh = dir.join("fresh");
+    std::fs::create_dir_all(&here).unwrap();
+    std::fs::create_dir_all(&fresh).unwrap();
+    let mut app = App::new(dir.clone(), "local".into(), None, here.clone());
+    let launch_id = app.session.id.clone();
+    app.open_welcome();
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.welcome.is_none());
+    assert_ne!(app.session.id, launch_id);
+    assert_eq!(
+        std::fs::canonicalize(&app.session.cwd).unwrap(),
+        std::fs::canonicalize(&here).unwrap()
+    );
+
+    let picked = app.session.id.clone();
+    app.open_welcome();
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    for ch in fresh.display().to_string().chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.welcome.is_none());
+    assert_ne!(app.session.id, picked);
+    assert_eq!(
+        std::fs::canonicalize(&app.session.cwd).unwrap(),
+        std::fs::canonicalize(&fresh).unwrap()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

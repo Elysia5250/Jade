@@ -2,7 +2,6 @@
 use super::*;
 
 impl App {
-
     pub(in crate::tui) fn run_command(&mut self, command: Command) -> Action {
         match command {
             Command::FocusInput => {
@@ -39,15 +38,100 @@ impl App {
                 self.set_toast(format!("mode: {}", self.mode.label()), false);
                 Action::None
             }
-            Command::CyclePermission => {
-                self.set_permission_mode(self.perm_mode.cycle());
+            Command::OpenModePicker => {
+                self.open_mode_picker();
+                Action::None
+            }
+            Command::OpenPermissionPicker => {
+                self.open_permission_picker();
+                Action::None
+            }
+            Command::OpenThemePicker => {
+                self.open_theme_picker();
+                Action::None
+            }
+            Command::OpenTrustPicker => {
+                self.open_trust_picker();
+                Action::None
+            }
+            Command::OpenSidebarPicker => {
+                self.open_sidebar_picker();
+                Action::None
+            }
+            Command::OpenMousePicker => {
+                self.open_mouse_picker();
+                Action::None
+            }
+            Command::OpenBudgetPicker => {
+                self.open_budget_picker();
+                Action::None
+            }
+            Command::SetMode(mode) => {
+                self.mode = mode;
+                self.set_toast(format!("mode: {}", mode.label()), false);
+                Action::None
+            }
+            Command::SetPermission(mode) => {
+                self.set_permission_mode(mode);
+                Action::None
+            }
+            Command::SetTheme(idx) => {
+                self.theme = idx % THEMES.len();
+                self.save_ui_prefs();
+                self.set_toast(format!("theme: {}", THEMES[self.theme].0), false);
+                Action::None
+            }
+            Command::SetTrust(on) => {
+                match set_workspace_trusted(&self.data_dir, &self.session.cwd, on) {
+                    Ok(()) => self.set_toast(
+                        format!("workspace {}", if on { "trusted" } else { "untrusted" }),
+                        false,
+                    ),
+                    Err(e) => self.set_toast(format!("{e:#}"), true),
+                }
+                Action::None
+            }
+            Command::SetSidebar(shown) => {
+                self.show_sidebar = shown;
+                self.inspector.force_open = shown;
+                self.save_ui_prefs();
+                self.set_toast(
+                    if shown {
+                        "inspector: shown"
+                    } else {
+                        "inspector: hidden"
+                    },
+                    false,
+                );
+                Action::None
+            }
+            Command::ResetSidebar => {
+                self.inspector.dragged_ratio = None;
+                self.show_sidebar = true;
+                self.inspector.force_open = true;
+                self.set_toast("inspector width reset", false);
+                Action::None
+            }
+            Command::SetMouse(on) => {
+                self.mouse_capture = on;
+                self.set_toast(
+                    if on {
+                        "mouse capture: on (drag to OSC52 copy, click links)"
+                    } else {
+                        "mouse capture: off (native terminal selection)"
+                    },
+                    false,
+                );
+                Action::SetMouseCapture(on)
+            }
+            Command::SetBudget(tier) => {
+                self.run_budget_command(tier);
                 Action::None
             }
             Command::ToggleExpand => {
                 self.toggle_expand_cards();
                 Action::None
             }
-            Command::ToggleMouseCapture => Action::ToggleMouseCapture,
             Command::Cancel => Action::Cancel,
             Command::ToggleSidebar => {
                 self.show_sidebar = !self.show_sidebar;
@@ -67,7 +151,6 @@ impl App {
         }
     }
 
-
     pub(in crate::tui) fn toggle_expand_cards(&mut self) {
         if let Some(idx) = self.selected_card {
             if let Some(item) = self.session.items.get_mut(idx) {
@@ -84,14 +167,19 @@ impl App {
         }
         // Otherwise fold/unfold every tool card and reasoning block.
         let any_collapsed = self.session.items.iter().any(|i| {
-            matches!(i, TranscriptItem::Tool { collapsed: true, .. })
-                || matches!(
-                    i,
-                    TranscriptItem::Assistant {
-                        reasoning_collapsed: true,
-                        ..
-                    }
-                )
+            matches!(
+                i,
+                TranscriptItem::Tool {
+                    collapsed: true,
+                    ..
+                }
+            ) || matches!(
+                i,
+                TranscriptItem::Assistant {
+                    reasoning_collapsed: true,
+                    ..
+                }
+            )
         });
         let target_state = !any_collapsed;
         for item in &mut self.session.items {
@@ -106,7 +194,6 @@ impl App {
         }
         self.persist_session();
     }
-
 
     pub(in crate::tui) fn run_slash(&mut self, text: &str) -> Action {
         let body = text.trim_start_matches('/').trim();
@@ -131,7 +218,10 @@ impl App {
                                 self.set_toast(format!("logged out of {id}"), false);
                             }
                             Ok(false) => {
-                                self.set_toast(format!("{id} comes from env var; unset env to remove"), true);
+                                self.set_toast(
+                                    format!("{id} comes from env var; unset env to remove"),
+                                    true,
+                                );
                             }
                             Err(e) => self.set_toast(format!("{e:#}"), true),
                         }
@@ -146,7 +236,9 @@ impl App {
                             }
                             self.set_toast(format!("logged out of {arg}"), false);
                         }
-                        Ok(false) => self.set_toast(format!("unknown stored provider `{arg}`"), true),
+                        Ok(false) => {
+                            self.set_toast(format!("unknown stored provider `{arg}`"), true)
+                        }
                         Err(e) => self.set_toast(format!("{e:#}"), true),
                     }
                 }
@@ -172,7 +264,7 @@ impl App {
                         self.set_toast(format!("model: {pid}/{mid}"), false);
                     }
                 } else {
-                    self.set_toast("no provider connected — run /login first", true);
+                    self.set_toast("no provider connected - run /login first", true);
                 }
                 Action::None
             }
@@ -188,9 +280,31 @@ impl App {
                 self.run_budget_command(arg);
                 Action::None
             }
-            "mode" => self.run_command(Command::ToggleMode),
-            "permissions" | "perm" => {
-                self.run_permissions_command(arg);
+            "mode" => {
+                if arg.is_empty() {
+                    self.open_mode_picker();
+                } else {
+                    let mode = match arg.to_ascii_lowercase().as_str() {
+                        "agent" => Some(InputMode::Agent),
+                        "shell" => Some(InputMode::Shell),
+                        _ => None,
+                    };
+                    match mode {
+                        Some(mode) => {
+                            self.mode = mode;
+                            self.set_toast(format!("mode: {}", mode.label()), false);
+                        }
+                        None => self.set_toast("usage: /mode [agent|shell]", true),
+                    }
+                }
+                Action::None
+            }
+            "permissions" | "permission" | "perm" => {
+                if arg.is_empty() {
+                    self.open_permission_picker();
+                } else {
+                    self.run_permissions_command(arg);
+                }
                 Action::None
             }
             "plan" => {
@@ -199,7 +313,7 @@ impl App {
             }
             "trust" => {
                 let target = match arg.trim().to_ascii_lowercase().as_str() {
-                    "" => !is_workspace_trusted(&self.data_dir, &self.session.cwd),
+                    "" => return self.run_command(Command::OpenTrustPicker),
                     "on" | "true" | "yes" | "1" => true,
                     "off" | "false" | "no" | "0" => false,
                     _ => {
@@ -209,10 +323,7 @@ impl App {
                 };
                 match set_workspace_trusted(&self.data_dir, &self.session.cwd, target) {
                     Ok(()) => self.set_toast(
-                        format!(
-                            "workspace {}",
-                            if target { "trusted" } else { "untrusted" }
-                        ),
+                        format!("workspace {}", if target { "trusted" } else { "untrusted" }),
                         false,
                     ),
                     Err(e) => self.set_toast(format!("{e:#}"), true),
@@ -264,12 +375,13 @@ impl App {
             }
             "sidebar" | "panel" => {
                 if arg.trim() == "reset" {
-                    self.inspector.dragged_ratio = None;
-                    self.show_sidebar = true;
-                    self.set_toast("inspector width reset", false);
+                    self.run_command(Command::ResetSidebar)
+                } else if arg.is_empty() {
+                    self.open_sidebar_picker();
                     Action::None
                 } else {
-                    self.run_command(Command::ToggleSidebar)
+                    self.set_toast("usage: /sidebar [reset]", true);
+                    Action::None
                 }
             }
             "diff" => {
@@ -301,7 +413,7 @@ impl App {
                 }
                 Action::None
             }
-            "mouse" => Action::ToggleMouseCapture,
+            "mouse" => self.run_command(Command::OpenMousePicker),
             "jobs" => {
                 self.show_sidebar = true;
                 self.inspector.force_open = true;
@@ -328,10 +440,10 @@ impl App {
                 self.set_toast("transcript cleared", false);
                 Action::None
             }
-            "theme" | "themes" => self.run_command(Command::NextTheme),
+            "theme" | "themes" => self.run_command(Command::OpenThemePicker),
             "help" => {
                 self.push_notice(
-                    "Shortcuts: Click underlined paths to review in right Inspector · Drag divider to resize · Alt+1..5 switch Inspector tabs · Ctrl+B toggle panel · Ctrl+O expand/collapse tools & thinking · Shift+Tab cycle permissions · /mouse toggle mouse capture · /diff /open",
+                    "Shortcuts: Click underlined paths to review in right Inspector - Drag divider to resize - Alt+1..5 switch Inspector tabs - Ctrl+B toggle panel - Ctrl+O expand/collapse tools & thinking - Shift+Tab cycle permissions - /mouse opens the picker (alt-m toggles) - /diff /open",
                     false,
                 );
                 Action::None
@@ -344,223 +456,6 @@ impl App {
         }
     }
 
-    fn run_permissions_command(&mut self, arg: &str) {
-        let trimmed = arg.trim();
-        if trimmed.is_empty() || trimmed == "status" {
-            let eng = PermissionEngine::new(
-                self.data_dir.clone(),
-                self.session.cwd.clone(),
-                self.session.id.clone(),
-                self.target.clone(),
-                self.perm_mode,
-            );
-            let loaded = eng.loaded_policies();
-            let trusted = eng.is_trusted();
-            let sandbox = if self.target == "local" || self.target.is_empty() {
-                envoy_core::sandbox::backend_label()
-            } else {
-                "remote"
-            };
-            self.push_notice(
-                format!(
-                    "Permissions: mode={} · sandbox={} · workspace_trusted={} · rules={} · extra_rw={}",
-                    self.perm_mode.label(),
-                    sandbox,
-                    trusted,
-                    loaded.rules.len(),
-                    loaded.extra_rw.len(),
-                ),
-                false,
-            );
-            return;
-        }
-        if let Some(mode) = PermissionMode::parse(trimmed) {
-            self.set_permission_mode(mode);
-            return;
-        }
-        if let Some(pat) = trimmed.strip_prefix("allow ").map(str::trim).filter(|s| !s.is_empty()) {
-            let scope = if is_workspace_trusted(&self.data_dir, &self.session.cwd) {
-                RuleScope::Project
-            } else {
-                RuleScope::User
-            };
-            match crate::permissions::rules::save_rule(
-                &self.data_dir,
-                &self.session.cwd,
-                scope,
-                crate::permissions::Effect::Allow,
-                pat,
-            ) {
-                Ok(()) => self.set_toast(format!("allowed: {pat}"), false),
-                Err(e) => self.set_toast(format!("{e:#}"), true),
-            }
-            return;
-        }
-        if let Some(pat) = trimmed.strip_prefix("deny ").map(str::trim).filter(|s| !s.is_empty()) {
-            let scope = if is_workspace_trusted(&self.data_dir, &self.session.cwd) {
-                RuleScope::Project
-            } else {
-                RuleScope::User
-            };
-            match crate::permissions::rules::save_rule(
-                &self.data_dir,
-                &self.session.cwd,
-                scope,
-                crate::permissions::Effect::Deny,
-                pat,
-            ) {
-                Ok(()) => self.set_toast(format!("denied: {pat}"), false),
-                Err(e) => self.set_toast(format!("{e:#}"), true),
-            }
-            return;
-        }
-        self.set_toast(
-            "usage: /permissions [default|accept-edits|plan|auto|allow <rule>|deny <rule>]",
-            true,
-        );
-    }
-
-    fn run_mcp_command(&mut self, arg: &str) {
-        let report = crate::mcp::config::load_mcp_configs(&self.data_dir, &self.session.cwd);
-        if arg.trim() == "probe" {
-            let data_dir = self.data_dir.clone();
-            let cwd = self.session.cwd.clone();
-            let notice = self.notice_tx.clone();
-            self.set_toast("probing MCP servers…", false);
-            tokio::spawn(async move {
-                let mgr = crate::mcp::client::McpManager::connect_configured(&data_dir, &cwd).await;
-                let mut lines = Vec::new();
-                for p in mgr.skipped_untrusted() {
-                    lines.push(format!("skipped untrusted project MCP config: {}", p.display()));
-                }
-                for s in mgr.statuses() {
-                    if let Some(err) = &s.error {
-                        lines.push(format!("{} [{}] error: {}", s.name, s.transport_label, err));
-                    } else {
-                        lines.push(format!("{} [{}] connected ({} tools)", s.name, s.transport_label, s.tool_count));
-                    }
-                }
-                if lines.is_empty() {
-                    lines.push("no MCP servers configured".into());
-                }
-                let _ = notice.send(UiNotice::Notice(lines.join("\n"), false));
-            });
-            return;
-        }
-        let mut lines = Vec::new();
-        for p in &report.skipped_untrusted {
-            lines.push(format!("skipped untrusted: {} (run `/trust on` to enable)", p.display()));
-        }
-        for s in &report.servers {
-            let kind = match s.transport {
-                crate::mcp::config::McpTransportConfig::Stdio { .. } => "stdio",
-                crate::mcp::config::McpTransportConfig::Http { .. } => "http",
-            };
-            lines.push(format!(
-                "{} [{} · {}]{}",
-                s.name,
-                s.scope.label(),
-                kind,
-                if s.disabled { " (disabled)" } else { "" }
-            ));
-        }
-        if lines.is_empty() {
-            lines.push("MCP: no servers configured (~/.envoy/mcp.json or .mcp.json)".into());
-        } else {
-            lines.push("Tip: run `/mcp probe` to connect and count tools.".into());
-        }
-        self.push_notice(lines.join("\n"), false);
-    }
-
-    fn run_skill_command(&mut self, arg: &str) {
-        let name = arg.trim();
-        if name.is_empty() {
-            let skills = crate::skills::discover_skills(&self.data_dir, &self.session.cwd);
-            if skills.is_empty() {
-                self.push_notice(
-                    "Skills: none found (add ~/.envoy/skills/<name>/SKILL.md or trust project .envoy/skills)",
-                    false,
-                );
-                return;
-            }
-            let lines: Vec<String> = skills
-                .iter()
-                .map(|s| format!("{} [{}] — {}", s.name, s.scope.label(), s.description))
-                .collect();
-            self.push_notice(lines.join("\n"), false);
-            return;
-        }
-        match crate::skills::load_skill(&self.data_dir, &self.session.cwd, name) {
-            Ok(loaded) => {
-                let preview: String = loaded.body.chars().take(600).collect();
-                self.push_notice(
-                    format!(
-                        "Skill `{}` ({})\n{}",
-                        loaded.summary.name,
-                        loaded.summary.skill_file.display(),
-                        preview
-                    ),
-                    false,
-                );
-            }
-            Err(e) => self.set_toast(format!("{e:#}"), true),
-        }
-    }
-
-    fn run_budget_command(&mut self, arg: &str) {
-        let Some((prov, model)) = resolve_active_provider(&self.data_dir) else {
-            self.set_toast("no provider connected — run /login first", true);
-            return;
-        };
-        if arg.is_empty() {
-            let plan =
-                crate::agent::context::resolve_budget(&self.data_dir, &prov.id, &model.model_id);
-            let (used, est) = context_used(&self.session);
-            let mark = if est { "~" } else { "" };
-            self.push_notice(
-                format!(
-                    "Context budget for {}: tier={} ({}) · compact_at={} · prune_at={} · reserve={} · hard_window={} ({}) · used={mark}{}",
-                    model.display(),
-                    plan.tier,
-                    plan.harness_profile,
-                    fmt_tokens(plan.compact_at),
-                    fmt_tokens(plan.prune_at),
-                    fmt_tokens(plan.reserve_output),
-                    fmt_tokens(plan.hard_window),
-                    plan.source,
-                    fmt_tokens(used),
-                ),
-                false,
-            );
-            return;
-        }
-        let Some(tier) = crate::agent::CompactionTier::parse(arg) else {
-            self.set_toast(
-                "usage: /budget [native|focused|balanced|max|400k]",
-                true,
-            );
-            return;
-        };
-        if let Err(e) =
-            crate::agent::context::set_budget_tier(&self.data_dir, tier, Some(&model))
-        {
-            self.set_toast(format!("{e:#}"), true);
-            return;
-        }
-        let plan =
-            crate::agent::context::resolve_budget(&self.data_dir, &prov.id, &model.model_id);
-        self.set_toast(
-            format!(
-                "budget: {} -> compact at {} (hard {})",
-                plan.tier,
-                fmt_tokens(plan.compact_at),
-                fmt_tokens(plan.hard_window)
-            ),
-            false,
-        );
-    }
-
-
     /// Returns either matching slash commands OR `/cd` directory completions.
     pub(in crate::tui) fn slash_query(&self) -> Option<&str> {
         if !self.input.starts_with('/') || self.input.contains('\n') {
@@ -572,7 +467,6 @@ impl App {
         }
         Some(rest)
     }
-
 
     pub(in crate::tui) fn filtered_slash(&self) -> Vec<&'static SlashCommand> {
         let Some(query) = self.slash_query() else {
@@ -589,7 +483,6 @@ impl App {
             .collect()
     }
 
-
     pub(in crate::tui) fn cd_query(&self) -> Option<&str> {
         if self.input.contains('\n') {
             return None;
@@ -597,12 +490,10 @@ impl App {
         self.input.strip_prefix("/cd ")
     }
 
-
     pub(in crate::tui) fn cd_completions(&self) -> Vec<(String, String)> {
         let Some(raw) = self.cd_query() else {
             return Vec::new();
         };
         complete_directories(&self.session.cwd, raw)
     }
-
 }

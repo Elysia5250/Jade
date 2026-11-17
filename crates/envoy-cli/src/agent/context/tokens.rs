@@ -57,9 +57,8 @@ pub fn estimate_text_tokens(text: &str) -> u64 {
 pub fn estimate_message_tokens(msg: &ChatMessage) -> u64 {
     let mut total = 6u64; // role + framing overhead
     total += estimate_text_tokens(&msg.content);
-    if let Some(reasoning) = &msg.reasoning {
-        total += estimate_text_tokens(reasoning);
-    }
+    // Reasoning is stored for the transcript and for summary notes. Providers
+    // do not receive it again, so it must not move the compaction trigger.
     for tc in &msg.tool_calls {
         total += 10;
         total += estimate_text_tokens(&tc.name);
@@ -73,6 +72,16 @@ pub fn estimate_message_tokens(msg: &ChatMessage) -> u64 {
 
 pub fn estimate_history_tokens(messages: &[ChatMessage]) -> u64 {
     messages.iter().map(estimate_message_tokens).sum()
+}
+
+/// Same unit as the compaction trigger: raw estimate scaled by calibration.
+pub fn message_cost(msg: &ChatMessage, calibration: TokenCalibration) -> u64 {
+    calibration.scale(estimate_message_tokens(msg))
+}
+
+/// Built-in tool schemas plus a flat allowance per MCP tool.
+pub fn tools_overhead(extra_tool_count: usize) -> u64 {
+    BUILTIN_TOOLS_TOKENS_ESTIMATE + (extra_tool_count as u64) * 200
 }
 
 pub fn estimate_turn_raw_tokens(
@@ -133,6 +142,12 @@ mod tests {
             tool_name: None,
         };
         assert!(estimate_message_tokens(&msg) >= 20);
+        let mut with_reasoning = msg.clone();
+        with_reasoning.reasoning = Some("x".repeat(4_000));
+        assert_eq!(
+            estimate_message_tokens(&msg),
+            estimate_message_tokens(&with_reasoning)
+        );
     }
 
     #[test]
