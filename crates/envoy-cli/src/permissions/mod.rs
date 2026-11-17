@@ -61,6 +61,27 @@ impl PermissionEngine {
         })
     }
 
+    pub fn fork_for_subagent(
+        &self,
+        mode: PermissionMode,
+        inherit_session_allows: bool,
+    ) -> Arc<Self> {
+        let session_allows = if inherit_session_allows {
+            self.session_allows.lock().unwrap().clone()
+        } else {
+            Vec::new()
+        };
+        Arc::new(Self {
+            data_dir: self.data_dir.clone(),
+            cwd: self.cwd.clone(),
+            session_id: self.session_id.clone(),
+            target: self.target.clone(),
+            mode: Mutex::new(mode),
+            session_allows: Mutex::new(session_allows),
+            managed_override: self.managed_override.clone(),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn with_managed_override(mut self, path: PathBuf) -> Self {
         self.managed_override = Some(path);
@@ -364,6 +385,7 @@ async fn prompt_user_approval(
         decision.reason
     );
     let timeout_s = 120u64;
+    let _gate = asks.acquire_prompt().await;
     let id = asks.next_id();
     let (send, recv) = oneshot::channel();
     asks.register(id, send);
@@ -407,6 +429,14 @@ fn summarize_call(tool: &str, args: &Value) -> String {
             args["root"].as_str().unwrap_or(".")
         ),
         "webfetch" => args["url"].as_str().unwrap_or("").to_string(),
+        "delegate" => args["agent"]
+            .as_str()
+            .map(|a| format!("delegate {a}"))
+            .unwrap_or_else(|| "delegate batch".into()),
+        "monitor" => format!(
+            "monitor {}",
+            args["action"].as_str().unwrap_or("list")
+        ),
         other => other.to_string(),
     }
 }

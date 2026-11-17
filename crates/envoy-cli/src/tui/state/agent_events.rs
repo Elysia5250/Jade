@@ -319,14 +319,91 @@ impl App {
                 path,
                 before,
                 after,
-                added: _,
-                removed: _,
+                ..
             } => {
                 self.session.record_file_change(path, before, after);
                 self.workspace_index.invalidate();
                 self.transcript_cache.clear();
                 self.session.touch();
                 self.persist_session();
+            }
+            AgentEvent::MonitorFired {
+                id,
+                label,
+                job_id,
+                matched_lines,
+                trigger_count,
+                max_triggers,
+                stopped,
+            } => {
+                let cap = max_triggers
+                    .map(|m| format!("{trigger_count}/{m}"))
+                    .unwrap_or_else(|| format!("{trigger_count}"));
+                let suffix = if stopped { " (stopped)" } else { "" };
+                let preview = matched_lines
+                    .last()
+                    .map(|s| format!(" — {}", truncate_width(s, 100)))
+                    .unwrap_or_default();
+                let notice =
+                    format!("[monitor #{id} {label} (job {job_id})] trigger {cap}{suffix}{preview}");
+                self.push_notice(notice, false);
+                self.set_toast(format!("monitor #{id} {label} ({cap})"), false);
+                self.persist_session();
+            }
+            AgentEvent::MonitorsSync { monitors } => {
+                self.active_monitors = monitors;
+            }
+            AgentEvent::CheckpointRewound {
+                checkpoint_id,
+                label,
+                messages,
+                remaining_user_turns,
+                restored_files,
+                deleted_files,
+                skipped_files,
+            } => {
+                self.apply_checkpoint_rewound(
+                    checkpoint_id,
+                    label,
+                    messages,
+                    remaining_user_turns,
+                    restored_files,
+                    deleted_files,
+                    skipped_files,
+                );
+            }
+            AgentEvent::HookRan {
+                event,
+                count,
+                blocked,
+                reason,
+                duration_ms,
+            } => {
+                if blocked {
+                    let detail = if reason.is_empty() {
+                        format!("hook {event} blocked ({duration_ms}ms)")
+                    } else {
+                        format!("hook {event} blocked: {reason}")
+                    };
+                    self.push_notice(detail.clone(), true);
+                    self.set_toast(detail, true);
+                } else if count > 0
+                    && (!reason.is_empty()
+                        || matches!(
+                            event.as_str(),
+                            "SessionStart" | "PreCompact" | "PostRewind" | "Stop" | "SubagentStop"
+                        ))
+                {
+                    let suffix = if reason.is_empty() {
+                        String::new()
+                    } else {
+                        format!(": {reason}")
+                    };
+                    self.push_notice(
+                        format!("hook {event} ({count} ran, {duration_ms}ms){suffix}"),
+                        false,
+                    );
+                }
             }
         }
     }

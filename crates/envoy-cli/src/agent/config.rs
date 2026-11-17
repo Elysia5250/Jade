@@ -1,8 +1,12 @@
 //! Turn configuration.
 use super::asks::AskBroker;
+use super::monitors::MonitorBroker;
 use crate::auth::{ModelRef, StoredProvider};
+use crate::hooks::HookEngine;
 use crate::permissions::PermissionEngine;
 use crate::session::ChatMessage;
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -22,4 +26,14 @@ pub struct TurnConfig {
     pub steer: Arc<Mutex<Vec<String>>>,
     /// Permission & sandbox gate for tool calls in this session.
     pub permissions: Arc<PermissionEngine>,
+    /// Optional daemon-side background monitor broker (root turn only).
+    pub monitors: Option<Arc<dyn MonitorBroker>>,
+    /// Deterministic lifecycle hook engine for this session/subagent.
+    pub hooks: Option<Arc<HookEngine>>,
+    /// Explicit initial `HookContext.state` passed into the turn.
+    pub hook_state: BTreeMap<String, Value>,
+    /// Optional commit slot to persist updated `HookContext.state` back to `Live` on turn exit.
+    pub hook_state_sink: Option<Arc<Mutex<BTreeMap<String, Value>>>>,
+    /// Monotonic turn sequence within the session.
+    pub turn_seq: u64,
 }

@@ -78,20 +78,28 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
     let toast = app
         .active_toast()
         .map(|(msg, err)| (format!("  {}", truncate_width(msg, 36)), err));
+    let active_monitors = app.active_monitors.iter().filter(|m| m.active).count();
+    let mon_label = if active_monitors > 0 {
+        format!("  mon:{active_monitors}")
+    } else {
+        String::new()
+    };
     let target_label = format!("  {}", app.target);
     let offline_label = "  offline";
     let suffix_w = if let Some((label, _)) = &toast {
         display_width(label)
     } else {
-        (if remote {
-            display_width(&target_label)
-        } else {
-            0
-        }) + (if offline {
-            display_width(offline_label)
-        } else {
-            0
-        })
+        display_width(&mon_label)
+            + (if remote {
+                display_width(&target_label)
+            } else {
+                0
+            })
+            + (if offline {
+                display_width(offline_label)
+            } else {
+                0
+            })
     };
     let sandbox_w = sandbox_label.map(|s| display_width(s) + 2).unwrap_or(0);
     let mode_w = display_width(mode) + 2 + display_width(perm_badge) + 2 + sandbox_w;
@@ -140,6 +148,9 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
             Style::default().fg(if err { theme.bad } else { theme.ok }),
         ));
     } else {
+        if !mon_label.is_empty() {
+            left.push(Span::styled(mon_label, Style::default().fg(theme.accent)));
+        }
         if remote && left_budget > mode_w + display_width(&cwd) + 4 {
             left.push(Span::styled(
                 target_label,

@@ -31,6 +31,33 @@ pub(crate) fn build_system_prompt(target: &str, cwd: &Path) -> String {
     prompt
 }
 
+pub(crate) fn build_subagent_system_prompt(
+    target: &str,
+    cwd: &Path,
+    role_prompt: &str,
+) -> String {
+    let mut prompt = format!(
+        "You are an Envoy subagent executing a focused delegated task.\n\
+         Active target machine: {target}\n\
+         Working directory: {}\n\
+         {}\n\
+         ## Rules\n\
+         - Stay strictly within the assigned task and available tools.\n\
+         - Never invent file paths, symbols, or tool outputs.\n\
+         - Reply with concise, factual results in the language of the task.\n\n\
+         ## Role Instructions\n\
+         {}",
+        cwd.display(),
+        host_line(target),
+        role_prompt.trim(),
+    );
+    if let Some(extra) = project_instructions(cwd) {
+        prompt.push_str("\n\n## Project instructions\n");
+        prompt.push_str(&extra);
+    }
+    prompt
+}
+
 fn host_line(target: &str) -> String {
     if target.is_empty() || target == "local" {
         format!(
@@ -43,9 +70,19 @@ fn host_line(target: &str) -> String {
     }
 }
 
-/// Skills and todos. This changes during a session, so it stays out of the
-/// stable system prompt.
+/// Skills, agents, and todos. This changes during a session, so it stays out of
+/// the stable system prompt.
+#[allow(dead_code)]
 pub(crate) fn environment_note(data_dir: &Path, cwd: &Path, session_id: &str) -> Option<String> {
+    environment_note_for_depth(data_dir, cwd, session_id, 0)
+}
+
+pub(crate) fn environment_note_for_depth(
+    data_dir: &Path,
+    cwd: &Path,
+    session_id: &str,
+    depth: u8,
+) -> Option<String> {
     let mut parts = Vec::new();
     let skills = crate::skills::discover_skills(data_dir, cwd);
     if let Some(catalog) = crate::skills::format_skills_catalog(&skills) {
@@ -53,8 +90,16 @@ pub(crate) fn environment_note(data_dir: &Path, cwd: &Path, session_id: &str) ->
             "## Available skills (load full steps on demand with `skill`)\n{catalog}"
         ));
     }
-    if let Some(todos) = super::tools::todo::format_active_todos_xml(data_dir, session_id) {
-        parts.push(format!("## Active session checklist\n{todos}"));
+    if depth == 0 {
+        let agents = super::subagent::discover_agents(data_dir, cwd);
+        if let Some(catalog) = super::subagent::format_agents_catalog(&agents) {
+            parts.push(format!(
+                "## Available subagents (invoke with `delegate`)\n{catalog}"
+            ));
+        }
+        if let Some(todos) = super::tools::todo::format_active_todos_xml(data_dir, session_id) {
+            parts.push(format!("## Active session checklist\n{todos}"));
+        }
     }
     if parts.is_empty() {
         None

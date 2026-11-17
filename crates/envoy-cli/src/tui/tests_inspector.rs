@@ -121,6 +121,8 @@ fn clicking_underlined_file_link_opens_diff_or_file_preview() {
             after: after.into(),
             added: 1,
             removed: 1,
+            existed_before: true,
+            restorable_before: true,
         },
     );
     let aid = app.session.alloc_id();
@@ -300,6 +302,136 @@ async fn inline_ask_keeps_inspector_visible_and_accepts_click() {
         .rect;
     click_at(&mut app, opt_hit.x, opt_hit.y);
     assert!(app.pending_ask.is_none());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn monitors_and_checkpoint_rewind_update_overview_status_and_transcript() {
+    let dir = tmpdir();
+    let src_dir = dir.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    let a_rs = src_dir.join("a.rs");
+    let b_rs = src_dir.join("b.rs");
+    std::fs::write(&a_rs, "fn a() { 1 }\n").unwrap();
+    std::fs::write(&b_rs, "fn b() { 2 }\n").unwrap();
+
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.connected = true;
+
+    // Simulate Turn 0 + Turn 1 transcript and FileChanged events
+    app.apply_event(
+        1,
+        AgentEvent::UserMessage {
+            text: "turn zero".into(),
+            mode: "Agent".into(),
+        },
+    );
+    app.apply_event(
+        2,
+        AgentEvent::FileChanged {
+            path: a_rs.display().to_string(),
+            before: String::new(),
+            after: "fn a() { 1 }\n".into(),
+            added: 1,
+            removed: 0,
+            existed_before: false,
+            restorable_before: true,
+        },
+    );
+    app.apply_event(
+        3,
+        AgentEvent::UserMessage {
+            text: "turn one".into(),
+            mode: "Agent".into(),
+        },
+    );
+    app.apply_event(
+        4,
+        AgentEvent::FileChanged {
+            path: b_rs.display().to_string(),
+            before: String::new(),
+            after: "fn b() { 2 }\n".into(),
+            added: 1,
+            removed: 0,
+            existed_before: false,
+            restorable_before: true,
+        },
+    );
+
+    // Sync active monitor and fire it
+    app.apply_event(
+        5,
+        AgentEvent::MonitorsSync {
+            monitors: vec![MonitorInfo {
+                id: 1,
+                job_id: 42,
+                label: "cargo watch".into(),
+                pattern: "error".into(),
+                command: "cargo watch -x test".into(),
+                trigger_count: 1,
+                max_triggers: Some(5),
+                owns_job: true,
+                active: true,
+            }],
+        },
+    );
+    app.apply_event(
+        6,
+        AgentEvent::MonitorFired {
+            id: 1,
+            label: "cargo watch".into(),
+            job_id: 42,
+            matched_lines: vec!["error[E0425]: missing symbol".into()],
+            trigger_count: 1,
+            max_triggers: Some(5),
+            stopped: false,
+        },
+    );
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    let rendered = render_text(&mut terminal, &mut app);
+    assert!(rendered.contains("MONITORS"));
+    assert!(rendered.contains("cargo watch"));
+    assert!(rendered.contains("[stop]"));
+    assert!(
+        app.hit_regions
+            .iter()
+            .any(|hr| matches!(hr.target, HitTarget::StopMonitor(1))),
+        "expected clickable StopMonitor(1) hit region"
+    );
+
+    // Rewind to Turn 1 (remaining_user_turns = 1): removes b.rs, keeps a.rs and turn zero.
+    let _ = std::fs::remove_file(&b_rs);
+    app.apply_event(
+        7,
+        AgentEvent::CheckpointRewound {
+            checkpoint_id: 2,
+            label: "turn one".into(),
+            messages: vec![],
+            remaining_user_turns: 1,
+            restored_files: vec![],
+            deleted_files: vec![b_rs.display().to_string()],
+            skipped_files: vec![],
+        },
+    );
+
+    assert_eq!(app.session.changed_files.len(), 1);
+    assert!(app.session.changed_files[0].path.ends_with("a.rs"));
+    let user_msgs: Vec<&str> = app
+        .session
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            TranscriptItem::User { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(user_msgs, vec!["turn zero"]);
+    assert!(app.session.items.iter().any(|it| matches!(
+        it,
+        TranscriptItem::Notice { text, .. } if text.contains("rewound to #2")
+    )));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

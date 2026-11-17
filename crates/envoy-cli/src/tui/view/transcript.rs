@@ -565,7 +565,7 @@ fn render_tool_header(
         } else {
             String::new()
         };
-        let out_pill = if !output.is_empty() || matches!(name, "exec" | "shell" | "job") {
+        let out_pill = if !output.is_empty() || matches!(name, "exec" | "shell" | "job" | "delegate") {
             "  [out]"
         } else {
             ""

@@ -54,14 +54,40 @@ pub(crate) struct FileEditSnapshot {
     pub path: String,
     pub before: String,
     pub after: String,
+    pub existed_before: bool,
+    pub restorable_before: bool,
 }
 
 const SNAPSHOT_CAP: u64 = 256 * 1024;
 
-async fn read_snapshot_text(remote: &Remote<Box<dyn AgentDialer>>, target: &str, path: &str) -> String {
+async fn read_snapshot_text(
+    remote: &Remote<Box<dyn AgentDialer>>,
+    target: &str,
+    path: &str,
+) -> (bool, String, bool) {
     match remote.read(target, path, 0, SNAPSHOT_CAP).await {
-        Ok((_size, _mode, data)) => String::from_utf8_lossy(&data).into_owned(),
-        Err(_) => String::new(),
+        Ok((size, _mode, data)) => {
+            let restorable = size <= SNAPSHOT_CAP && std::str::from_utf8(&data).is_ok();
+            (
+                true,
+                String::from_utf8_lossy(&data).into_owned(),
+                restorable,
+            )
+        }
+        Err(err) => {
+            let local = target.is_empty() || target == "local";
+            let missing = if local {
+                Path::new(path).symlink_metadata().is_err()
+            } else {
+                let msg = format!("{err:#}").to_ascii_lowercase();
+                msg.contains("no such file") || msg.contains("not found")
+            };
+            if missing {
+                (false, String::new(), true)
+            } else {
+                (true, String::new(), false)
+            }
+        }
     }
 }
 
@@ -74,7 +100,8 @@ pub(crate) async fn write_tool(
     let raw_path = args["path"].as_str().context("missing `path`")?;
     let path = resolve_path(cwd, raw_path);
     let content = args["content"].as_str().context("missing `content`")?;
-    let before = read_snapshot_text(remote, target, &path).await;
+    let (existed_before, before, restorable_before) =
+        read_snapshot_text(remote, target, &path).await;
     let bytes = remote
         .write(target, &path, content.as_bytes(), None)
         .await?;
@@ -89,6 +116,8 @@ pub(crate) async fn write_tool(
             path,
             before,
             after,
+            existed_before,
+            restorable_before,
         }),
     ))
 }
@@ -104,16 +133,19 @@ pub(crate) async fn edit_tool(
     let old = args["old"].as_str().context("missing `old`")?;
     let new = args["new"].as_str().context("missing `new`")?;
     let replace_all = args["replace_all"].as_bool().unwrap_or(false);
-    let before = read_snapshot_text(remote, target, &path).await;
+    let (existed_before, before, restorable_before) =
+        read_snapshot_text(remote, target, &path).await;
     match remote.edit(target, &path, old, new, replace_all).await {
         Ok(n) => {
-            let after = read_snapshot_text(remote, target, &path).await;
+            let (_existed_after, after, _) = read_snapshot_text(remote, target, &path).await;
             Ok((
                 format!("edited {path}: {n} replacement(s)"),
                 Some(FileEditSnapshot {
                     path,
                     before,
                     after,
+                    existed_before: true,
+                    restorable_before: existed_before && restorable_before,
                 }),
             ))
         }

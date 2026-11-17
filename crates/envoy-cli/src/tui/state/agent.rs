@@ -140,6 +140,17 @@ impl App {
                     self.focus = Focus::Input;
                 }
                 UiNotice::Recalled(None) => {}
+                UiNotice::Checkpoints(mut list) => {
+                    if list.is_empty() {
+                        self.set_toast("no checkpoints recorded yet", false);
+                    } else {
+                        list.reverse();
+                        self.modal = Some(Modal::Rewind(RewindModal {
+                            checkpoints: list,
+                            selected: 0,
+                        }));
+                    }
+                }
                 UiNotice::Toast(msg, err) => {
                     self.set_toast(msg, err);
                 }

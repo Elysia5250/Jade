@@ -37,6 +37,7 @@ pub(crate) async fn ask_tool(
         .position(|o| o.recommended)
         .unwrap_or(0);
     let timeout_s = args["timeout_s"].as_u64().unwrap_or(300).clamp(5, 3600);
+    let _gate = asks.acquire_prompt().await;
     let id = asks.next_id();
     let (send, recv) = oneshot::channel();
     asks.register(id, send);

@@ -16,10 +16,12 @@ mod oauth_anthropic;
 mod oauth_openai;
 mod pkce;
 mod refresh;
+mod routing;
 
 pub use catalog::BUILTIN_PROVIDERS;
 pub use cli::{cmd_auth_list, cmd_auth_login, cmd_auth_logout};
 pub use github::{copilot_session_token, poll_github_copilot_device, start_github_copilot_device};
+pub use routing::resolve_model_target;
 pub use oauth_anthropic::{anthropic_authorize_url, exchange_anthropic_code, parse_code_and_state};
 pub use oauth_openai::{
     bind_openai_callback_listener, exchange_openai_code, openai_authorize_url,

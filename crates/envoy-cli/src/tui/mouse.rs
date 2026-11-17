@@ -221,6 +221,9 @@ impl App {
                         }
                     }
                 }
+                HitTarget::StopMonitor(monitor_id) => {
+                    self.stop_monitor_by_id(monitor_id);
+                }
             }
             return None;
         }

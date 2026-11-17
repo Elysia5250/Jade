@@ -1,17 +1,20 @@
 //! Daemon-side session store, turn runner, and manual `/compact` + `/handoff`.
 
+use super::hooks::{new_hook_engine, run_manual_context_op};
+use super::monitors::MonitorHub;
+use super::ops::seed_checkpoint_user_turns;
 use super::protocol::{AgentReq, AgentResp, SendMode, SeqEvent, SessionInfo};
-use crate::agent::context::{
-    generate_handoff, prepare_context, resolve_budget, tools_overhead, TokenCalibration,
-};
-use crate::agent::prompt::build_system_prompt;
+use crate::agent::checkpoint::CheckpointStore;
+use crate::agent::MonitorBroker;
 use crate::auth::resolve_active_provider;
-use crate::llm::{run_agent_turn, AgentEvent, AskBroker, TurnConfig};
+use crate::hooks::HookEngine;
+use crate::llm::{AgentEvent, AskBroker, TurnConfig};
 use crate::permissions::{PermissionEngine, PermissionMode};
 use crate::session::ChatMessage;
 use anyhow::{bail, Result};
 use envoy_proto::codec::{read_framed, write_framed};
-use std::collections::{HashMap, VecDeque};
+use serde_json::Value;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,16 +23,26 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 pub(crate) struct Live {
-    cwd: PathBuf,
-    target: String,
-    messages: Vec<ChatMessage>,
+    pub(crate) cwd: PathBuf,
+    pub(crate) target: String,
+    pub(crate) messages: Vec<ChatMessage>,
     events: Vec<SeqEvent>,
     seq: u64,
     pub(crate) running: bool,
     queued: VecDeque<String>,
-    steer: Arc<Mutex<Vec<String>>>,
-    asks: Arc<AskBroker>,
-    permissions: Arc<PermissionEngine>,
+    pub(crate) steer: Arc<Mutex<Vec<String>>>,
+    pub(crate) asks: Arc<AskBroker>,
+    pub(crate) permissions: Arc<PermissionEngine>,
+    pub(crate) monitors: Arc<MonitorHub>,
+    pub(crate) hooks: Arc<HookEngine>,
+    pub(crate) hook_state: Arc<Mutex<BTreeMap<String, Value>>>,
+    pub(crate) pending_session_context: Vec<String>,
+    pub(crate) turn_seq: u64,
+    pub(crate) session_started: bool,
+    pub(crate) session_ended: bool,
+    pub(crate) checkpoints: CheckpointStore,
+    pub(crate) active_checkpoint_id: Option<u64>,
+    pub(crate) user_turns: usize,
     subs: Vec<mpsc::UnboundedSender<SeqEvent>>,
     turn: Option<tokio::task::JoinHandle<()>>,
     pump: Option<tokio::task::JoinHandle<()>>,
@@ -37,6 +50,7 @@ pub(crate) struct Live {
 
 impl Live {
     fn new(
+        runtime: &Arc<Runtime>,
         data_dir: &Path,
         id: &str,
         cwd: PathBuf,
@@ -50,6 +64,14 @@ impl Live {
             target.clone(),
             PermissionMode::Default,
         );
+        let monitors = MonitorHub::new(
+            id.to_string(),
+            data_dir.to_path_buf(),
+            Arc::downgrade(runtime),
+        );
+        let hooks = new_hook_engine(data_dir, &cwd);
+        let checkpoints = CheckpointStore::load(data_dir.to_path_buf(), id.to_string());
+        let user_turns = seed_checkpoint_user_turns(&checkpoints, &messages);
         Self {
             cwd,
             target,
@@ -61,6 +83,16 @@ impl Live {
             steer: Arc::new(Mutex::new(Vec::new())),
             asks: AskBroker::new(),
             permissions,
+            monitors,
+            hooks,
+            hook_state: Arc::new(Mutex::new(BTreeMap::new())),
+            pending_session_context: Vec::new(),
+            turn_seq: 0,
+            session_started: false,
+            session_ended: false,
+            checkpoints,
+            active_checkpoint_id: None,
+            user_turns,
             subs: Vec::new(),
             turn: None,
             pump: None,
@@ -79,7 +111,7 @@ impl Live {
 }
 
 pub struct Runtime {
-    data_dir: PathBuf,
+    pub(crate) data_dir: PathBuf,
     sessions: Mutex<HashMap<String, Arc<Mutex<Live>>>>,
 }
 
@@ -95,6 +127,14 @@ impl Runtime {
         self.sessions.lock().unwrap().get(id).cloned()
     }
 
+    pub(crate) fn remove_session(&self, id: &str) -> Option<Arc<Mutex<Live>>> {
+        self.sessions.lock().unwrap().remove(id)
+    }
+
+    pub(crate) fn drain_sessions(&self) -> Vec<(String, Arc<Mutex<Live>>)> {
+        self.sessions.lock().unwrap().drain().collect()
+    }
+
     pub(crate) fn ensure(
         self: &Arc<Self>,
         id: String,
@@ -106,7 +146,7 @@ impl Runtime {
         let data_dir = &self.data_dir;
         map.entry(id.clone())
             .or_insert_with(|| {
-                let mut live = Live::new(data_dir, &id, cwd, target, history);
+                let mut live = Live::new(self, data_dir, &id, cwd, target, history);
                 live.seq = 1;
                 live.events.push(SeqEvent {
                     seq: 1,
@@ -117,7 +157,7 @@ impl Runtime {
             .clone()
     }
 
-    fn publish(&self, live: &mut Live, event: AgentEvent) {
+    pub(crate) fn publish(&self, live: &mut Live, event: AgentEvent) {
         live.seq += 1;
         let seq = live.seq;
         let item = SeqEvent { seq, event };
@@ -128,19 +168,15 @@ impl Runtime {
         live.subs.retain(|tx| tx.send(item.clone()).is_ok());
     }
 
-    fn start_turn(self: &Arc<Self>, id: &str, live: Arc<Mutex<Live>>, prompt: Option<String>) {
-        let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
-        let (cwd, target, history, asks, steer, permissions) = {
+    pub(crate) fn start_turn(
+        self: &Arc<Self>,
+        id: &str,
+        live: Arc<Mutex<Live>>,
+        prompt: Option<String>,
+    ) {
+        let Some((provider, model)) = resolve_active_provider(&self.data_dir) else {
             let mut state = live.lock().unwrap();
             if let Some(text) = prompt {
-                state.messages.push(ChatMessage {
-                    role: crate::session::ChatRole::User,
-                    content: text.clone(),
-                    reasoning: None,
-                    tool_calls: Vec::new(),
-                    tool_call_id: None,
-                    tool_name: None,
-                });
                 self.publish(
                     &mut state,
                     AgentEvent::UserMessage {
@@ -149,7 +185,33 @@ impl Runtime {
                     },
                 );
             }
+            state.running = false;
+            self.publish(
+                &mut state,
+                AgentEvent::TurnError("no model configured: run /login".into()),
+            );
+            return;
+        };
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let (
+            cwd,
+            target,
+            history,
+            asks,
+            steer,
+            permissions,
+            monitors,
+            hooks,
+            hook_state,
+            hook_state_sink,
+            turn_seq,
+        ) = {
+            let mut state = live.lock().unwrap();
             state.running = true;
+            state.turn_seq += 1;
+            let monitors: Arc<dyn MonitorBroker> = state.monitors.clone();
+            let hook_state = state.hook_state.lock().unwrap().clone();
             (
                 state.cwd.clone(),
                 state.target.clone(),
@@ -157,17 +219,12 @@ impl Runtime {
                 state.asks.clone(),
                 state.steer.clone(),
                 state.permissions.clone(),
+                monitors,
+                Some(state.hooks.clone()),
+                hook_state,
+                Some(Arc::clone(&state.hook_state)),
+                state.turn_seq,
             )
-        };
-
-        let Some((provider, model)) = resolve_active_provider(&self.data_dir) else {
-            let mut state = live.lock().unwrap();
-            state.running = false;
-            self.publish(
-                &mut state,
-                AgentEvent::TurnError("no model configured: run /login".into()),
-            );
-            return;
         };
 
         let cfg = TurnConfig {
@@ -181,9 +238,20 @@ impl Runtime {
             asks,
             steer,
             permissions,
+            monitors: Some(monitors),
+            hooks,
+            hook_state,
+            hook_state_sink,
+            turn_seq,
         };
-        debug!(session = %id, "turn start");
-        let turn = tokio::spawn(run_agent_turn(cfg, tx));
+        debug!(session = %id, turn_seq, "turn start");
+        let turn = tokio::spawn(Arc::clone(self).run_turn_with_hooks(
+            id.to_string(),
+            Arc::clone(&live),
+            prompt,
+            cfg,
+            tx,
+        ));
 
         let runtime = Arc::clone(self);
         let id = id.to_string();
@@ -196,6 +264,7 @@ impl Runtime {
                         debug!(session = %id, "turn channel closed without a terminal event");
                         let mut state = pump_live.lock().unwrap();
                         state.running = false;
+                        state.active_checkpoint_id = None;
                         state.queued.clear();
                         runtime.publish(
                             &mut state,
@@ -215,11 +284,29 @@ impl Runtime {
                     | AgentEvent::Compacted { messages, .. } => {
                         state.messages = messages.clone();
                     }
+                    AgentEvent::FileChanged {
+                        path,
+                        before,
+                        existed_before,
+                        restorable_before,
+                        ..
+                    } => {
+                        if let Some(cp_id) = state.active_checkpoint_id {
+                            state.checkpoints.record_file_change(
+                                cp_id,
+                                path.clone(),
+                                *existed_before,
+                                before.clone(),
+                                *restorable_before,
+                            );
+                        }
+                    }
                     _ => {}
                 }
                 runtime.publish(&mut state, event);
                 if finished {
                     state.running = false;
+                    state.active_checkpoint_id = None;
                     let next = state.queued.pop_front();
                     drop(state);
                     if let Some(next) = next {
@@ -305,9 +392,13 @@ impl Runtime {
 
         let runtime = Arc::clone(self);
         let data_dir = self.data_dir.clone();
+        let session_id = id.to_string();
         let task_live = Arc::clone(&live);
         let task = tokio::spawn(async move {
             let res = run_manual_context_op(
+                &runtime,
+                &session_id,
+                &task_live,
                 &data_dir,
                 &provider,
                 &model.model_id,
@@ -347,6 +438,7 @@ impl Runtime {
             state.steer.lock().unwrap().clear();
             state.queued.clear();
             state.running = false;
+            state.active_checkpoint_id = None;
             (state.turn.take(), state.pump.take())
         };
         if let Some(task) = turn {
@@ -391,60 +483,6 @@ impl Runtime {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run_manual_context_op(
-    data_dir: &PathBuf,
-    provider: &crate::auth::StoredProvider,
-    model_id: &str,
-    target: &str,
-    cwd: &PathBuf,
-    messages: &mut Vec<ChatMessage>,
-    focus: Option<&str>,
-    handoff: bool,
-) -> Result<AgentEvent> {
-    let http = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(20))
-        .build()?;
-    let system = build_system_prompt(target, cwd);
-    if handoff {
-        let out = generate_handoff(&http, data_dir, provider, model_id, &system, messages, focus)
-            .await?;
-        return Ok(AgentEvent::HandoffReady {
-            summary: out.summary,
-            before_tokens: out.before_tokens,
-            after_tokens: out.after_tokens,
-            title: out.title,
-        });
-    }
-    let plan = resolve_budget(data_dir, &provider.id, model_id);
-    let outcome = prepare_context(
-        &http,
-        data_dir,
-        provider,
-        model_id,
-        target,
-        cwd,
-        &system,
-        messages,
-        TokenCalibration::default(),
-        &plan,
-        tools_overhead(0),
-        true,
-        focus,
-        None,
-    )
-    .await?
-    .ok_or_else(|| anyhow::anyhow!("conversation is too short to compact further"))?;
-
-    Ok(AgentEvent::Compacted {
-        messages: outcome.messages,
-        before_tokens: outcome.before_tokens,
-        after_tokens: outcome.after_tokens,
-        summary: outcome.summary,
-        auto: false,
-    })
-}
-
 /// Serve the console control socket until cancelled.
 pub async fn serve(runtime: Arc<Runtime>, listener: tokio::net::UnixListener) {
     loop {
@@ -487,7 +525,7 @@ where
             target,
             history,
         } => {
-            runtime.ensure(id, cwd, target, history);
+            runtime.ensure_with_hooks(id, cwd, target, history).await;
             write_framed(&mut wr, &AgentResp::Ack).await?;
         }
         AgentReq::Resume {
@@ -497,9 +535,15 @@ where
             history,
             from,
         } => {
-            let live = runtime.ensure(id.clone(), cwd, target, history);
+            let live = runtime
+                .ensure_with_hooks(id.clone(), cwd, target, history)
+                .await;
             stream_session(live, id, from, &mut wr).await?;
         }
+        AgentReq::CloseSession { id } => match runtime.close_session(&id).await {
+            Ok(_) => write_framed(&mut wr, &AgentResp::Ack).await?,
+            Err(e) => write_framed(&mut wr, &AgentResp::Error(format!("{e:#}"))).await?,
+        },
         AgentReq::Send { id, text, mode } => {
             runtime.send(&id, text, mode);
             write_framed(&mut wr, &AgentResp::Ack).await?;
@@ -527,6 +571,20 @@ where
             runtime.set_permission_mode(&id, mode);
             write_framed(&mut wr, &AgentResp::Ack).await?;
         }
+        AgentReq::StopMonitor { id, monitor_id } => {
+            match runtime.stop_monitor(&id, monitor_id).await {
+                Ok(()) => write_framed(&mut wr, &AgentResp::Ack).await?,
+                Err(e) => write_framed(&mut wr, &AgentResp::Error(format!("{e:#}"))).await?,
+            }
+        }
+        AgentReq::ListCheckpoints { id } => match runtime.list_checkpoints(&id) {
+            Ok(list) => write_framed(&mut wr, &AgentResp::Checkpoints(list)).await?,
+            Err(e) => write_framed(&mut wr, &AgentResp::Error(format!("{e:#}"))).await?,
+        },
+        AgentReq::Rewind { id, checkpoint_id } => match runtime.rewind(&id, checkpoint_id).await {
+            Ok(()) => write_framed(&mut wr, &AgentResp::Ack).await?,
+            Err(e) => write_framed(&mut wr, &AgentResp::Error(format!("{e:#}"))).await?,
+        },
         AgentReq::List => {
             write_framed(&mut wr, &AgentResp::Sessions(runtime.list())).await?;
         }
@@ -554,7 +612,7 @@ async fn stream_session<W>(
 where
     W: AsyncWrite + Unpin,
 {
-    let (snapshot, running, mut rx) = {
+    let (mut snapshot, running, seq_now, monitors_hub, mut rx) = {
         let mut state = live.lock().unwrap();
         debug!(session = %id, from, seq = state.seq, "attach");
         let from = if from > state.seq { 0 } else { from };
@@ -565,10 +623,21 @@ where
             .cloned()
             .collect();
         let running = state.running;
+        let seq_now = state.seq;
+        let hub = state.monitors.clone();
         let (tx, rx) = mpsc::unbounded_channel();
         state.subs.push(tx);
-        (snapshot, running, rx)
+        (snapshot, running, seq_now, hub, rx)
     };
+    let active_monitors = monitors_hub.active_list();
+    if !active_monitors.is_empty() {
+        snapshot.push(SeqEvent {
+            seq: seq_now,
+            event: AgentEvent::MonitorsSync {
+                monitors: active_monitors,
+            },
+        });
+    }
     write_framed(wr, &AgentResp::Snapshot { events: snapshot, running }).await?;
     while let Some(event) = rx.recv().await {
         if write_framed(wr, &AgentResp::Event(event)).await.is_err() {

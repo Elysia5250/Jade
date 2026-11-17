@@ -188,6 +188,52 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
             );
             frame.render_stateful_widget(list, inner, &mut state);
         }
+        Modal::Rewind(r) => {
+            let width = 76u16.min(area.width.saturating_sub(4));
+            let height = ((r.checkpoints.len() as u16) + 5)
+                .max(8)
+                .min(area.height.saturating_sub(2))
+                .min(18);
+            let popup = centered_rect(area, width, height);
+            frame.render_widget(Clear, popup);
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.accent))
+                .title(Span::styled(
+                    " rewind checkpoint (Enter confirm · Esc cancel) ",
+                    Style::default().fg(theme.accent),
+                ));
+            let inner = block.inner(popup);
+            frame.render_widget(block, popup);
+
+            let rows: Vec<ListItem> = r
+                .checkpoints
+                .iter()
+                .enumerate()
+                .map(|(idx, cp)| {
+                    let badge = if idx == 0 { "* " } else { "  " };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(badge, Style::default().fg(theme.ok)),
+                        Span::styled(format!("#{:<3} ", cp.id), Style::default().fg(theme.accent)),
+                        Span::raw(format!("{:<38} ", truncate_chars(&cp.label, 36))),
+                        Span::styled(
+                            format!("{} files", cp.files_touched),
+                            Style::default().fg(theme.dim),
+                        ),
+                    ]))
+                })
+                .collect();
+            let mut state = ListState::default();
+            if !r.checkpoints.is_empty() {
+                state.select(Some(r.selected.min(r.checkpoints.len() - 1)));
+            }
+            let list = List::new(rows).highlight_style(
+                Style::default()
+                    .bg(theme.selection)
+                    .add_modifier(Modifier::BOLD),
+            );
+            frame.render_stateful_widget(list, inner, &mut state);
+        }
         Modal::Login(login) => draw_login_modal(frame, app, theme, area, login),
     }
 }

@@ -311,6 +311,10 @@ impl App {
                 Command::OpenSessions,
             ),
             (
+                "Rewind checkpoint (/rewind)".to_string(),
+                Command::OpenRewind,
+            ),
+            (
                 "Expand / collapse output cards".to_string(),
                 Command::ToggleExpand,
             ),
@@ -469,6 +473,15 @@ impl App {
                     KeyCode::Char('d') => {
                         if let Some(target) = s.sessions.get(s.selected).map(|x| x.id.clone()) {
                             let _ = delete_session(&self.data_dir, &target);
+                            let data_dir = self.data_dir.clone();
+                            let close_id = target.clone();
+                            tokio::spawn(async move {
+                                let _ = runtime::tell(
+                                    &data_dir,
+                                    AgentReq::CloseSession { id: close_id },
+                                )
+                                .await;
+                            });
                             s.sessions.retain(|x| x.id != target);
                             s.selected = s.selected.min(s.sessions.len().saturating_sub(1));
                         }
@@ -489,6 +502,25 @@ impl App {
                     _ => {}
                 }
                 self.modal = Some(Modal::Sessions(s));
+                Action::None
+            }
+            Modal::Rewind(mut r) => {
+                let len = r.checkpoints.len().max(1);
+                match key.code {
+                    KeyCode::Esc => return Action::None,
+                    KeyCode::Up | KeyCode::Char('k') => r.selected = r.selected.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        r.selected = (r.selected + 1).min(len - 1)
+                    }
+                    KeyCode::Enter => {
+                        if let Some(cp) = r.checkpoints.get(r.selected) {
+                            self.request_rewind(Some(cp.id));
+                        }
+                        return Action::None;
+                    }
+                    _ => {}
+                }
+                self.modal = Some(Modal::Rewind(r));
                 Action::None
             }
         }

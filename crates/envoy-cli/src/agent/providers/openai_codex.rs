@@ -2,7 +2,7 @@
 use super::sse::SseParser;
 use super::StreamReply;
 use crate::agent::events::AgentEvent;
-use crate::agent::tools::responses_tools_json_for;
+use crate::agent::tools::{responses_tools_json_filtered, ToolFilter};
 use crate::auth::{Credential, StoredProvider};
 use crate::permissions::PermissionEngine;
 use crate::session::{ChatMessage, ChatRole, ToolCall};
@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_openai_codex(
     http: &reqwest::Client,
     provider: &StoredProvider,
@@ -19,6 +20,7 @@ pub(crate) async fn stream_openai_codex(
     system: &str,
     history: &[ChatMessage],
     permissions: Option<&PermissionEngine>,
+    tool_filter: &ToolFilter,
     extra_tools: &[Value],
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<StreamReply> {
@@ -73,7 +75,7 @@ pub(crate) async fn stream_openai_codex(
         "model": model,
         "instructions": system,
         "input": input,
-        "tools": responses_tools_json_for(permissions, extra_tools),
+        "tools": responses_tools_json_filtered(permissions, tool_filter, extra_tools),
         "stream": true,
         "store": false,
     });

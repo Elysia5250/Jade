@@ -4,8 +4,13 @@
 //! postcard framing (`envoy_proto::codec`).
 
 mod client;
+mod hooks;
+mod monitors;
+mod ops;
 mod protocol;
 mod server;
+#[cfg(test)]
+mod tests_hooks;
 
 pub use client::{attach, request, tell};
 #[allow(unused_imports)]

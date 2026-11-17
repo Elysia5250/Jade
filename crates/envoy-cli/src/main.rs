@@ -11,6 +11,7 @@ mod agent;
 mod auth;
 mod cli_ops;
 mod daemon;
+pub mod hooks;
 mod llm;
 pub mod mcp;
 pub mod permissions;
@@ -543,7 +544,7 @@ async fn cmd_serve(
         let _ = std::fs::set_permissions(&agent_path, std::fs::Permissions::from_mode(0o600));
     }
     let sessions = runtime::Runtime::new(data_dir.clone());
-    tokio::spawn(runtime::serve(sessions, agent_listener));
+    tokio::spawn(runtime::serve(sessions.clone(), agent_listener));
 
     let server = AgentServer::open_store(data_dir.clone())?;
     tracing::info!(socket = %path.display(), "envoy daemon listening");
@@ -578,6 +579,7 @@ async fn cmd_serve(
     if let Some(pool) = pool {
         pool.abort();
     }
+    sessions.shutdown_all().await;
     let _ = std::fs::remove_file(runtime::socket_path(&data_dir));
     Ok(())
 }

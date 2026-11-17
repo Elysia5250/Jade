@@ -9,6 +9,7 @@ use tokio::sync::oneshot;
 pub struct AskBroker {
     next: AtomicU64,
     pending: Mutex<HashMap<u64, oneshot::Sender<String>>>,
+    prompt_gate: tokio::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for AskBroker {
@@ -20,6 +21,12 @@ impl std::fmt::Debug for AskBroker {
 impl AskBroker {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// Serialize UI ask/approval prompts so concurrent subagents never overwrite
+    /// the single active prompt slot in the TUI.
+    pub(crate) async fn acquire_prompt(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.prompt_gate.lock().await
     }
 
     pub(crate) fn next_id(&self) -> u64 {

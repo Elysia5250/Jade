@@ -141,6 +141,18 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         about: "cancel active turn or selected job",
     },
     SlashCommand {
+        name: "monitor",
+        aliases: &["monitors", "mon"],
+        args: "[list|stop <id>|stop all]",
+        about: "inspect or stop background output monitors",
+    },
+    SlashCommand {
+        name: "rewind",
+        aliases: &["undo"],
+        args: "[id|last]",
+        about: "rewind workspace files and conversation to a checkpoint",
+    },
+    SlashCommand {
         name: "clear",
         aliases: &[],
         args: "",

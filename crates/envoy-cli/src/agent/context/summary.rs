@@ -186,6 +186,7 @@ pub async fn summarize_messages(
             .unwrap_or_else(|_| provider.clone());
         let (sink_tx, _sink_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let routed = fresh.routed_for(model_id);
+        let tool_filter = crate::agent::tools::ToolFilter::default();
         let res = match routed.protocol {
             ProviderProtocol::OpenAiChat => {
                 stream_openai_chat(
@@ -195,6 +196,7 @@ pub async fn summarize_messages(
                     system,
                     &req_msgs,
                     None,
+                    &tool_filter,
                     &[],
                     &sink_tx,
                 )
@@ -208,6 +210,7 @@ pub async fn summarize_messages(
                     system,
                     &req_msgs,
                     None,
+                    &tool_filter,
                     &[],
                     &sink_tx,
                 )
@@ -222,6 +225,7 @@ pub async fn summarize_messages(
                     system,
                     &req_msgs,
                     None,
+                    &tool_filter,
                     &[],
                     crate::agent::providers::anthropic_max_tokens(cap.max_output),
                     &sink_tx,

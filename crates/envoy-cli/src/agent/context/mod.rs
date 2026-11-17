@@ -24,10 +24,16 @@ pub use tokens::{
 
 use crate::agent::events::AgentEvent;
 use crate::auth::StoredProvider;
+use crate::hooks::{emit_hook_event, HookContext, HookEngine, HookEvent};
 use crate::session::ChatMessage;
 use anyhow::Result;
 use std::path::Path;
 use tokio::sync::mpsc;
+
+pub struct PreCompactHook<'a> {
+    pub engine: &'a HookEngine,
+    pub ctx: &'a mut HookContext,
+}
 
 #[derive(Debug, Clone)]
 pub struct CompactionOutcome {
@@ -121,6 +127,7 @@ pub async fn prepare_context(
     force: bool,
     focus: Option<&str>,
     tx: Option<&mpsc::UnboundedSender<AgentEvent>>,
+    pre_compact_hook: Option<PreCompactHook<'_>>,
 ) -> Result<Option<CompactionOutcome>> {
     let pinned = crate::agent::prompt::take_environment(messages);
     let outcome = prepare_context_body(
@@ -138,6 +145,7 @@ pub async fn prepare_context(
         force,
         focus,
         tx,
+        pre_compact_hook,
     )
     .await;
     crate::agent::prompt::restore_environment(messages, pinned);
@@ -166,6 +174,7 @@ async fn prepare_context_body(
     force: bool,
     focus: Option<&str>,
     tx: Option<&mpsc::UnboundedSender<AgentEvent>>,
+    pre_compact_hook: Option<PreCompactHook<'_>>,
 ) -> Result<Option<CompactionOutcome>> {
     let before_tokens = estimate_turn_tokens(system, messages, tools_overhead, calibration);
 
@@ -197,6 +206,39 @@ async fn prepare_context_body(
         return Ok(None);
     }
 
+    let mut effective_focus = focus.map(|s| s.to_string());
+    if let Some(hc) = pre_compact_hook {
+        let mut hctx = hc.ctx.clone();
+        hctx.event = HookEvent::PreCompact;
+        hctx.can_block = !force;
+        if hctx.compact_auto.is_none() {
+            hctx.compact_auto = Some(!force);
+        }
+        hctx.model_id = Some(model_id.to_string());
+        hctx.estimated_tokens = Some(after_mask);
+        hctx.decision = Default::default();
+        hctx.additional_context.clear();
+        hctx.trace.clear();
+
+        let next = hc.engine.dispatch(hctx).await;
+        if let Some(tx) = tx {
+            emit_hook_event(tx, &next);
+        }
+        let blocked = next.decision.is_blocking() && !force;
+        let injected = next.additional_context.clone();
+        *hc.ctx = next;
+        if blocked {
+            return Ok(None);
+        }
+        if !injected.is_empty() {
+            let extra = injected.join("\n");
+            effective_focus = Some(match effective_focus {
+                Some(existing) if !existing.trim().is_empty() => format!("{existing}\n{extra}"),
+                _ => extra,
+            });
+        }
+    }
+
     if let Some(tx) = tx {
         let _ = tx.send(AgentEvent::Compacting {
             auto: !force || focus.is_none(),
@@ -205,7 +247,14 @@ async fn prepare_context_body(
     }
 
     let summary_text = summarize_messages(
-        http, data_dir, provider, model_id, system, &head, focus, false,
+        http,
+        data_dir,
+        provider,
+        model_id,
+        system,
+        &head,
+        effective_focus.as_deref(),
+        false,
     )
     .await?;
 

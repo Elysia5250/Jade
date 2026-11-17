@@ -2,7 +2,7 @@
 use super::sse::SseParser;
 use super::StreamReply;
 use crate::agent::events::AgentEvent;
-use crate::agent::tools::anthropic_tools_json_for;
+use crate::agent::tools::{anthropic_tools_json_filtered, ToolFilter};
 use crate::auth::{Credential, StoredProvider};
 use crate::permissions::PermissionEngine;
 use crate::session::{ChatMessage, ChatRole, ToolCall};
@@ -19,6 +19,7 @@ pub(crate) fn anthropic_max_tokens(max_output: Option<u64>) -> u32 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_anthropic(
     http: &reqwest::Client,
     provider: &StoredProvider,
@@ -26,6 +27,7 @@ pub(crate) async fn stream_anthropic(
     system: &str,
     history: &[ChatMessage],
     permissions: Option<&PermissionEngine>,
+    tool_filter: &ToolFilter,
     extra_tools: &[Value],
     max_tokens: u32,
     tx: &mpsc::UnboundedSender<AgentEvent>,
@@ -83,7 +85,7 @@ pub(crate) async fn stream_anthropic(
         "max_tokens": max_tokens.max(256),
         "system": system,
         "messages": msgs,
-        "tools": anthropic_tools_json_for(permissions, extra_tools),
+        "tools": anthropic_tools_json_filtered(permissions, tool_filter, extra_tools),
         "stream": true,
     });
 

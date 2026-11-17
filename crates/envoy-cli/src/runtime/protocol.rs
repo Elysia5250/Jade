@@ -3,6 +3,7 @@
 //! All types travel via postcard framing (`envoy_proto::codec`), so wire fields
 //! must NEVER use `skip_serializing_if`.
 
+use crate::agent::checkpoint::CheckpointSummary;
 use crate::agent::AgentEvent;
 use crate::permissions::PermissionMode;
 use crate::session::ChatMessage;
@@ -79,6 +80,24 @@ pub enum AgentReq {
         id: String,
         mode: PermissionMode,
     },
+    /// Stop an active background monitor in a session.
+    StopMonitor {
+        id: String,
+        monitor_id: u64,
+    },
+    /// List recorded per-turn checkpoints for a session.
+    ListCheckpoints {
+        id: String,
+    },
+    /// Rewind workspace files and conversation state to a checkpoint (or latest if `None`).
+    Rewind {
+        id: String,
+        checkpoint_id: Option<u64>,
+    },
+    /// Explicitly close an idle session, running `SessionEnd` cleanup hooks.
+    CloseSession {
+        id: String,
+    },
     List,
 }
 
@@ -92,6 +111,8 @@ pub enum AgentResp {
     /// A queued follow-up returned to the console, or `None` if the queue was
     /// empty.
     Recalled(Option<String>),
+    /// Checkpoints recorded for a session.
+    Checkpoints(Vec<CheckpointSummary>),
     Ack,
     Error(String),
 }
@@ -128,6 +149,16 @@ mod tests {
                 id: "s4".into(),
                 mode: PermissionMode::Plan,
             },
+            AgentReq::StopMonitor {
+                id: "s5".into(),
+                monitor_id: 7,
+            },
+            AgentReq::ListCheckpoints { id: "s6".into() },
+            AgentReq::Rewind {
+                id: "s7".into(),
+                checkpoint_id: Some(3),
+            },
+            AgentReq::CloseSession { id: "s8".into() },
         ] {
             let bytes = postcard::to_allocvec(&req).unwrap();
             let decoded: AgentReq = postcard::from_bytes(&bytes).unwrap();
@@ -147,8 +178,48 @@ mod tests {
                     assert_eq!(a, b);
                     assert_eq!(ma, mb);
                 }
+                (
+                    AgentReq::StopMonitor { id: a, monitor_id: ma },
+                    AgentReq::StopMonitor { id: b, monitor_id: mb },
+                ) => {
+                    assert_eq!(a, b);
+                    assert_eq!(ma, mb);
+                }
+                (AgentReq::ListCheckpoints { id: a }, AgentReq::ListCheckpoints { id: b }) => {
+                    assert_eq!(a, b);
+                }
+                (
+                    AgentReq::Rewind {
+                        id: a,
+                        checkpoint_id: ca,
+                    },
+                    AgentReq::Rewind {
+                        id: b,
+                        checkpoint_id: cb,
+                    },
+                ) => {
+                    assert_eq!(a, b);
+                    assert_eq!(ca, cb);
+                }
+                (AgentReq::CloseSession { id: a }, AgentReq::CloseSession { id: b }) => {
+                    assert_eq!(a, b);
+                }
                 _ => panic!("mismatched variant"),
             }
+        }
+
+        let resp = AgentResp::Checkpoints(vec![CheckpointSummary {
+            id: 2,
+            label: "edit main".into(),
+            ts_ms: 123456,
+            remaining_user_turns: 1,
+            files_touched: 3,
+        }]);
+        let bytes = postcard::to_allocvec(&resp).unwrap();
+        let decoded: AgentResp = postcard::from_bytes(&bytes).unwrap();
+        match decoded {
+            AgentResp::Checkpoints(list) => assert_eq!(list.len(), 1),
+            other => panic!("unexpected resp: {other:?}"),
         }
     }
 }

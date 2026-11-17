@@ -20,6 +20,10 @@ impl App {
                 self.open_sessions_modal();
                 Action::None
             }
+            Command::OpenRewind => {
+                self.open_rewind_modal();
+                Action::None
+            }
             Command::NewSession => {
                 self.persist_session();
                 self.session = Session::new(self.session.cwd.clone(), self.target.clone());
@@ -429,6 +433,14 @@ impl App {
                 Action::None
             }
             "cancel" => Action::Cancel,
+            "monitor" | "monitors" | "mon" => {
+                self.run_monitor_command(arg);
+                Action::None
+            }
+            "rewind" | "undo" => {
+                self.run_rewind_command(arg);
+                Action::None
+            }
             "clear" => {
                 self.session.items.clear();
                 self.session.messages.clear();
@@ -443,7 +455,7 @@ impl App {
             "theme" | "themes" => self.run_command(Command::OpenThemePicker),
             "help" => {
                 self.push_notice(
-                    "Shortcuts: Click underlined paths to review in right Inspector - Drag divider to resize - Alt+1..5 switch Inspector tabs - Ctrl+B toggle panel - Ctrl+O expand/collapse tools & thinking - Shift+Tab cycle permissions - /mouse opens the picker (alt-m toggles) - /diff /open",
+                    "Shortcuts: Click underlined paths to review in right Inspector - Drag divider to resize - Alt+1..5 switch Inspector tabs - Ctrl+B toggle panel - Ctrl+O expand/collapse tools & thinking - Shift+Tab cycle permissions - /monitor [list|stop <id>] - /rewind [id|last] - /mouse - /diff /open",
                     false,
                 );
                 Action::None

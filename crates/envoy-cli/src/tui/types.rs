@@ -57,6 +57,7 @@ pub(crate) enum HitTarget {
     CycleMode,
     CyclePermission,
     SelectAskOption(usize),
+    StopMonitor(u64),
 }
 
 #[derive(Debug, Clone)]

@@ -2,12 +2,15 @@
 
 use super::asks::AskBroker;
 use super::events::AgentEvent;
+use super::loop_hooks::PreparedTool;
+use super::monitors::MonitorBroker;
+use super::subagent::SubagentHost;
 use crate::mcp::client::McpManager;
 use crate::permissions::PermissionEngine;
-use crate::session::ToolCall;
 use anyhow::anyhow;
 use envoy_service::{AgentDialer, Remote};
-use serde_json::{json, Value};
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -15,27 +18,38 @@ use tokio::sync::mpsc;
 
 mod ask;
 mod fs;
+mod monitor;
 mod schema;
 mod search;
 mod shell;
 mod skill;
+mod subagent;
 pub(crate) mod todo;
 mod web;
 
 pub(crate) use ask::ask_tool;
 #[allow(unused_imports)]
 pub(crate) use schema::{
-    anthropic_tools_json, anthropic_tools_json_for, openai_tools_json, openai_tools_json_for,
-    responses_tools_json, responses_tools_json_for,
+    anthropic_tools_json, anthropic_tools_json_filtered, anthropic_tools_json_for,
+    openai_tools_json, openai_tools_json_filtered, openai_tools_json_for, responses_tools_json,
+    responses_tools_json_filtered, responses_tools_json_for, ToolFilter,
 };
 use fs::{edit_tool, ls_tool, read_tool, write_tool};
+use monitor::{monitor_tool, summarize_monitor};
 use search::{glob_tool, grep_tool};
 use shell::{exec_tool, job_tool};
 use skill::skill_tool;
+use subagent::{delegate_tool, summarize_delegate};
 use todo::todo_tool;
 use web::webfetch_tool;
 
 const TOOL_OUTPUT_CAP: usize = 64 * 1024;
+
+pub(crate) struct ToolExecOutcome {
+    pub(crate) text: String,
+    pub(crate) ok: bool,
+    pub(crate) updated_hook_state: Option<BTreeMap<String, Value>>,
+}
 
 fn resolve_path(cwd: &Path, raw: &str) -> String {
     let trimmed = raw.trim();
@@ -98,6 +112,8 @@ fn summarize_tool(name: &str, args: &Value) -> (String, String) {
             ),
             String::new(),
         ),
+        "delegate" => summarize_delegate(args),
+        "monitor" => summarize_monitor(args),
         mcp if mcp.starts_with("mcp__") => (
             mcp.trim_start_matches("mcp__").replace("__", ":"),
             String::new(),
@@ -107,18 +123,23 @@ fn summarize_tool(name: &str, args: &Value) -> (String, String) {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_tool_call(
+pub(crate) async fn run_prepared_tool_call(
     remote: &Remote<Box<dyn AgentDialer>>,
     target: &str,
     cwd: &Path,
-    tc: &ToolCall,
+    prepared: &PreparedTool,
+    hook_state_snapshot: Option<BTreeMap<String, Value>>,
     tx: &mpsc::UnboundedSender<AgentEvent>,
     asks: &Arc<AskBroker>,
     permissions: &Arc<PermissionEngine>,
     mcp: Option<&McpManager>,
-) -> String {
-    let args: Value = serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!({}));
-    let (title, subtitle) = summarize_tool(&tc.name, &args);
+    tool_filter: &ToolFilter,
+    subagent_host: Option<&SubagentHost>,
+    monitors: Option<&Arc<dyn MonitorBroker>>,
+) -> ToolExecOutcome {
+    let tc = &prepared.call;
+    let args = &prepared.effective_args;
+    let (title, subtitle) = summarize_tool(&tc.name, args);
     let _ = tx.send(AgentEvent::ToolStart {
         call_id: tc.id.clone(),
         name: tc.name.clone(),
@@ -127,18 +148,23 @@ pub(crate) async fn run_tool_call(
     });
 
     let start = Instant::now();
-    let res = if tc.name == "ask" {
-        ask_tool(asks, tx, &args).await.map(|s| (s, None))
+    let mut updated_hook_state = None;
+    let res = if let Some(blocked) = &prepared.blocked_error {
+        Err(anyhow!("{blocked}"))
+    } else if !tool_filter.allows(&tc.name) {
+        Err(anyhow!("tool `{}` is not enabled for this agent", tc.name))
+    } else if tc.name == "ask" {
+        ask_tool(asks, tx, args).await.map(|s| (s, None))
     } else {
         match permissions
-            .authorize_tool_call(&tc.name, &args, asks, tx)
+            .authorize_tool_call(&tc.name, args, asks, tx)
             .await
         {
             Err(e) => Err(e),
             Ok(auth) => match tc.name.as_str() {
-                "exec" => exec_tool(remote, target, cwd, &tc.id, &args, auth.sandbox, tx).await,
-                "read" => read_tool(remote, target, cwd, &args).await.map(|s| (s, None)),
-                "write" => match write_tool(remote, target, cwd, &args).await {
+                "exec" => exec_tool(remote, target, cwd, &tc.id, args, auth.sandbox, tx).await,
+                "read" => read_tool(remote, target, cwd, args).await.map(|s| (s, None)),
+                "write" => match write_tool(remote, target, cwd, args).await {
                     Ok((msg, snap)) => {
                         if let Some(s) = snap {
                             let (added, removed) =
@@ -149,13 +175,15 @@ pub(crate) async fn run_tool_call(
                                 after: s.after,
                                 added,
                                 removed,
+                                existed_before: s.existed_before,
+                                restorable_before: s.restorable_before,
                             });
                         }
                         Ok((msg, None))
                     }
                     Err(e) => Err(e),
                 },
-                "edit" => match edit_tool(remote, target, cwd, &args).await {
+                "edit" => match edit_tool(remote, target, cwd, args).await {
                     Ok((msg, snap)) => {
                         if let Some(s) = snap {
                             let (added, removed) =
@@ -166,20 +194,44 @@ pub(crate) async fn run_tool_call(
                                 after: s.after,
                                 added,
                                 removed,
+                                existed_before: s.existed_before,
+                                restorable_before: s.restorable_before,
                             });
                         }
                         Ok((msg, None))
                     }
                     Err(e) => Err(e),
                 },
-                "ls" => ls_tool(remote, target, cwd, &args).await.map(|s| (s, None)),
-                "glob" => glob_tool(remote, target, cwd, &args).await.map(|s| (s, None)),
-                "grep" => grep_tool(remote, target, cwd, &args).await.map(|s| (s, None)),
-                "webfetch" => webfetch_tool(&args).await.map(|s| (s, None)),
-                "todo" => todo_tool(permissions.data_dir(), permissions.session_id(), &args)
+                "ls" => ls_tool(remote, target, cwd, args).await.map(|s| (s, None)),
+                "glob" => glob_tool(remote, target, cwd, args).await.map(|s| (s, None)),
+                "grep" => grep_tool(remote, target, cwd, args).await.map(|s| (s, None)),
+                "webfetch" => webfetch_tool(args).await.map(|s| (s, None)),
+                "todo" => todo_tool(permissions.data_dir(), permissions.session_id(), args)
                     .map(|s| (s, None)),
-                "skill" => skill_tool(permissions.data_dir(), cwd, &args).map(|s| (s, None)),
-                "job" => job_tool(remote, target, &args).await.map(|s| (s, None)),
+                "skill" => skill_tool(permissions.data_dir(), cwd, args).map(|s| (s, None)),
+                "job" => job_tool(remote, target, args).await.map(|s| (s, None)),
+                "delegate" => {
+                    match delegate_tool(
+                        subagent_host,
+                        &tc.id,
+                        args,
+                        hook_state_snapshot.unwrap_or_default(),
+                        tx,
+                    )
+                    .await
+                    {
+                        Ok((msg, exit_code, next_state)) => {
+                            updated_hook_state = Some(next_state);
+                            Ok((msg, exit_code))
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                "monitor" => {
+                    monitor_tool(monitors, remote, target, cwd, args, asks, permissions, tx)
+                        .await
+                        .map(|s| (s, None))
+                }
                 "say" => {
                     let text = args["text"].as_str().unwrap_or("").trim().to_string();
                     let kind = args["kind"].as_str().unwrap_or("progress").to_string();
@@ -190,7 +242,7 @@ pub(crate) async fn run_tool_call(
                 }
                 name if name.starts_with("mcp__") => {
                     if let Some(mgr) = mcp {
-                        mgr.call_tool(name, args).await.map(|s| (s, None))
+                        mgr.call_tool(name, args.clone()).await.map(|s| (s, None))
                     } else {
                         Err(anyhow!("MCP client manager not available for `{name}`"))
                     }
@@ -218,7 +270,11 @@ pub(crate) async fn run_tool_call(
                 duration_ms,
                 exit_code,
             });
-            truncate_tool_output(&text)
+            ToolExecOutcome {
+                text: truncate_tool_output(&text),
+                ok,
+                updated_hook_state,
+            }
         }
         Err(e) => {
             let msg = format!("{e:#}");
@@ -233,7 +289,11 @@ pub(crate) async fn run_tool_call(
                 duration_ms,
                 exit_code: Some(1),
             });
-            format!("error: {msg}")
+            ToolExecOutcome {
+                text: format!("error: {msg}"),
+                ok: false,
+                updated_hook_state,
+            }
         }
     }
 }

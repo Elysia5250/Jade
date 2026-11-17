@@ -1,4 +1,5 @@
 //! Agent event stream.
+use super::monitors::MonitorInfo;
 use crate::permissions::PermissionMode;
 use crate::session::ChatMessage;
 use serde::{Deserialize, Serialize};
@@ -97,6 +98,41 @@ pub enum AgentEvent {
         after: String,
         added: usize,
         removed: usize,
+        existed_before: bool,
+        restorable_before: bool,
+    },
+    /// A background monitor matched its pattern and delivered an in-session event.
+    MonitorFired {
+        id: u64,
+        label: String,
+        job_id: u64,
+        matched_lines: Vec<String>,
+        trigger_count: u32,
+        max_triggers: Option<u32>,
+        stopped: bool,
+    },
+    /// Synchronizes the session's active/recent monitor list to the TUI.
+    MonitorsSync {
+        monitors: Vec<MonitorInfo>,
+    },
+    /// Session rewound to a prior checkpoint; workspace files and history rolled back.
+    CheckpointRewound {
+        checkpoint_id: u64,
+        label: String,
+        messages: Vec<ChatMessage>,
+        /// Zero-based user turn count remaining after rewind (counts non-steer user turns).
+        remaining_user_turns: usize,
+        restored_files: Vec<String>,
+        deleted_files: Vec<String>,
+        skipped_files: Vec<String>,
+    },
+    /// Deterministic lifecycle hooks ran at a stage boundary.
+    HookRan {
+        event: String,
+        count: usize,
+        blocked: bool,
+        reason: String,
+        duration_ms: u64,
     },
 }
 
@@ -139,6 +175,53 @@ mod tests {
                 after_tokens: 4_500,
                 title: "handoff: phase 2".into(),
             },
+            AgentEvent::FileChanged {
+                path: "src/lib.rs".into(),
+                before: String::new(),
+                after: "fn main() {}".into(),
+                added: 1,
+                removed: 0,
+                existed_before: false,
+                restorable_before: true,
+            },
+            AgentEvent::MonitorFired {
+                id: 3,
+                label: "cargo watch".into(),
+                job_id: 42,
+                matched_lines: vec!["error[E0425]: cannot find value".into()],
+                trigger_count: 1,
+                max_triggers: Some(5),
+                stopped: false,
+            },
+            AgentEvent::MonitorsSync {
+                monitors: vec![MonitorInfo {
+                    id: 3,
+                    job_id: 42,
+                    label: "cargo watch".into(),
+                    pattern: "error|panic".into(),
+                    command: "cargo watch -x test".into(),
+                    trigger_count: 1,
+                    max_triggers: Some(5),
+                    owns_job: true,
+                    active: true,
+                }],
+            },
+            AgentEvent::CheckpointRewound {
+                checkpoint_id: 2,
+                label: "refactor auth".into(),
+                messages: vec![],
+                remaining_user_turns: 1,
+                restored_files: vec!["src/auth.rs".into()],
+                deleted_files: vec!["src/new_helper.rs".into()],
+                skipped_files: vec![],
+            },
+            AgentEvent::HookRan {
+                event: "PreToolUse".into(),
+                count: 2,
+                blocked: true,
+                reason: "policy block".into(),
+                duration_ms: 14,
+            },
         ];
         for ev in samples {
             let bytes = postcard::to_allocvec(&ev).unwrap();
@@ -152,6 +235,32 @@ mod tests {
                     AgentEvent::HandoffReady { title: a, .. },
                     AgentEvent::HandoffReady { title: b, .. },
                 ) => assert_eq!(a, b),
+                (
+                    AgentEvent::MonitorFired { id: a, trigger_count: ta, .. },
+                    AgentEvent::MonitorFired { id: b, trigger_count: tb, .. },
+                ) => {
+                    assert_eq!(a, b);
+                    assert_eq!(ta, tb);
+                }
+                (
+                    AgentEvent::MonitorsSync { monitors: a },
+                    AgentEvent::MonitorsSync { monitors: b },
+                ) => assert_eq!(a, b),
+                (
+                    AgentEvent::CheckpointRewound { checkpoint_id: a, deleted_files: da, .. },
+                    AgentEvent::CheckpointRewound { checkpoint_id: b, deleted_files: db, .. },
+                ) => {
+                    assert_eq!(a, b);
+                    assert_eq!(da, db);
+                }
+                (
+                    AgentEvent::HookRan { event: ea, count: ca, blocked: ba, .. },
+                    AgentEvent::HookRan { event: eb, count: cb, blocked: bb, .. },
+                ) => {
+                    assert_eq!(ea, eb);
+                    assert_eq!(ca, cb);
+                    assert_eq!(ba, bb);
+                }
                 _ => {}
             }
         }

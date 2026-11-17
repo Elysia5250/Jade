@@ -231,33 +231,114 @@ pub(crate) fn openai_tools_json() -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "delegate",
+                "description": "Delegate one or more focused subtasks to isolated subagents (`explore`, `plan`, `review`, `coder`, or presets in `<available_agents>`). Pass `agent` + `prompt` for one subtask, or `tasks: [...]` to run multiple independent subtasks (read-only batches run in parallel).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "agent": { "type": "string", "description": "Subagent name (`explore`, `plan`, `review`, `coder`, or custom preset)." },
+                        "prompt": { "type": "string", "description": "Self-contained instructions and context for the subagent." },
+                        "description": { "type": "string", "description": "Short 3-6 word summary shown on the tool card." },
+                        "model": { "type": "string", "description": "Optional override: `inherit`, `fast`, `flagship`, or `<provider>/<model>`." },
+                        "tasks": {
+                            "type": "array",
+                            "description": "Batch of independent subtasks. Read-only tasks execute concurrently.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "agent": { "type": "string" },
+                                    "prompt": { "type": "string" },
+                                    "description": { "type": "string" },
+                                    "model": { "type": "string" }
+                                },
+                                "required": ["agent", "prompt"]
+                            }
+                        }
+                    }
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "monitor",
+                "description": "Watch a background shell command or existing detached job for matching output lines and deliver in-session alerts (`start`, `list`, `stop`).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["start", "list", "stop"] },
+                        "command": { "type": "string", "description": "Shell command to spawn and monitor (when action=start)." },
+                        "cwd": { "type": "string", "description": "Optional working directory for `command`." },
+                        "job_id": { "type": "integer", "description": "Existing job ID to monitor instead of spawning a command." },
+                        "pattern": { "type": "string", "description": "Case-insensitive substring or `|`-separated alternatives (e.g. `error|panic`), or `*` for any line." },
+                        "label": { "type": "string", "description": "Short display label for the monitor." },
+                        "debounce_ms": { "type": "integer", "default": 500, "description": "Batch matched lines over this window before notifying (100-30000ms)." },
+                        "max_triggers": { "type": "integer", "description": "Optional max notifications before auto-stopping (0 or omit for unlimited)." },
+                        "timeout_s": { "type": "integer", "default": 3600, "description": "Job timeout in seconds when starting `command`." },
+                        "id": { "type": "integer", "description": "Monitor ID (required for action=stop)." }
+                    },
+                    "required": ["action"]
+                }
+            }
+        }),
     ]
 }
 
-pub(crate) fn openai_tools_json_for(
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ToolFilter {
+    pub(crate) depth: u8,
+    pub(crate) allowed: Option<Vec<String>>,
+}
+
+impl ToolFilter {
+    pub(crate) fn allows(&self, name: &str) -> bool {
+        if self.depth > 0 && matches!(name, "delegate" | "monitor") {
+            return false;
+        }
+        if let Some(allowed) = &self.allowed {
+            return allowed.iter().any(|a| a == name);
+        }
+        true
+    }
+}
+
+pub(crate) fn openai_tools_json_filtered(
     permissions: Option<&crate::permissions::PermissionEngine>,
+    filter: &ToolFilter,
     extra: &[Value],
 ) -> Vec<Value> {
     let mut all = openai_tools_json();
     all.extend(extra.iter().cloned());
-    let Some(perm) = permissions else {
-        return all;
-    };
     all.into_iter()
         .filter(|t| {
-            t["function"]["name"]
-                .as_str()
-                .map(|n| perm.is_tool_enabled(n))
-                .unwrap_or(true)
+            let Some(name) = t["function"]["name"].as_str() else {
+                return true;
+            };
+            if !filter.allows(name) {
+                return false;
+            }
+            permissions.map(|p| p.is_tool_enabled(name)).unwrap_or(true)
         })
         .collect()
 }
 
-pub(crate) fn responses_tools_json_for(
+#[allow(dead_code)]
+pub(crate) fn openai_tools_json_for(
     permissions: Option<&crate::permissions::PermissionEngine>,
     extra: &[Value],
 ) -> Vec<Value> {
-    openai_tools_json_for(permissions, extra)
+    openai_tools_json_filtered(permissions, &ToolFilter::default(), extra)
+}
+
+pub(crate) fn responses_tools_json_filtered(
+    permissions: Option<&crate::permissions::PermissionEngine>,
+    filter: &ToolFilter,
+    extra: &[Value],
+) -> Vec<Value> {
+    openai_tools_json_filtered(permissions, filter, extra)
         .into_iter()
         .map(|t| {
             let f = &t["function"];
@@ -271,11 +352,20 @@ pub(crate) fn responses_tools_json_for(
         .collect()
 }
 
-pub(crate) fn anthropic_tools_json_for(
+#[allow(dead_code)]
+pub(crate) fn responses_tools_json_for(
     permissions: Option<&crate::permissions::PermissionEngine>,
     extra: &[Value],
 ) -> Vec<Value> {
-    openai_tools_json_for(permissions, extra)
+    responses_tools_json_filtered(permissions, &ToolFilter::default(), extra)
+}
+
+pub(crate) fn anthropic_tools_json_filtered(
+    permissions: Option<&crate::permissions::PermissionEngine>,
+    filter: &ToolFilter,
+    extra: &[Value],
+) -> Vec<Value> {
+    openai_tools_json_filtered(permissions, filter, extra)
         .into_iter()
         .map(|t| {
             let f = &t["function"];
@@ -289,6 +379,14 @@ pub(crate) fn anthropic_tools_json_for(
 }
 
 #[allow(dead_code)]
+pub(crate) fn anthropic_tools_json_for(
+    permissions: Option<&crate::permissions::PermissionEngine>,
+    extra: &[Value],
+) -> Vec<Value> {
+    anthropic_tools_json_filtered(permissions, &ToolFilter::default(), extra)
+}
+
+#[allow(dead_code)]
 pub(crate) fn responses_tools_json() -> Vec<Value> {
     responses_tools_json_for(None, &[])
 }
@@ -296,4 +394,28 @@ pub(crate) fn responses_tools_json() -> Vec<Value> {
 #[allow(dead_code)]
 pub(crate) fn anthropic_tools_json() -> Vec<Value> {
     anthropic_tools_json_for(None, &[])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_filter_hides_delegate_for_subagents_and_enforces_allowlist() {
+        let root_tools = openai_tools_json_filtered(None, &ToolFilter::default(), &[]);
+        assert!(root_tools
+            .iter()
+            .any(|t| t["function"]["name"] == "delegate"));
+
+        let child_filter = ToolFilter {
+            depth: 1,
+            allowed: Some(vec!["read".into(), "grep".into(), "delegate".into()]),
+        };
+        let child_tools = openai_tools_json_filtered(None, &child_filter, &[]);
+        let names: Vec<&str> = child_tools
+            .iter()
+            .filter_map(|t| t["function"]["name"].as_str())
+            .collect();
+        assert_eq!(names, vec!["read", "grep"]);
+    }
 }

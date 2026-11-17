@@ -10,6 +10,7 @@ mod input;
 mod jobs;
 mod login;
 mod modals;
+mod ops;
 mod welcome;
 
 impl App {
@@ -78,6 +79,7 @@ impl App {
             notice_rx,
             active_assistant_id: None,
             active_tool_items: HashMap::new(),
+            active_monitors: Vec::new(),
             shell_watches: Vec::new(),
             login_rx: None,
             login_task: None,
@@ -119,6 +121,7 @@ impl App {
         self.agent_running = false;
         self.active_assistant_id = None;
         self.active_tool_items.clear();
+        self.active_monitors.clear();
         self.pending_ask = None;
         self.queued.clear();
         self.outbox.clear();

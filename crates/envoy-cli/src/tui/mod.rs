@@ -40,6 +40,8 @@ pub(crate) use crate::auth::{
     BUILTIN_PROVIDERS,
 };
 pub(crate) use crate::daemon;
+pub(crate) use crate::agent::checkpoint::CheckpointSummary;
+pub(crate) use crate::agent::MonitorInfo;
 pub(crate) use crate::llm::{AgentEvent, AskOption};
 pub(crate) use crate::permissions::{
     is_workspace_trusted, set_workspace_trusted, PermissionEngine, PermissionMode, RuleScope,
@@ -291,6 +293,7 @@ pub(crate) enum Command {
     OpenLogin,
     OpenModels,
     OpenSessions,
+    OpenRewind,
     NewSession,
     ToggleMode,
     OpenModePicker,
@@ -407,11 +410,17 @@ pub(crate) struct SessionsModal {
     selected: usize,
 }
 
+pub(crate) struct RewindModal {
+    checkpoints: Vec<CheckpointSummary>,
+    selected: usize,
+}
+
 pub(crate) enum Modal {
     Picker(Picker),
     Login(LoginModal),
     Models(ModelsModal),
     Sessions(SessionsModal),
+    Rewind(RewindModal),
 }
 
 // ------------------------------------------------------------------ live shell watch
@@ -433,6 +442,8 @@ pub(crate) enum UiNotice {
     Requeue(Vec<(String, SendMode)>),
     /// The daemon returned a recalled follow-up (or had none).
     Recalled(Option<String>),
+    /// Checkpoints fetched from the daemon for `/rewind` selection.
+    Checkpoints(Vec<CheckpointSummary>),
     /// Status toast emitted from an async daemon RPC.
     Toast(String, bool),
     /// Transcript notice emitted from an async command.
@@ -497,6 +508,7 @@ pub(crate) struct App {
     notice_rx: mpsc::UnboundedReceiver<UiNotice>,
     active_assistant_id: Option<u64>,
     active_tool_items: HashMap<String, u64>,
+    active_monitors: Vec<MonitorInfo>,
 
     // Active shell cards being tailed
     shell_watches: Vec<ShellWatch>,

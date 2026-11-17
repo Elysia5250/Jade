@@ -259,7 +259,9 @@ pub fn evaluate_tool_call(
 
 fn mode_baseline(mode: PermissionMode, tool: &str, ctx: &InspectContext) -> Decision {
     match tool {
-        "say" | "ask" | "todo" | "skill" => allow("interactive control tool", ctx),
+        "say" | "ask" | "todo" | "skill" | "delegate" | "monitor" => {
+            allow("interactive control tool", ctx)
+        }
         "read" | "ls" | "glob" | "grep" | "job" => {
             if ctx.outside_workspace {
                 match mode {

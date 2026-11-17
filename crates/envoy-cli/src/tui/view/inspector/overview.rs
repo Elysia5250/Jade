@@ -179,7 +179,60 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
     }
     rows.push(LinkedLine::from_line(Line::from("")));
 
-    // 5. Detached Jobs
+    // 5. Active & Recent Monitors
+    if !app.active_monitors.is_empty() {
+        let active_n = app.active_monitors.iter().filter(|m| m.active).count();
+        push_section_header(
+            &mut rows,
+            "MONITORS",
+            &format!("{active_n} active"),
+            theme,
+        );
+        for m in app.active_monitors.iter().take(8) {
+            let (glyph, color) = if m.active {
+                ("*", theme.ok)
+            } else {
+                ("✓", theme.dim)
+            };
+            let cap = m
+                .max_triggers
+                .map(|max| format!("{}/{}", m.trigger_count, max))
+                .unwrap_or_else(|| format!("{}", m.trigger_count));
+            let suffix = if m.active {
+                format!(" ({cap}) [stop]")
+            } else {
+                format!(" ({cap})")
+            };
+            let label = truncate_width(
+                &format!("#{} {}", m.id, m.label),
+                w.saturating_sub(display_width(&suffix) + 6).max(8),
+            );
+            let mut spans = vec![
+                LinkedSpan {
+                    span: Span::styled(format!("  {glyph} "), Style::default().fg(color)),
+                    target: None,
+                },
+                LinkedSpan {
+                    span: Span::styled(label, Style::default().fg(theme.text)),
+                    target: None,
+                },
+                LinkedSpan {
+                    span: Span::styled(format!(" ({cap})"), Style::default().fg(theme.dim)),
+                    target: None,
+                },
+            ];
+            if m.active {
+                spans.push(LinkedSpan {
+                    span: Span::styled(" [stop]", Style::default().fg(theme.warn)),
+                    target: Some(HitTarget::StopMonitor(m.id)),
+                });
+            }
+            rows.push(LinkedLine::from_linked(spans));
+        }
+        rows.push(LinkedLine::from_line(Line::from("")));
+    }
+
+    // 6. Detached Jobs
     push_section_header(&mut rows, "jobs", &format!("{}", app.jobs.len()), theme);
     if app.jobs.is_empty() {
         rows.push(LinkedLine::from_line(Line::styled(
