@@ -19,7 +19,7 @@ use crate::daemon;
 use crate::mcp::client::McpManager;
 use crate::session::{ChatMessage, ChatRole};
 use anyhow::{bail, Result};
-use envoy_service::{dialer_for, AgentDialer, Remote};
+use envoy_service::{dialer_for, AgentDialer, Remote, UnixDialer};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -54,6 +54,7 @@ pub async fn run_agent_turn(cfg: TurnConfig, tx: mpsc::UnboundedSender<AgentEven
     let host = SubagentHost {
         data_dir: cfg.data_dir.clone(),
         conduit: cfg.conduit.clone(),
+        local_socket: cfg.local_socket.clone(),
         target: cfg.target.clone(),
         cwd: cfg.cwd.clone(),
         provider: cfg.provider.clone(),
@@ -100,6 +101,7 @@ pub(crate) async fn execute_loop(
         .connect_timeout(Duration::from_secs(20))
         .build()?;
 
+    let is_local = cfg.target == "local" || cfg.target.is_empty();
     if opts.depth == 0 {
         let bg_http = http.clone();
         let bg_dir = cfg.data_dir.clone();
@@ -107,7 +109,7 @@ pub(crate) async fn execute_loop(
             refresh_models_dev_if_stale(&bg_http, &bg_dir).await;
         });
 
-        if cfg.target == "local" || cfg.target.is_empty() {
+        if is_local && cfg.local_socket.is_none() {
             daemon::ensure(&cfg.data_dir).await?;
         }
     }
@@ -120,8 +122,11 @@ pub(crate) async fn execute_loop(
     let mut context_tokens = 0u64;
     let mut calibration = TokenCalibration::default();
 
-    let remote: Remote<Box<dyn AgentDialer>> =
-        Remote::new(dialer_for(&cfg.data_dir, &cfg.target, cfg.conduit.clone()));
+    let dialer: Box<dyn AgentDialer> = match (&cfg.local_socket, is_local) {
+        (Some(sock), true) => Box::new(UnixDialer::new(sock.clone())),
+        _ => dialer_for(&cfg.data_dir, &cfg.target, cfg.conduit.clone()),
+    };
+    let remote: Remote<Box<dyn AgentDialer>> = Remote::new(dialer);
 
     let mcp = if opts.connect_mcp {
         Some(McpManager::connect_configured(&cfg.data_dir, &cfg.cwd).await)
@@ -624,6 +629,7 @@ mod tests {
         let cfg = TurnConfig {
             data_dir: dir.clone(),
             conduit: None,
+            local_socket: None,
             target: "local".into(),
             cwd: dir.clone(),
             provider: provider.clone(),

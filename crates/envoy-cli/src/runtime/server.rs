@@ -25,6 +25,7 @@ use tracing::debug;
 pub(crate) struct Live {
     pub(crate) cwd: PathBuf,
     pub(crate) target: String,
+    pub(crate) local_socket: Option<PathBuf>,
     pub(crate) messages: Vec<ChatMessage>,
     events: Vec<SeqEvent>,
     seq: u64,
@@ -77,6 +78,7 @@ impl Live {
         Self {
             cwd,
             target,
+            local_socket: None,
             messages,
             events: Vec::new(),
             seq: 0,
@@ -221,6 +223,7 @@ impl Runtime {
         let (
             cwd,
             target,
+            local_socket,
             history,
             asks,
             steer,
@@ -240,6 +243,7 @@ impl Runtime {
             (
                 state.cwd.clone(),
                 state.target.clone(),
+                state.local_socket.clone(),
                 state.messages.clone(),
                 state.asks.clone(),
                 state.steer.clone(),
@@ -256,6 +260,7 @@ impl Runtime {
         let cfg = TurnConfig {
             data_dir: self.data_dir.clone(),
             conduit: None,
+            local_socket,
             target,
             cwd,
             provider,

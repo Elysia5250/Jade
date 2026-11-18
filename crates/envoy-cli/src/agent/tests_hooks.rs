@@ -186,6 +186,7 @@ async fn loop_hooks_pipeline_permission_recheck_and_stop_reentry() {
     let cfg = TurnConfig {
         data_dir: data.clone(),
         conduit: None,
+        local_socket: None,
         target: "local".into(),
         cwd: ws.clone(),
         provider: StoredProvider {
@@ -332,6 +333,7 @@ async fn subagent_start_block_fallback_stop_and_ordered_state_merge() {
     let host = SubagentHost {
         data_dir: data.clone(),
         conduit: None,
+        local_socket: None,
         target: "local".into(),
         cwd: ws.clone(),
         provider: StoredProvider {

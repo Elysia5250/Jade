@@ -6,7 +6,7 @@ use crate::agent::checkpoint::apply_file_baselines;
 use crate::agent::{AgentEvent, MonitorBroker, MonitorInfo};
 use crate::session::{ChatMessage, ChatRole};
 use anyhow::{bail, Result};
-use envoy_service::{dialer_for, AgentDialer, Remote};
+use envoy_service::{dialer_for, AgentDialer, Remote, UnixDialer};
 use std::sync::{Arc, Mutex};
 
 impl Runtime {
@@ -98,18 +98,22 @@ impl Runtime {
             bail!("no such session: {id}");
         };
 
-        let (target, net_baselines) = {
+        let (target, local_socket, net_baselines) = {
             let state = live.lock().unwrap();
             if state.running {
                 bail!("session is busy; wait for the active turn to finish or interrupt first");
             }
             let (idx, net) = state.checkpoints.plan_rewind(checkpoint_id)?;
-            (state.target.clone(), (idx, net))
+            (state.target.clone(), state.local_socket.clone(), (idx, net))
         };
 
         let (idx, net) = net_baselines;
-        let remote: Remote<Box<dyn AgentDialer>> =
-            Remote::new(dialer_for(&self.data_dir, &target, None));
+        let dialer: Box<dyn AgentDialer> =
+            match (local_socket, target == "local" || target.is_empty()) {
+                (Some(sock), true) => Box::new(UnixDialer::new(sock)),
+                _ => dialer_for(&self.data_dir, &target, None),
+            };
+        let remote: Remote<Box<dyn AgentDialer>> = Remote::new(dialer);
         let (restored_files, deleted_files, skipped_files) =
             apply_file_baselines(&remote, &target, &net).await;
 

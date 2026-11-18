@@ -99,10 +99,12 @@ pub async fn run_hook_process(
 
     let pid = child.id();
     let stdin_payload = serde_json::to_vec(ctx).unwrap_or_else(|_| b"{}".to_vec());
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(&stdin_payload).await;
-        let _ = stdin.shutdown().await;
-    }
+    let stdin_task = child.stdin.take().map(|mut stdin| {
+        tokio::spawn(async move {
+            let _ = stdin.write_all(&stdin_payload).await;
+            let _ = stdin.shutdown().await;
+        })
+    });
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
@@ -127,7 +129,7 @@ pub async fn run_hook_process(
     };
 
     let elapsed = || start.elapsed().as_millis() as u64;
-    match tokio::time::timeout(Duration::from_millis(timeout_ms), wait_fut).await {
+    let res = match tokio::time::timeout(Duration::from_millis(timeout_ms), wait_fut).await {
         Ok((Ok(status), out_bytes, err_bytes)) => (
             HookExecOutcome::Exited {
                 code: status.code(),
@@ -147,7 +149,11 @@ pub async fn run_hook_process(
             kill_process_group(pid);
             (HookExecOutcome::TimedOut, elapsed())
         }
+    };
+    if let Some(task) = stdin_task {
+        task.abort();
     }
+    res
 }
 
 /// Pure explicit state transition: applies one hook step's outcome onto `HookContext`.

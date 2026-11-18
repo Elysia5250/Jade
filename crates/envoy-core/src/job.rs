@@ -50,6 +50,7 @@ struct Inner {
     logs: JobLogs,
     max_jobs: usize,
     table: Mutex<Table>,
+    persist_lock: Mutex<()>,
     /// Wakes log followers and anything else waiting on job state.
     wake: Arc<Notify>,
 }
@@ -114,6 +115,7 @@ impl Jobs {
                 logs,
                 max_jobs,
                 table: Mutex::new(table),
+                persist_lock: Mutex::new(()),
                 wake: Arc::new(Notify::new()),
             }),
         };
@@ -348,12 +350,21 @@ impl Jobs {
     ) {
         let cancel = Arc::new(Notify::new());
         let pid_slot = Arc::new(AtomicU32::new(0));
-        {
+        let already_cancelled = {
             let mut t = self.inner.table.lock().unwrap();
-            if let Some(e) = t.jobs.get_mut(&id) {
-                e.cancel = Some(cancel.clone());
-                e.pid_slot = Some(pid_slot.clone());
+            match t.jobs.get_mut(&id) {
+                Some(e) if e.cancelled => true,
+                Some(e) => {
+                    e.cancel = Some(cancel.clone());
+                    e.pid_slot = Some(pid_slot.clone());
+                    false
+                }
+                None => true,
             }
+        };
+        if already_cancelled {
+            self.finish(id, JobResult::Killed);
+            return;
         }
 
         let spec = ExecSpec {
@@ -399,12 +410,14 @@ impl Jobs {
         if !known {
             return;
         }
+        self.prune();
         self.persist();
         self.inner.wake.notify_waiters();
         self.schedule();
     }
 
     fn persist(&self) {
+        let _guard = self.inner.persist_lock.lock().unwrap();
         let jobs: Vec<Job> = {
             let t = self.inner.table.lock().unwrap();
             t.jobs.values().map(|e| self.snapshot(e)).collect()
@@ -425,10 +438,20 @@ impl Jobs {
     fn prune(&self) {
         let keep: Vec<JobId> = {
             let mut t = self.inner.table.lock().unwrap();
-            let ids: Vec<JobId> = t.jobs.keys().copied().collect();
-            if ids.len() > KEEP_JOBS {
-                for id in &ids[..ids.len() - KEEP_JOBS] {
-                    t.jobs.remove(id);
+            if t.jobs.len() > KEEP_JOBS {
+                let mut excess = t.jobs.len() - KEEP_JOBS;
+                let done_ids: Vec<JobId> = t
+                    .jobs
+                    .iter()
+                    .filter(|(_, e)| e.job.state.is_done())
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in done_ids {
+                    if excess == 0 {
+                        break;
+                    }
+                    t.jobs.remove(&id);
+                    excess -= 1;
                 }
             }
             t.jobs.keys().copied().collect()

@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 pub struct TurnConfig {
     pub data_dir: PathBuf,
     pub conduit: Option<PathBuf>,
+    pub local_socket: Option<PathBuf>,
     pub target: String,
     pub cwd: PathBuf,
     pub provider: StoredProvider,

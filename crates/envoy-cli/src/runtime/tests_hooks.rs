@@ -154,6 +154,7 @@ async fn session_start_and_user_prompt_submit_thread_hook_context_and_block() {
         TurnConfig {
             data_dir: data.clone(),
             conduit: None,
+            local_socket: None,
             target: "local".into(),
             cwd: ws.clone(),
             provider: provider.clone(),

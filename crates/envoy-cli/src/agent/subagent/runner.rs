@@ -28,6 +28,7 @@ const MAX_BATCH_TASKS: usize = 8;
 pub(crate) struct SubagentHost {
     pub(crate) data_dir: PathBuf,
     pub(crate) conduit: Option<PathBuf>,
+    pub(crate) local_socket: Option<PathBuf>,
     pub(crate) target: String,
     pub(crate) cwd: PathBuf,
     pub(crate) provider: StoredProvider,
@@ -282,6 +283,7 @@ async fn run_single_subagent(
     let cfg = TurnConfig {
         data_dir: host.data_dir.clone(),
         conduit: host.conduit.clone(),
+        local_socket: host.local_socket.clone(),
         target: host.target.clone(),
         cwd: host.cwd.clone(),
         provider,
@@ -620,6 +622,7 @@ mod tests {
         let host = SubagentHost {
             data_dir: dir.clone(),
             conduit: None,
+            local_socket: None,
             target: "local".into(),
             cwd: dir.clone(),
             provider,

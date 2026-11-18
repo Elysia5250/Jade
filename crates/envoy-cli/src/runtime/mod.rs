@@ -11,6 +11,8 @@ mod protocol;
 mod server;
 #[cfg(test)]
 mod tests_hooks;
+#[cfg(test)]
+mod tests_stress;
 
 pub use client::{attach, request, tell};
 #[allow(unused_imports)]

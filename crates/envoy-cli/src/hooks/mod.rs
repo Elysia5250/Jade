@@ -6,6 +6,8 @@
 pub mod config;
 pub mod exec;
 pub mod types;
+#[cfg(test)]
+mod tests_stress;
 
 use crate::agent::{AgentEvent, AskBroker, AskOption};
 use crate::permissions::audit::{now_ms, redact_secrets};
@@ -163,12 +165,14 @@ fn record_hook_audit(data_dir: &Path, ctx: &HookContext, duration_ms: u64) {
         trace: &ctx.trace,
     };
     if let Ok(line) = serde_json::to_string(&entry) {
+        let mut buf = line.into_bytes();
+        buf.push(b'\n');
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
         {
-            let _ = writeln!(f, "{line}");
+            let _ = f.write_all(&buf);
         }
     }
 }

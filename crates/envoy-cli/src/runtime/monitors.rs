@@ -5,7 +5,7 @@ use crate::agent::{MonitorBroker, MonitorInfo, MonitorStartSpec};
 use crate::session::strip_ansi;
 use anyhow::{bail, Result};
 use envoy_proto::LogRecord;
-use envoy_service::{dialer_for, AgentDialer, Remote};
+use envoy_service::{dialer_for, AgentDialer, Remote, UnixDialer};
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
@@ -47,6 +47,7 @@ struct HubInner {
 pub(crate) struct MonitorHub {
     session_id: String,
     data_dir: PathBuf,
+    local_socket: Mutex<Option<PathBuf>>,
     runtime: Weak<Runtime>,
     inner: Mutex<HubInner>,
 }
@@ -56,12 +57,17 @@ impl MonitorHub {
         Arc::new(Self {
             session_id,
             data_dir,
+            local_socket: Mutex::new(None),
             runtime,
             inner: Mutex::new(HubInner {
                 next_id: 1,
                 monitors: HashMap::new(),
             }),
         })
+    }
+
+    pub(crate) fn set_local_socket(&self, sock: Option<PathBuf>) {
+        *self.local_socket.lock().unwrap() = sock;
     }
 
     pub(crate) fn active_list(&self) -> Vec<MonitorInfo> {
@@ -167,6 +173,7 @@ impl MonitorBroker for MonitorHub {
         let weak_rt = self.runtime.clone();
         let session_id = self.session_id.clone();
         let data_dir = self.data_dir.clone();
+        let local_socket = self.local_socket.lock().unwrap().clone();
         let monitor_id = info.id;
         let info_for_task = info.clone();
         let handle = tokio::spawn(async move {
@@ -174,6 +181,7 @@ impl MonitorBroker for MonitorHub {
                 weak_rt,
                 session_id,
                 data_dir,
+                local_socket,
                 spec,
                 info_for_task,
                 cancel_rx,
@@ -232,8 +240,13 @@ impl MonitorBroker for MonitorHub {
                 handle.abort();
             }
             if stopped_info.owns_job {
-                let remote: Remote<Box<dyn AgentDialer>> =
-                    Remote::new(dialer_for(&self.data_dir, &target, None));
+                let local_socket = self.local_socket.lock().unwrap().clone();
+                let dialer: Box<dyn AgentDialer> =
+                    match (local_socket, target == "local" || target.is_empty()) {
+                        (Some(sock), true) => Box::new(UnixDialer::new(sock)),
+                        _ => dialer_for(&self.data_dir, &target, None),
+                    };
+                let remote: Remote<Box<dyn AgentDialer>> = Remote::new(dialer);
                 let _ = remote.cancel(&target, stopped_info.job_id).await;
             }
             if let Some(rt) = self.runtime.upgrade() {
@@ -248,12 +261,17 @@ async fn poll_monitor_loop(
     weak_rt: Weak<Runtime>,
     session_id: String,
     data_dir: PathBuf,
+    local_socket: Option<PathBuf>,
     spec: MonitorStartSpec,
     initial_info: MonitorInfo,
     mut cancel_rx: watch::Receiver<bool>,
 ) {
-    let remote: Remote<Box<dyn AgentDialer>> =
-        Remote::new(dialer_for(&data_dir, &spec.target, None));
+    let dialer: Box<dyn AgentDialer> =
+        match (local_socket, spec.target == "local" || spec.target.is_empty()) {
+            (Some(sock), true) => Box::new(UnixDialer::new(sock)),
+            _ => dialer_for(&data_dir, &spec.target, None),
+        };
+    let remote: Remote<Box<dyn AgentDialer>> = Remote::new(dialer);
     let debounce = Duration::from_millis(spec.debounce_ms.clamp(100, 30_000));
     let mut cursor = 0u64;
     let mut decoder = LineAccumulator::default();

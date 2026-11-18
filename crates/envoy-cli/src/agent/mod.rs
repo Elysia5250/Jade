@@ -16,6 +16,8 @@ mod providers;
 pub(crate) mod subagent;
 #[cfg(test)]
 mod tests_hooks;
+#[cfg(test)]
+mod tests_stress;
 pub(crate) mod tools;
 
 pub use asks::AskBroker;
