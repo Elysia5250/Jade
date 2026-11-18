@@ -342,6 +342,12 @@ fn running_tools_and_groups_render_progressive_phrases_with_decrypt_effect() {
             started_ms: now_ms(),
         });
     }
+    let sep_id = app.session.alloc_id();
+    app.session.items.push(TranscriptItem::Say {
+        id: sep_id,
+        text: "editing file".into(),
+        level: "info".into(),
+    });
     let edit_id = app.session.alloc_id();
     app.session.items.push(TranscriptItem::Tool {
         id: edit_id,
@@ -365,8 +371,10 @@ fn running_tools_and_groups_render_progressive_phrases_with_decrypt_effect() {
     for spinner_ch in ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] {
         assert!(!rendered.contains(spinner_ch), "unexpected spinner {spinner_ch}:\n{rendered}");
     }
-    assert!(rendered.contains("src/main.rs"), "running edit path should render:\n{rendered}");
-    assert!(rendered.contains("cargo test"), "running group tail should render:\n{rendered}");
+    assert!(
+        !rendered.contains("src/main.rs") && !rendered.contains("cargo test"),
+        "collapsed running tools must hide concrete paths and commands:\n{rendered}"
+    );
     assert!(
         app.hit_regions
             .iter()
@@ -374,5 +382,82 @@ fn running_tools_and_groups_render_progressive_phrases_with_decrypt_effect() {
         "running command group should remain expandable"
     );
 
+    let card_hit = app
+        .hit_regions
+        .iter()
+        .find(|hr| matches!(hr.target, HitTarget::ToggleToolCard(_)))
+        .expect("single running edit hit region")
+        .rect;
+    click_at(&mut app, card_hit.x, card_hit.y);
+    let opened = draw_rows(&mut app, 110, 28).join("\n");
+    assert!(
+        opened.contains("src/main.rs"),
+        "clicking collapsed running edit should reveal target path:\n{opened}"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn done_and_failed_single_tools_fold_without_check_or_cross_badges() {
+    let dir = temp_workspace();
+    let mut app = test_app(&dir);
+    app.agent_running = true;
+
+    let uid = app.session.alloc_id();
+    app.session.items.push(TranscriptItem::User {
+        id: uid,
+        text: "verify".into(),
+        mode: "Agent".into(),
+        cwd: dir.display().to_string(),
+        ts_ms: now_ms(),
+    });
+    for (name, title, status) in [
+        ("todo", "todo write", CardStatus::Done),
+        ("edit", "edit src/a.rs", CardStatus::Done),
+        ("exec", "$ false", CardStatus::Error),
+    ] {
+        let tid = app.session.alloc_id();
+        app.session.items.push(TranscriptItem::Tool {
+            id: tid,
+            call_id: format!("t-{tid}"),
+            name: name.into(),
+            title: title.into(),
+            subtitle: String::new(),
+            job_id: None,
+            target: "local".into(),
+            output: Vec::new(),
+            status,
+            collapsed: true,
+            duration_ms: Some(25),
+            exit_code: (status == CardStatus::Error).then_some(1),
+            started_ms: now_ms(),
+        });
+        let sid = app.session.alloc_id();
+        app.session.items.push(TranscriptItem::Say {
+            id: sid,
+            text: format!("step {sid}"),
+            level: "info".into(),
+        });
+    }
+
+    let text = draw_rows(&mut app, 110, 32).join("\n");
+    assert!(
+        !text.contains('✓') && !text.contains('✗'),
+        "collapsed transcript should hide leading check and cross glyphs:\n{text}"
+    );
+    assert!(
+        text.contains("> 1 tool") && text.contains("> Edited 1 file") && text.contains("> Ran 1 command (failed)"),
+        "single finished/failed tools should fold cleanly with uniform '>':\n{text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn markdown_table_keeps_escaped_and_inline_code_pipes_inside_cell() {
+    let cols = split_table_row("| grep | `def (add\\|multiply)` | passed |");
+    assert_eq!(cols, vec!["grep", "`def (add|multiply)`", "passed"]);
+    let code_cols = split_table_row("| grep | `a|b` | passed |");
+    assert_eq!(code_cols, vec!["grep", "`a|b`", "passed"]);
 }

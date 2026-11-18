@@ -197,8 +197,6 @@ pub(super) fn render_explore_group(
 ) -> LinkedLine {
     let mut ids: Vec<u64> = Vec::new();
     let mut any_running = false;
-    let mut any_err = false;
-    let mut latest_title = "";
     let mut min_start = u64::MAX;
     let mut total_dur = 0u64;
 
@@ -206,7 +204,6 @@ pub(super) fn render_explore_group(
         let TranscriptItem::Tool {
             id,
             name,
-            title,
             status,
             started_ms,
             duration_ms,
@@ -222,10 +219,6 @@ pub(super) fn render_explore_group(
         if *status == CardStatus::Running {
             any_running = true;
         }
-        if *status == CardStatus::Error {
-            any_err = true;
-        }
-        latest_title = title.as_str();
         min_start = min_start.min(*started_ms);
         total_dur += duration_ms.unwrap_or_else(|| now_ms().saturating_sub(*started_ms));
     }
@@ -253,31 +246,17 @@ pub(super) fn render_explore_group(
             theme,
             target.clone(),
         ));
-        let suffix_budget = width.saturating_sub(phrase.len() + 6).max(8);
-        let tail = if latest_title.is_empty() {
-            format!("  {elapsed}")
-        } else {
-            format!(
-                " - {}  {elapsed}",
-                truncate_width(latest_title, suffix_budget.saturating_sub(elapsed.len() + 5))
-            )
-        };
         spans.push(LinkedSpan {
-            span: Span::styled(truncate_width(&tail, suffix_budget), Style::default().fg(theme.dim)),
+            span: Span::styled(format!("  {elapsed}"), Style::default().fg(theme.dim)),
             target,
         });
         LinkedLine::from_linked(spans)
     } else {
-        let (glyph, glyph_fg) = if any_err {
-            ("✗", theme.bad)
-        } else {
-            (">", theme.dim)
-        };
         let summary = activity_sentence(group, &[]);
         let text = format!("{summary}  {elapsed}");
         LinkedLine::from_linked(vec![
             LinkedSpan {
-                span: Span::styled(format!("  {glyph} "), Style::default().fg(glyph_fg)),
+                span: Span::styled("  > ", Style::default().fg(theme.dim)),
                 target: Some(HitTarget::ToggleToolGroup(ids.clone())),
             },
             LinkedSpan {
@@ -493,7 +472,23 @@ pub(super) fn render_tool_header(
         }
     };
 
-    if let Some((done_verb, run_verb, raw_path)) = file_verb {
+    if status == CardStatus::Running && collapsed {
+        let phrase = file_verb
+            .map(|(_, run_verb, _)| run_verb)
+            .unwrap_or_else(|| running_tool_phrase(name));
+        spans.extend(decrypt_spans(
+            phrase,
+            0,
+            elapsed,
+            id,
+            theme,
+            Some(HitTarget::ToggleToolCard(id)),
+        ));
+        spans.push(LinkedSpan {
+            span: Span::styled(format!("  {elapsed}", elapsed = meta_parts[0]), Style::default().fg(theme.dim)),
+            target: Some(HitTarget::ToggleToolCard(id)),
+        });
+    } else if let Some((done_verb, run_verb, raw_path)) = file_verb {
         let rel = normalize_display_path(&app.session.cwd, Path::new(raw_path.trim()));
         let verb = if status == CardStatus::Running {
             run_verb

@@ -429,11 +429,42 @@ pub(crate) fn is_table_start(lines: &[&str], i: usize) -> bool {
 }
 
 pub(crate) fn split_table_row(line: &str) -> Vec<String> {
-    line.trim()
-        .trim_matches('|')
-        .split('|')
-        .map(|c| c.trim().to_string())
-        .collect()
+    let mut trimmed = line.trim();
+    if let Some(rest) = trimmed.strip_prefix('|') {
+        trimmed = rest;
+    }
+    if trimmed.ends_with('|') && !trimmed.ends_with("\\|") {
+        trimmed = &trimmed[..trimmed.len() - 1];
+    }
+    let mut cells = Vec::new();
+    let mut cur = String::new();
+    let mut in_code = false;
+    let mut chars = trimmed.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '`' => {
+                in_code = !in_code;
+                cur.push(ch);
+            }
+            '\\' => {
+                if let Some(&next) = chars.peek() {
+                    if next == '|' {
+                        cur.push('|');
+                        chars.next();
+                        continue;
+                    }
+                }
+                cur.push(ch);
+            }
+            '|' if !in_code => {
+                cells.push(cur.trim().to_string());
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    cells.push(cur.trim().to_string());
+    cells
 }
 
 #[derive(Clone, Copy)]

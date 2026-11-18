@@ -538,16 +538,12 @@ fn settled_turn_folds_edits_explores_and_commands() {
     app.agent_running = true;
     let live = draw(&mut app, &mut terminal);
     assert!(
-        live.contains("Edited src/a.rs"),
-        "a running turn still shows the edit:\n{live}"
+        !live.contains("Edited src/a.rs") && !live.contains('✓'),
+        "a running turn folds edits/explores/commands cleanly without checkmarks:\n{live}"
     );
     assert!(
-        live.contains("ran 1 command"),
-        "commands fold with the reads while the turn is open:\n{live}"
-    );
-    assert!(
-        !live.contains("Edited 1 file, explored 1 file, ran 1 command"),
-        "the whole turn stays open until it finishes:\n{live}"
+        live.contains("Edited 1 file, explored 1 file, ran 1 command"),
+        "all collapsed tools fold into one clean summary row while open:\n{live}"
     );
     assert!(!live.contains("● ▍"), "no stray caret:\n{live}");
 

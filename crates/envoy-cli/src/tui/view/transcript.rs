@@ -136,11 +136,13 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
             let mut tool_count = 0usize;
             let mut first_id = 0u64;
             let mut all_collapsed = true;
+            let mut any_running = false;
             for entry in &app.session.items[start..end] {
                 if let TranscriptItem::Tool {
                     id,
                     name,
                     collapsed,
+                    status,
                     ..
                 } = entry
                 {
@@ -154,10 +156,13 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
                     if !collapsed {
                         all_collapsed = false;
                     }
+                    if *status == CardStatus::Running {
+                        any_running = true;
+                    }
                 }
             }
 
-            if tool_count >= 2 && all_collapsed {
+            if all_collapsed && (tool_count >= 2 || (tool_count == 1 && !any_running)) {
                 last_notice = None;
                 push_blank_linked(&mut lines);
                 if !app.expanded_explore_groups.contains(&first_id) {
@@ -529,27 +534,7 @@ fn render_single_item(
 }
 
 fn is_groupable_tool(item: &TranscriptItem) -> bool {
-    matches!(
-        item,
-        TranscriptItem::Tool { name, .. }
-            if matches!(
-                name.as_str(),
-                "read"
-                    | "glob"
-                    | "grep"
-                    | "ls"
-                    | "todo"
-                    | "job"
-                    | "monitor"
-                    | "say"
-                    | "exec"
-                    | "shell"
-                    | "skill"
-                    | "webfetch"
-                    | "delegate"
-                    | "ask"
-            )
-    )
+    matches!(item, TranscriptItem::Tool { .. })
 }
 
 fn is_reasoning_only(item: &TranscriptItem) -> bool {
