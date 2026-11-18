@@ -248,12 +248,13 @@ pub(crate) fn render_markdown_linked(
             if in_code {
                 let lang = fence.trim();
                 code_lang = Lang::from_hint(lang);
+                let label = if lang.is_empty() {
+                    " +--".to_string()
+                } else {
+                    format!(" +-- {lang}")
+                };
                 out.push(LinkedLine::from_line(Line::styled(
-                    if lang.is_empty() {
-                        " +--".to_string()
-                    } else {
-                        format!(" +- {lang}")
-                    },
+                    truncate_width(&label, width),
                     Style::default().fg(theme.border),
                 )));
             } else {
@@ -267,9 +268,11 @@ pub(crate) fn render_markdown_linked(
             continue;
         }
         if in_code {
-            let shown = truncate_width(raw, width.saturating_sub(4));
+            // The bar sits in the same column as the '+' on the fence.
+            let gutter = " | ";
+            let shown = truncate_width(raw, width.saturating_sub(display_width(gutter)).max(4));
             let mut spans = vec![LinkedSpan {
-                span: Span::styled(" | ", Style::default().fg(theme.border)),
+                span: Span::styled(gutter, Style::default().fg(theme.border)),
                 target: None,
             }];
             let code_spans = highlight_code_line(
@@ -309,16 +312,17 @@ pub(crate) fn render_markdown_linked(
             i += 1;
             continue;
         }
-        if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
-            let item = trimmed.trim_start_matches(['-', '*']).trim_start();
-            let linked = inline_spans_linked(item, theme, cwd, changed, index);
+        if let Some((indent, marker, body)) = list_marker(raw) {
+            let linked = inline_spans_linked(body, theme, cwd, changed, index);
+            let first = format!("{}{marker}", " ".repeat(indent));
+            let cont = " ".repeat(display_width(&first));
             let wrapped = wrap_linked_spans(
                 LinkedSpan {
-                    span: Span::styled(" * ", Style::default().fg(theme.accent)),
+                    span: Span::styled(first, Style::default().fg(theme.accent)),
                     target: None,
                 },
                 LinkedSpan {
-                    span: Span::raw("   "),
+                    span: Span::raw(cont),
                     target: None,
                 },
                 linked,
@@ -349,6 +353,37 @@ pub(crate) fn render_markdown_linked(
         i += 1;
     }
     out
+}
+
+/// Leading indent plus an unordered or `1.` marker. Indent is kept so nested
+/// items stay to the right of their parent.
+fn list_marker(raw: &str) -> Option<(usize, String, &str)> {
+    let indent = raw
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .map(|c| if c == '\t' { 2 } else { 1 })
+        .sum();
+    let rest = raw.trim_start();
+    if let Some(body) = rest
+        .strip_prefix("- ")
+        .or_else(|| rest.strip_prefix("* "))
+        .or_else(|| rest.strip_prefix("+ "))
+    {
+        return Some((indent, "* ".to_string(), body));
+    }
+    let mut digits = 0usize;
+    for c in rest.chars() {
+        if c.is_ascii_digit() && digits < 3 {
+            digits += 1;
+        } else {
+            break;
+        }
+    }
+    if digits > 0 && rest[digits..].starts_with(". ") {
+        let marker = format!("{}. ", &rest[..digits]);
+        return Some((indent, marker, &rest[digits + 2..]));
+    }
+    None
 }
 
 pub(crate) fn wrap_linked_spans(

@@ -83,9 +83,7 @@ pub fn prepare_command(
                 SandboxBackend::Landlock(abi) => {
                     build_landlock(abi, argv, &root, &[], false, *allow_net)
                 }
-                SandboxBackend::None => bail!(
-                    "sandbox requested (read-only), but neither `bwrap` nor Landlock is available"
-                ),
+                SandboxBackend::None => host_without_sandbox(argv, "read-only"),
             }
         }
         SandboxPolicy::WorkspaceWrite {
@@ -101,11 +99,29 @@ pub fn prepare_command(
                 SandboxBackend::Landlock(abi) => {
                     build_landlock(abi, argv, &root, extra_rw, true, *allow_net)
                 }
-                SandboxBackend::None => bail!(
-                    "sandbox requested (workspace-write), but neither `bwrap` nor Landlock is available"
-                ),
+                SandboxBackend::None => host_without_sandbox(argv, "workspace-write"),
             }
         }
+    }
+}
+
+/// Linux without `bwrap` or Landlock still refuses, so a server does not
+/// silently drop isolation. Other hosts have no backend yet; the permission
+/// engine remains the gate and the command runs.
+fn host_without_sandbox(argv: &[String], kind: &str) -> Result<PreparedCommand> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = argv;
+        bail!("sandbox requested ({kind}), but neither `bwrap` nor Landlock is available")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = kind;
+        Ok(PreparedCommand {
+            argv: argv.to_vec(),
+            cwd_override: None,
+            landlock: None,
+        })
     }
 }
 
@@ -481,5 +497,26 @@ mod tests {
         assert!(prep.argv.contains(&dir.join(".git").display().to_string()));
         assert!(prep.argv.contains(&dir.join(".env").display().to_string()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn host_without_a_backend_still_runs_the_requested_command() {
+        if !matches!(probe_backend(), SandboxBackend::None) {
+            return;
+        }
+        let argv = vec!["sh".into(), "-c".into(), "echo ok".into()];
+        let prep = prepare_command(
+            &argv,
+            "/tmp",
+            &SandboxPolicy::WorkspaceWrite {
+                cwd: "/tmp".into(),
+                extra_rw: vec![],
+                allow_net: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(prep.argv, argv);
+        assert!(prep.landlock.is_none());
     }
 }

@@ -22,6 +22,7 @@ pub(crate) async fn stream_openai_codex(
     permissions: Option<&PermissionEngine>,
     tool_filter: &ToolFilter,
     extra_tools: &[Value],
+    session_id: &str,
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<StreamReply> {
     let (token, account_id) = match &provider.credential {
@@ -89,6 +90,7 @@ pub(crate) async fn stream_openai_codex(
     if let Some(acct) = account_id {
         req = req.header("ChatGPT-Account-ID", acct);
     }
+    req = super::apply_opencode_session(req, provider, session_id);
 
     let resp = req
         .json(&body)

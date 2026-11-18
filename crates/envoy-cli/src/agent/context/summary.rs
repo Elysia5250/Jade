@@ -167,6 +167,7 @@ pub async fn summarize_messages(
     slice: &[ChatMessage],
     focus: Option<&str>,
     for_handoff: bool,
+    session_id: &str,
 ) -> Result<String> {
     let (previous, dossier) = condense_for_summary(slice);
     let mut body = summary_input(&previous, &dossier);
@@ -198,6 +199,7 @@ pub async fn summarize_messages(
                     None,
                     &tool_filter,
                     &[],
+                    session_id,
                     &sink_tx,
                 )
                 .await
@@ -212,6 +214,7 @@ pub async fn summarize_messages(
                     None,
                     &tool_filter,
                     &[],
+                    session_id,
                     &sink_tx,
                 )
                 .await
@@ -228,6 +231,7 @@ pub async fn summarize_messages(
                     &tool_filter,
                     &[],
                     crate::agent::providers::anthropic_max_tokens(cap.max_output),
+                    session_id,
                     &sink_tx,
                 )
                 .await

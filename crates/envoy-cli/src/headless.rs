@@ -615,10 +615,13 @@ mod tests {
             ..Default::default()
         };
         let res = run_with_writers(&ctx, false, None, args, &mut out, &mut err).await;
-        assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("maximum tool steps (1)"));
+        assert!(res.is_ok(), "{res:?}");
         let stream = String::from_utf8(out).unwrap();
-        assert!(stream.contains("\"TurnError\""), "{stream}");
+        assert!(
+            stream.contains("Stopped after 1 tool steps."),
+            "{stream}"
+        );
+        assert!(!stream.contains("\"TurnError\""), "{stream}");
 
         let _ = std::fs::remove_dir_all(&root);
     }

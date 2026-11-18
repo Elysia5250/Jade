@@ -30,6 +30,7 @@ pub(crate) async fn stream_anthropic(
     tool_filter: &ToolFilter,
     extra_tools: &[Value],
     max_tokens: u32,
+    session_id: &str,
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<StreamReply> {
     let url = format!("{}/messages", provider.base_url.trim_end_matches('/'));
@@ -108,6 +109,7 @@ pub(crate) async fn stream_anthropic(
                 );
         }
     }
+    req = super::apply_opencode_session(req, provider, session_id);
 
     let resp = req
         .json(&body)

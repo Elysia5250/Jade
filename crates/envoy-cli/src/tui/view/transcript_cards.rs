@@ -9,6 +9,171 @@ pub(super) fn spinner() -> &'static str {
     SPIN[((now_ms() / 90) as usize) % SPIN.len()]
 }
 
+pub(super) fn activity_sentence(
+    items: &[TranscriptItem],
+    changes: &[crate::session::FileChange],
+) -> String {
+    let mut edited: Vec<String> = Vec::new();
+    let mut explored: Vec<String> = Vec::new();
+    let mut explored_extra = 0usize;
+    let mut commands = 0usize;
+    let mut other = 0usize;
+    let mut any_err = false;
+    for item in items {
+        let TranscriptItem::Tool {
+            name,
+            title,
+            status,
+            ..
+        } = item
+        else {
+            continue;
+        };
+        if name == "say" {
+            continue;
+        }
+        if *status == CardStatus::Error {
+            any_err = true;
+        }
+        match name.as_str() {
+            "edit" | "write" => {
+                let path = title_path(title, name);
+                if !path.is_empty() && !edited.iter().any(|p| p == &path) {
+                    edited.push(path);
+                }
+            }
+            "read" | "ls" => {
+                let path = title_path(title, name);
+                if path.is_empty() {
+                    explored_extra += 1;
+                } else if !explored.iter().any(|p| p == &path) {
+                    explored.push(path);
+                }
+            }
+            "glob" | "grep" => explored_extra += 1,
+            "exec" | "shell" => commands += 1,
+            _ => other += 1,
+        }
+    }
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for path in &edited {
+        if let Some(change) = changes.iter().find(|c| {
+            c.path == *path || c.path.ends_with(&format!("/{path}")) || path.ends_with(&c.path)
+        }) {
+            added += change.added;
+            removed += change.removed;
+        }
+    }
+    let explored_n = explored.len() + explored_extra;
+    let mut parts = Vec::new();
+    if !edited.is_empty() {
+        parts.push(format!("Edited {}", count_words(edited.len(), "file", "files")));
+    }
+    if explored_n > 0 {
+        parts.push(format!(
+            "explored {}",
+            count_words(explored_n, "file", "files")
+        ));
+    }
+    if commands > 0 {
+        parts.push(format!(
+            "ran {}",
+            count_words(commands, "command", "commands")
+        ));
+    }
+    if other > 0 {
+        parts.push(format!("{} more", other));
+    }
+    let mut text = if parts.is_empty() {
+        "Worked".to_string()
+    } else {
+        let mut joined = parts.join(", ");
+        if let Some(rest) = joined.strip_prefix("explored") {
+            joined = format!("Explored{rest}");
+        } else if let Some(rest) = joined.strip_prefix("ran") {
+            joined = format!("Ran{rest}");
+        }
+        joined
+    };
+    if added > 0 || removed > 0 {
+        text.push_str(&format!(" +{added} -{removed}"));
+    }
+    if any_err {
+        text.push_str(" (failed)");
+    }
+    text
+}
+
+fn count_words(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
+fn title_path(title: &str, name: &str) -> String {
+    title
+        .strip_prefix(&format!("{name} "))
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+pub(super) fn render_turn_summary(
+    items: &[TranscriptItem],
+    changes: &[crate::session::FileChange],
+    width: usize,
+    theme: &Theme,
+    is_selected: bool,
+    expanded: bool,
+) -> LinkedLine {
+    let mut ids = Vec::new();
+    for item in items {
+        if let TranscriptItem::Tool { id, name, .. } = item {
+            if name != "say" {
+                ids.push(*id);
+            }
+        }
+    }
+    let sentence = activity_sentence(items, changes);
+    let glyph = if expanded { "v" } else { ">" };
+    let mut spans = vec![
+        LinkedSpan {
+            span: Span::styled(format!("  {glyph} "), Style::default().fg(theme.dim)),
+            target: Some(HitTarget::ToggleToolGroup(ids.clone())),
+        },
+        LinkedSpan {
+            span: Span::styled(
+                truncate_width(&sentence, width.saturating_sub(16)),
+                Style::default().fg(theme.dim),
+            ),
+            target: Some(HitTarget::ToggleToolGroup(ids.clone())),
+        },
+    ];
+    if expanded {
+        spans.push(LinkedSpan {
+            span: Span::raw("  "),
+            target: None,
+        });
+        spans.push(LinkedSpan {
+            span: Span::styled(
+                "[collapse]",
+                Style::default()
+                    .fg(theme.link)
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+            target: Some(HitTarget::ToggleToolGroup(ids)),
+        });
+    }
+    let mut line = LinkedLine::from_linked(spans);
+    if is_selected {
+        line.line_style = Some(Style::default().bg(theme.selection));
+    }
+    line
+}
+
 pub(super) fn render_explore_group(
     group: &[TranscriptItem],
     width: usize,
@@ -18,11 +183,9 @@ pub(super) fn render_explore_group(
     let mut ids: Vec<u64> = Vec::new();
     let mut any_running = false;
     let mut any_err = false;
-    let mut counts: Vec<(&str, usize)> = Vec::new();
     let mut latest_title = "";
     let mut min_start = u64::MAX;
     let mut total_dur = 0u64;
-    let mut real_tools = 0usize;
 
     for item in group {
         let TranscriptItem::Tool {
@@ -41,7 +204,6 @@ pub(super) fn render_explore_group(
         if name == "say" {
             continue;
         }
-        real_tools += 1;
         if *status == CardStatus::Running {
             any_running = true;
         }
@@ -51,18 +213,9 @@ pub(super) fn render_explore_group(
         latest_title = title.as_str();
         min_start = min_start.min(*started_ms);
         total_dur += duration_ms.unwrap_or_else(|| now_ms().saturating_sub(*started_ms));
-        if let Some((_, c)) = counts.iter_mut().find(|(n, _)| *n == name.as_str()) {
-            *c += 1;
-        } else {
-            counts.push((name.as_str(), 1));
-        }
     }
 
-    let summary: String = counts
-        .iter()
-        .map(|(n, c)| format!("{n} x{c}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let summary = activity_sentence(group, &[]);
     let elapsed = if min_start == u64::MAX {
         fmt_duration(0)
     } else if any_running {
@@ -81,14 +234,11 @@ pub(super) fn render_explore_group(
 
     let text = if any_running {
         format!(
-            "Exploring - {}  ({summary})  {elapsed}",
-            truncate_width(
-                latest_title,
-                width.saturating_sub(summary.len() + 24).max(8)
-            )
+            "Working - {}  {elapsed}",
+            truncate_width(latest_title, width.saturating_sub(18).max(8))
         )
     } else {
-        format!("Explored {real_tools} ops ({summary})  {elapsed}")
+        format!("{summary}  {elapsed}")
     };
 
     let mut line = LinkedLine::from_linked(vec![
@@ -116,28 +266,16 @@ pub(super) fn render_explore_expanded_header(
     theme: &Theme,
 ) -> LinkedLine {
     let mut ids: Vec<u64> = Vec::new();
-    let mut counts: Vec<(&str, usize)> = Vec::new();
-    let mut real_tools = 0usize;
     for item in group {
         if let TranscriptItem::Tool { id, name, .. } = item {
-            ids.push(*id);
             if name == "say" {
                 continue;
             }
-            real_tools += 1;
-            if let Some((_, c)) = counts.iter_mut().find(|(n, _)| *n == name.as_str()) {
-                *c += 1;
-            } else {
-                counts.push((name.as_str(), 1));
-            }
+            ids.push(*id);
         }
     }
-    let summary: String = counts
-        .iter()
-        .map(|(n, c)| format!("{n} x{c}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let label = format!("  v Explored {real_tools} ops ({summary})  ");
+    let summary = activity_sentence(group, &[]);
+    let label = format!("  v {summary}  ");
     LinkedLine::from_linked(vec![
         LinkedSpan {
             span: Span::styled(

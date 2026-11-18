@@ -176,11 +176,11 @@ pub(crate) fn openai_tools_json() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "say",
-                "description": "Report a short progress note to the user. Non-blocking.",
+                "description": "One present-tense sentence for the user when you change phase, start work that will take a while, or the plan changes. Use the user's language, for example `现在在对列表缩进，接着改代码块对齐`. Emit this in the same response as the next real tool; do not spend a turn on it alone. Do not call it for every file read, and do not restate the request. Non-blocking.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "text": { "type": "string" },
+                        "text": { "type": "string", "description": "One sentence in the user's language, present tense." },
                         "kind": { "type": "string", "enum": ["progress", "note", "warning"], "default": "progress" }
                     },
                     "required": ["text"]

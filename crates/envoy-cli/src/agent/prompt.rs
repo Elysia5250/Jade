@@ -19,7 +19,7 @@ pub(crate) fn build_system_prompt(target: &str, cwd: &Path) -> String {
          - Prefer `read`/`edit`/`ls`/`glob`/`grep` over shell commands when inspecting or editing files. Relative paths resolve against the working directory. Tool arguments come from the tool schema.\n\
          - Use `exec` with a small wait for long commands, then `job` to follow or cancel. Report exact commands, job ids and exit codes; never invent tool output.\n\
          - Answer in Markdown. Use tables for comparisons, but keep them narrow enough for a terminal.\n\
-         - Use `say` for short progress notes the user should see while you work (one sentence). Do not use it to restate the request.\n\
+         - Call `say` with one present-tense sentence when you change phase, start work that will take a while, or the plan changes. Use the user's language, for example `现在在对列表缩进，接着改代码块对齐`. Put `say` in the same response as the next real tool; do not spend a turn on it alone. Do not call it for every file read, and do not restate the request.\n\
          - Use `ask` when a decision is genuinely ambiguous. Give 2-5 options and mark exactly one `recommended`.",
         cwd.display(),
         host_line(target)
@@ -262,6 +262,13 @@ mod tests {
         assert!(names.contains(&"exec".to_string()), "{names:?}");
         let prompt = build_system_prompt("local", std::path::Path::new("/tmp"));
         assert!(prompt.contains("`say`"));
+        assert!(prompt.contains("same response as the next real tool"));
+        let say = openai_tools_json()
+            .into_iter()
+            .find(|tool| tool["function"]["name"] == "say")
+            .expect("say");
+        let desc = say["function"]["description"].as_str().unwrap();
+        assert!(desc.contains("same response as the next real tool"), "{desc}");
         assert!(prompt.contains("`ask`"));
         assert!(prompt.contains("recommended"));
     }

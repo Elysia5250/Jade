@@ -104,28 +104,34 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     };
 
     let ask_h = ask_inline_height(app, column.width);
+    // Keep the composer off the transcript and the status line. An ask card
+    // sits in that upper gap and keeps a single row on either side.
     let (body_area, ask_area, editor_area, status_area) = if ask_h > 0 {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(3),
+                Constraint::Length(1),
                 Constraint::Length(ask_h),
+                Constraint::Length(1),
                 Constraint::Length(editor_height),
+                Constraint::Length(1),
                 Constraint::Length(1),
             ])
             .split(column);
-        (chunks[0], Some(chunks[1]), chunks[2], chunks[3])
+        (chunks[0], Some(chunks[2]), chunks[4], chunks[6])
     } else {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(3),
-                Constraint::Length(1),
+                Constraint::Length(2),
                 Constraint::Length(editor_height),
+                Constraint::Length(1),
                 Constraint::Length(1),
             ])
             .split(column);
-        (chunks[0], None, chunks[2], chunks[3])
+        (chunks[0], None, chunks[2], chunks[4])
     };
 
     draw_transcript(frame, app, &theme, body_area);
@@ -224,11 +230,26 @@ fn snapshot_screen_lines(buf: &ratatui::buffer::Buffer, out: &mut Vec<Vec<String
 /// Add a separator only when the previous line is not already blank (and not
 /// at the very top of the transcript).
 pub(super) fn push_blank_linked(lines: &mut Vec<LinkedLine>) {
-    let already = lines
-        .last()
-        .map(|line| line.spans.iter().all(|s| s.span.content.trim().is_empty()))
-        .unwrap_or(true);
-    if !already {
+    ensure_trailing_blanks(lines, 1);
+}
+
+/// Leave `n` blank lines before the next block. No-op at the top.
+pub(super) fn ensure_trailing_blanks(lines: &mut Vec<LinkedLine>, n: usize) {
+    if lines.is_empty() || n == 0 {
+        return;
+    }
+    let mut have = 0usize;
+    for line in lines.iter().rev() {
+        let blank = line
+            .spans
+            .iter()
+            .all(|s| s.span.content.trim().is_empty());
+        if !blank {
+            break;
+        }
+        have += 1;
+    }
+    for _ in have..n {
         lines.push(LinkedLine::from_line(Line::from("")));
     }
 }

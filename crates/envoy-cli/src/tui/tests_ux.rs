@@ -388,7 +388,7 @@ fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice
         .map(|c| c.symbol())
         .collect();
     assert!(
-        collapsed.contains("Explored 2 ops (read x1, monitor x1)"),
+        collapsed.contains("Explored 1 file, 1 more"),
         "collapsed:\n{collapsed}"
     );
     assert!(collapsed.contains("▌ run checks"), "user card:\n{collapsed}");
@@ -424,6 +424,168 @@ fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice
         .rect;
     app.dispatch_click(col_btn.x, col_btn.y);
     assert!(app.expanded_explore_groups.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lists_keep_nesting_and_code_fences_share_a_column() {
+    let src = "intro\n\n```rust\nfn main() {\n    let x = 1;\n}\n```\n\n- parent\n  - child item\n1. first\n";
+    let rendered = render_markdown_linked(
+        src,
+        60,
+        &THEMES[0].1,
+        std::path::Path::new("/tmp"),
+        &[],
+        &super::links::WorkspaceIndex::default(),
+    );
+    let lines: Vec<String> = rendered
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+    let fence = lines.iter().find(|line| line.contains("+--")).unwrap();
+    let code = lines.iter().find(|line| line.contains("fn main")).unwrap();
+    assert_eq!(
+        fence.find('+'),
+        code.find('|'),
+        "fence {fence:?} code {code:?}"
+    );
+    assert!(lines.iter().any(|line| line.contains("+-- rust")));
+    let parent = lines.iter().find(|line| line.contains("parent")).unwrap();
+    let child = lines.iter().find(|line| line.contains("child")).unwrap();
+    assert!(
+        child.find('*') > parent.find('*'),
+        "parent {parent:?} child {child:?}"
+    );
+    assert!(lines.iter().any(|line| line.contains("1. first")));
+}
+
+#[test]
+fn settled_turn_folds_edits_explores_and_commands() {
+    let dir = tmpdir("foldsum");
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.connected = true;
+    app.apply_event(
+        1,
+        AgentEvent::FileChanged {
+            path: "src/a.rs".into(),
+            before: "old\n".into(),
+            after: "new\nline\n".into(),
+            added: 2,
+            removed: 1,
+            existed_before: true,
+            restorable_before: true,
+        },
+    );
+    let uid = app.session.alloc_id();
+    app.session.items.push(TranscriptItem::User {
+        id: uid,
+        text: "fix it".into(),
+        mode: "Agent".into(),
+        cwd: ".".into(),
+        ts_ms: now_ms(),
+    });
+    for (name, title) in [
+        ("edit", "edit src/a.rs"),
+        ("read", "read src/a.rs"),
+        ("exec", "$ cargo test"),
+    ] {
+        let id = app.session.alloc_id();
+        app.session.items.push(TranscriptItem::Tool {
+            id,
+            call_id: id.to_string(),
+            name: name.into(),
+            title: title.into(),
+            subtitle: String::new(),
+            job_id: None,
+            target: "local".into(),
+            output: Vec::new(),
+            status: CardStatus::Done,
+            collapsed: true,
+            duration_ms: Some(10),
+            exit_code: Some(0),
+            started_ms: now_ms(),
+        });
+    }
+    let aid = app.session.alloc_id();
+    app.session.items.push(TranscriptItem::Assistant {
+        id: aid,
+        text: "Done.".into(),
+        reasoning: "looking".into(),
+        reasoning_collapsed: true,
+        model: "m".into(),
+        done: false,
+        error: None,
+    });
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+    let draw = |app: &mut App, terminal: &mut Terminal<TestBackend>| {
+        terminal.draw(|frame| view::draw(frame, app)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>()
+    };
+
+    app.agent_running = true;
+    let live = draw(&mut app, &mut terminal);
+    assert!(
+        live.contains("Edited src/a.rs"),
+        "a running turn still shows the edit:\n{live}"
+    );
+    assert!(
+        live.contains("ran 1 command"),
+        "commands fold with the reads while the turn is open:\n{live}"
+    );
+    assert!(
+        !live.contains("Edited 1 file, explored 1 file, ran 1 command"),
+        "the whole turn stays open until it finishes:\n{live}"
+    );
+    assert!(!live.contains("● ▍"), "no stray caret:\n{live}");
+
+    let thinking = app.session.alloc_id();
+    app.session.items.insert(
+        1,
+        TranscriptItem::Assistant {
+            id: thinking,
+            text: String::new(),
+            reasoning: "still thinking about the diff".into(),
+            reasoning_collapsed: true,
+            model: "m".into(),
+            done: false,
+            error: None,
+        },
+    );
+    let with_caret = draw(&mut app, &mut terminal);
+    assert!(
+        with_caret.contains("Thinking"),
+        "thinking row stays:\n{with_caret}"
+    );
+    assert!(!with_caret.contains("● ▍"), "caret stays gone:\n{with_caret}");
+    app.session.items.remove(1);
+
+    app.agent_running = false;
+    if let Some(TranscriptItem::Assistant { done, .. }) = app.session.items.last_mut() {
+        *done = true;
+    }
+    let settled = draw(&mut app, &mut terminal);
+    assert!(
+        settled.contains("Edited 1 file, explored 1 file, ran 1 command +2 -1"),
+        "settled:\n{settled}"
+    );
+    assert!(
+        !settled.contains("$ cargo test"),
+        "commands fold into the summary:\n{settled}"
+    );
+    assert!(settled.contains("● Done."), "reply stays:\n{settled}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

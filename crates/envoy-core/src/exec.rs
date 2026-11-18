@@ -358,6 +358,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn workspace_write_without_a_backend_still_runs() {
+        if !matches!(sandbox::probe_backend(), sandbox::SandboxBackend::None) {
+            return;
+        }
+        let dir = tmpdir("nosandbox");
+        let path = dir.join("1.log");
+        let log = LogWriter::create(path.clone(), Arc::new(Notify::new())).unwrap();
+        let mut job = spec(vec!["sh", "-c", "echo sandbox-ok"], 10);
+        job.sandbox = SandboxPolicy::WorkspaceWrite {
+            cwd: dir.display().to_string(),
+            extra_rw: vec![],
+            allow_net: false,
+        };
+        let result = run_job(job, log, Arc::new(AtomicU32::new(0)), Arc::new(Notify::new())).await;
+        assert_eq!(result, JobResult::Success);
+        let (recs, _) = read_from(&path, 0, 4096).unwrap();
+        let out: String = recs
+            .iter()
+            .filter(|r| r.fd == 0)
+            .map(|r| String::from_utf8_lossy(&r.data).to_string())
+            .collect();
+        assert!(out.contains("sandbox-ok"), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn sandbox_allows_cwd_write_while_protecting_git_env_and_outside_paths() {
         if matches!(sandbox::probe_backend(), sandbox::SandboxBackend::None) {

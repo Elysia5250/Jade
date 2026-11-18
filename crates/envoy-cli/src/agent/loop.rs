@@ -18,7 +18,7 @@ use crate::auth::{ensure_fresh_provider, ProviderProtocol, StoredProvider};
 use crate::daemon;
 use crate::mcp::client::McpManager;
 use crate::session::{ChatMessage, ChatRole};
-use anyhow::{bail, Result};
+use anyhow::Result;
 use envoy_service::{dialer_for, AgentDialer, Remote, UnixDialer};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -339,7 +339,20 @@ pub(crate) async fn execute_loop(
             }
         }
 
-        bail!("reached maximum tool steps ({max_steps}) without a final response")
+        return finalize_step_limit(
+            &http,
+            &mut provider,
+            &cfg,
+            system,
+            messages,
+            total_in,
+            total_out,
+            context_tokens,
+            max_steps,
+            &hook_session,
+            tx,
+        )
+        .await;
     }
     .await;
 
@@ -350,7 +363,7 @@ pub(crate) async fn execute_loop(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn call_provider_with_overflow_retry(
+pub(crate) async fn call_provider_with_overflow_retry(
     http: &reqwest::Client,
     cfg: &TurnConfig,
     provider: &mut StoredProvider,
@@ -436,6 +449,7 @@ async fn call_provider_with_overflow_retry(
                 None,
                 Some(tx),
                 None,
+                cfg.permissions.session_id(),
             )
             .await?
         }
@@ -490,6 +504,7 @@ async fn dispatch_stream(
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<StreamReply> {
     let provider = provider.routed_for(model_id);
+    let session_id = permissions.map(|p| p.session_id()).unwrap_or("");
     match provider.protocol {
         ProviderProtocol::OpenAiChat => {
             stream_openai_chat(
@@ -501,6 +516,7 @@ async fn dispatch_stream(
                 permissions,
                 tool_filter,
                 extra_tools,
+                session_id,
                 tx,
             )
             .await
@@ -515,6 +531,7 @@ async fn dispatch_stream(
                 permissions,
                 tool_filter,
                 extra_tools,
+                session_id,
                 tx,
             )
             .await
@@ -530,6 +547,7 @@ async fn dispatch_stream(
                 tool_filter,
                 extra_tools,
                 max_tokens,
+                session_id,
                 tx,
             )
             .await
@@ -537,154 +555,88 @@ async fn dispatch_stream(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::auth::{Credential, ModelRef};
-    use crate::session::ToolCall;
-    use std::sync::{Arc, Mutex};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    #[tokio::test]
-    async fn overflow_triggers_one_compaction_retry_and_second_failure_errors() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let hits = Arc::new(Mutex::new(0usize));
-        let hits_srv = Arc::clone(&hits);
-
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut sock, _)) = listener.accept().await else {
-                    break;
-                };
-                let n = {
-                    let mut g = hits_srv.lock().unwrap();
-                    *g += 1;
-                    *g
-                };
-                let mut buf = [0u8; 8192];
-                let _ = sock.read(&mut buf).await;
-                let resp = if n == 1 {
-                    let body = "{\"error\":{\"message\":\"maximum context length is 65536 tokens; too many\"}}";
-                    format!(
-                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
-                        body.len()
-                    )
-                } else if n == 2 {
-                    let body = "data: {\"choices\":[{\"delta\":{\"content\":\"## Goal\\n- Fixed\"}}]}\n\ndata: [DONE]\n\n";
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
-                        body.len()
-                    )
-                } else {
-                    let body = "{\"error\":{\"message\":\"context_length_exceeded\"}}";
-                    format!(
-                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
-                        body.len()
-                    )
-                };
-                let _ = sock.write_all(resp.as_bytes()).await;
+/// The step cap ended on a tool call. Ask once more with every tool removed so
+/// the turn still ends on a reply. Tool calls in that reply are not run.
+#[allow(clippy::too_many_arguments)]
+async fn finalize_step_limit(
+    http: &reqwest::Client,
+    provider: &mut StoredProvider,
+    cfg: &TurnConfig,
+    system: String,
+    mut messages: Vec<ChatMessage>,
+    mut total_in: u64,
+    mut total_out: u64,
+    mut context_tokens: u64,
+    max_steps: usize,
+    hook_session: &TurnHookSession,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> Result<LoopOutcome> {
+    let _ = tx.send(AgentEvent::AssistantStart {
+        model: cfg.model.display(),
+    });
+    messages.push(ChatMessage {
+        role: ChatRole::User,
+        content: format!(
+            "Tool step limit ({max_steps}) reached. Do not call tools. Answer the user now with the results you already have."
+        ),
+        reasoning: None,
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        tool_name: None,
+    });
+    let no_tools = ToolFilter {
+        depth: 0,
+        allowed: Some(Vec::new()),
+    };
+    let reply = dispatch_stream(
+        http,
+        provider,
+        &cfg.model.model_id,
+        &system,
+        &messages,
+        Some(&cfg.permissions),
+        &no_tools,
+        &[],
+        turn_max_tokens(cfg),
+        tx,
+    )
+    .await;
+    let fallback = format!(
+        "Stopped after {max_steps} tool steps. This is the final reply; the commands above are what ran."
+    );
+    let text = match reply {
+        Ok(reply) => {
+            total_in += reply.input_tokens;
+            total_out += reply.output_tokens;
+            if reply.input_tokens > 0 {
+                context_tokens = reply.input_tokens;
             }
-        });
-
-        let dir = std::env::temp_dir().join(format!("envoy-loop-retry-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let provider = StoredProvider {
-            id: "test".into(),
-            name: "Test".into(),
-            protocol: ProviderProtocol::OpenAiChat,
-            base_url: format!("http://{addr}/v1"),
-            credential: Credential::ApiKey {
-                key: "sk-test".into(),
-            },
-            custom_models: vec![],
-            model_routes: std::collections::BTreeMap::new(),
-            updated_ms: 0,
-        };
-        let mut history = vec![
-            ChatMessage {
-                role: ChatRole::User,
-                content: "old request".into(),
-                reasoning: None,
-                tool_calls: vec![ToolCall {
-                    id: "c1".into(),
-                    name: "exec".into(),
-                    arguments: "{}".into(),
-                }],
-                tool_call_id: None,
-                tool_name: None,
-            },
-            ChatMessage {
-                role: ChatRole::User,
-                content: "latest request".into(),
-                reasoning: None,
-                tool_calls: vec![],
-                tool_call_id: None,
-                tool_name: None,
-            },
-        ];
-        let cfg = TurnConfig {
-            data_dir: dir.clone(),
-            conduit: None,
-            local_socket: None,
-            target: "local".into(),
-            cwd: dir.clone(),
-            provider: provider.clone(),
-            model: ModelRef {
-                provider_id: "test".into(),
-                model_id: "test-model".into(),
-            },
-            history: history.clone(),
-            asks: super::super::asks::AskBroker::new(),
-            steer: Arc::new(Mutex::new(Vec::new())),
-            permissions: crate::permissions::PermissionEngine::new(
-                dir.clone(),
-                dir.clone(),
-                "test-s".into(),
-                "local".into(),
-                crate::permissions::PermissionMode::Default,
-            ),
-            monitors: None,
-            hooks: None,
-            hook_state: BTreeMap::new(),
-            hook_state_sink: None,
-            turn_seq: 0,
-            max_steps: None,
-        };
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let system = "sys";
-        let mut prov = provider;
-        let mut plan = resolve_budget(&dir, "test", "test-model");
-        let res = call_provider_with_overflow_retry(
-            &reqwest::Client::new(),
-            &cfg,
-            &mut prov,
-            system,
-            &mut history,
-            &ToolFilter::default(),
-            &[],
-            TokenCalibration::default(),
-            &mut plan,
-            None,
-            0,
-            &tx,
-        )
-        .await;
-
-        assert!(res.is_err());
-        assert_eq!(*hits.lock().unwrap(), 3); // 1 overflow + 1 summary + 1 retry (no infinite loop!)
-        let mut saw_compacted = false;
-        while let Ok(ev) = rx.try_recv() {
-            if matches!(ev, AgentEvent::Compacted { .. }) {
-                saw_compacted = true;
+            if reply.text.trim().is_empty() {
+                let _ = tx.send(AgentEvent::TextDelta(fallback.clone()));
+                fallback
+            } else {
+                reply.text
             }
         }
-        assert!(saw_compacted);
-        // Verified overflow calibration recorded 65536 into model_caps.json
-        assert_eq!(plan.hard_window, 65_536);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
+        Err(_) => {
+            let _ = tx.send(AgentEvent::TextDelta(fallback.clone()));
+            fallback
+        }
+    };
+    messages.push(ChatMessage {
+        role: ChatRole::Assistant,
+        content: text,
+        reasoning: None,
+        tool_calls: Vec::new(),
+        tool_call_id: None,
+        tool_name: None,
+    });
+    Ok(LoopOutcome {
+        messages,
+        input_tokens: total_in,
+        output_tokens: total_out,
+        context_tokens,
+        hook_state: hook_session.state.clone(),
+    })
 }
+

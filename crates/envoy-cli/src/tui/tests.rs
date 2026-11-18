@@ -571,3 +571,84 @@ async fn welcome_without_a_saved_session_mints_a_new_id() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn composer_and_turns_keep_vertical_room() {
+    use ratatui::backend::TestBackend;
+    let dir = tmpdir();
+    let mut app = App::new(dir.clone(), "local".into(), None, PathBuf::from("/tmp"));
+    app.connected = true;
+    app.show_sidebar = false;
+
+    for (user, reply) in [("first-question", "alpha-reply"), ("second-question", "beta-reply")] {
+        let uid = app.session.alloc_id();
+        app.session.items.push(TranscriptItem::User {
+            id: uid,
+            text: user.into(),
+            mode: "Agent".into(),
+            cwd: "/tmp".into(),
+            ts_ms: now_ms(),
+        });
+        let aid = app.session.alloc_id();
+        app.session.items.push(TranscriptItem::Assistant {
+            id: aid,
+            text: reply.into(),
+            reasoning: String::new(),
+            reasoning_collapsed: true,
+            model: "m".into(),
+            done: true,
+            error: None,
+        });
+    }
+
+    let width = 80u16;
+    let height = 36u16;
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    let buf = terminal.backend().buffer().clone();
+    let rows: Vec<String> = (0..height)
+        .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
+        .collect();
+    let row_of = |needle: &str| -> usize {
+        rows.iter()
+            .position(|row| row.contains(needle))
+            .unwrap_or_else(|| panic!("missing {needle}\n{}", rows.join("\n")))
+    };
+    let blanks_between = |from: usize, to: usize| -> usize {
+        rows[from + 1..to]
+            .iter()
+            .filter(|row| row.trim().is_empty())
+            .count()
+    };
+
+    let first = row_of("first-question");
+    let alpha = row_of("alpha-reply");
+    let second = row_of("second-question");
+    let within = blanks_between(first, alpha);
+    let between = blanks_between(alpha, second);
+    assert!(
+        between >= 2 && between > within,
+        "turn gap {between} should exceed the in-turn gap {within}\n{}",
+        rows.join("\n")
+    );
+
+    let top = rows
+        .iter()
+        .position(|row| row.contains('╭'))
+        .expect("composer top");
+    let bottom = rows
+        .iter()
+        .rposition(|row| row.contains('╰'))
+        .expect("composer bottom");
+    assert!(
+        top >= 2 && rows[top - 1].trim().is_empty() && rows[top - 2].trim().is_empty(),
+        "composer should have two blank rows above it\n{}",
+        rows.join("\n")
+    );
+    assert!(
+        rows[bottom + 1].trim().is_empty() && rows[bottom + 2].contains("agent"),
+        "composer should sit one row above the status line\n{}",
+        rows.join("\n")
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -128,6 +128,7 @@ pub async fn prepare_context(
     focus: Option<&str>,
     tx: Option<&mpsc::UnboundedSender<AgentEvent>>,
     pre_compact_hook: Option<PreCompactHook<'_>>,
+    session_id: &str,
 ) -> Result<Option<CompactionOutcome>> {
     let pinned = crate::agent::prompt::take_environment(messages);
     let outcome = prepare_context_body(
@@ -146,6 +147,7 @@ pub async fn prepare_context(
         focus,
         tx,
         pre_compact_hook,
+        session_id,
     )
     .await;
     crate::agent::prompt::restore_environment(messages, pinned);
@@ -175,6 +177,7 @@ async fn prepare_context_body(
     focus: Option<&str>,
     tx: Option<&mpsc::UnboundedSender<AgentEvent>>,
     pre_compact_hook: Option<PreCompactHook<'_>>,
+    session_id: &str,
 ) -> Result<Option<CompactionOutcome>> {
     let before_tokens = estimate_turn_tokens(system, messages, tools_overhead, calibration);
 
@@ -255,6 +258,7 @@ async fn prepare_context_body(
         &head,
         effective_focus.as_deref(),
         false,
+        session_id,
     )
     .await?;
 
@@ -280,6 +284,7 @@ pub async fn generate_handoff(
     system: &str,
     messages: &[ChatMessage],
     focus: Option<&str>,
+    session_id: &str,
 ) -> Result<HandoffOutcome> {
     let before_tokens = estimate_turn_tokens(
         system,
@@ -288,7 +293,7 @@ pub async fn generate_handoff(
         TokenCalibration::default(),
     );
     let summary = summarize_messages(
-        http, data_dir, provider, model_id, system, messages, focus, true,
+        http, data_dir, provider, model_id, system, messages, focus, true, session_id,
     )
     .await?;
     let after_tokens = estimate_turn_tokens(

@@ -22,6 +22,7 @@ pub(crate) async fn stream_openai_chat(
     permissions: Option<&PermissionEngine>,
     tool_filter: &ToolFilter,
     extra_tools: &[Value],
+    session_id: &str,
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<StreamReply> {
     let (bearer, base_url) = match &provider.credential {
@@ -100,6 +101,7 @@ pub(crate) async fn stream_openai_chat(
             .header("Editor-Version", "vscode/1.99.0")
             .header("Copilot-Integration-Id", "vscode-chat");
     }
+    req = super::apply_opencode_session(req, provider, session_id);
 
     let resp = req.json(&body).send().await.context("calling LLM API")?;
     let status = resp.status();
@@ -189,4 +191,68 @@ pub(crate) async fn stream_openai_chat(
         input_tokens,
         output_tokens,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::Credential;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn opencode_go_request_sends_the_session_header() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(String::new()));
+        let seen_srv = Arc::clone(&seen);
+        tokio::spawn(async move {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            *seen_srv.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let body = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n";
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+
+        let provider = StoredProvider {
+            id: "opencode-go".into(),
+            name: "OpenCode Go".into(),
+            protocol: crate::auth::ProviderProtocol::OpenAiChat,
+            base_url: format!("http://{addr}/v1"),
+            credential: Credential::ApiKey { key: "k".into() },
+            custom_models: vec![],
+            model_routes: Default::default(),
+            updated_ms: 0,
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let filter = ToolFilter::default();
+        let reply = stream_openai_chat(
+            &reqwest::Client::new(),
+            &provider,
+            "glm-5",
+            "sys",
+            &[],
+            None,
+            &filter,
+            &[],
+            "ses_abc",
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply.text, "ok");
+        let raw = seen.lock().unwrap().clone();
+        assert!(
+            raw.to_ascii_lowercase().contains("x-opencode-session: ses_abc"),
+            "{raw}"
+        );
+    }
 }

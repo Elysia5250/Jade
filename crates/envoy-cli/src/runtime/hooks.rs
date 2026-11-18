@@ -335,7 +335,16 @@ pub(crate) async fn run_manual_context_op(
         .build()?;
     let system = build_system_prompt(target, cwd);
     if handoff {
-        let out = generate_handoff(&http, data_dir, provider, model_id, &system, messages, focus)
+        let out = generate_handoff(
+            &http,
+            data_dir,
+            provider,
+            model_id,
+            &system,
+            messages,
+            focus,
+            id,
+        )
             .await?;
         return Ok(AgentEvent::HandoffReady {
             summary: out.summary,
@@ -380,6 +389,7 @@ pub(crate) async fn run_manual_context_op(
             engine: &engine,
             ctx: &mut hctx,
         }),
+        id,
     )
     .await;
 

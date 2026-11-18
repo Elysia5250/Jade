@@ -236,7 +236,7 @@ fn cursor_style_collapsed_explore_group_and_reasoning_expand_on_click() {
         "expected collapsed thought line:\n{collapsed_text}"
     );
     assert!(
-        collapsed_text.contains("> Explored 3 ops (read x2, grep x1)"),
+        collapsed_text.contains("> Explored 3 files"),
         "expected grouped explore summary line:\n{collapsed_text}"
     );
     assert!(

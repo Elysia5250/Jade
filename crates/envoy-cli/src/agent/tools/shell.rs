@@ -90,6 +90,14 @@ pub(crate) async fn exec_tool(
                 text.push_str("[stderr]\n");
                 text.push_str(&String::from_utf8_lossy(&err_all));
             }
+            if code != 0 && text.trim().is_empty() {
+                if let Ok(done) = remote.status(target, job.id).await {
+                    if let Some(result) = done.state.result() {
+                        text.push_str(&result.describe());
+                        text.push('\n');
+                    }
+                }
+            }
             text.push_str(&format!("\n[job #{} exit={code}]", job.id));
             return Ok((text, Some(code)));
         }
