@@ -6,22 +6,24 @@
 
 pub mod audit;
 pub mod paths;
+mod prompt;
 pub mod rules;
 pub mod shell;
 pub mod types;
 
-use crate::agent::{AgentEvent, AskBroker, AskOption};
+use crate::agent::{AgentEvent, AskBroker};
 use anyhow::{bail, Result};
 use envoy_proto::SandboxPolicy;
+use prompt::{prompt_user_approval, summarize_call, ApprovalChoice};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 pub use rules::{is_workspace_trusted, set_workspace_trusted};
 pub use types::{
-    Decision, Effect, PermissionMode, PermissionRule, PolicyFile, RuleScope, ToolAuth,
+    Decision, Effect, PermissionMode, PermissionRule, PolicyFile, RuleScope, SandboxOverride,
+    ToolAuth,
 };
 
 #[derive(Debug)]
@@ -33,6 +35,8 @@ pub struct PermissionEngine {
     mode: Mutex<PermissionMode>,
     session_allows: Mutex<Vec<PermissionRule>>,
     managed_override: Option<PathBuf>,
+    skip_permissions: Mutex<bool>,
+    sandbox_override: Mutex<Option<SandboxOverride>>,
 }
 
 impl PermissionEngine {
@@ -58,6 +62,8 @@ impl PermissionEngine {
             mode: Mutex::new(effective_mode),
             session_allows: Mutex::new(Vec::new()),
             managed_override: None,
+            skip_permissions: Mutex::new(false),
+            sandbox_override: Mutex::new(None),
         })
     }
 
@@ -79,6 +85,8 @@ impl PermissionEngine {
             mode: Mutex::new(mode),
             session_allows: Mutex::new(session_allows),
             managed_override: self.managed_override.clone(),
+            skip_permissions: Mutex::new(*self.skip_permissions.lock().unwrap()),
+            sandbox_override: Mutex::new(*self.sandbox_override.lock().unwrap()),
         })
     }
 
@@ -94,6 +102,22 @@ impl PermissionEngine {
 
     pub fn set_mode(&self, mode: PermissionMode) {
         *self.mode.lock().unwrap() = mode;
+    }
+
+    pub fn set_skip_permissions(&self, skip: bool) {
+        *self.skip_permissions.lock().unwrap() = skip;
+    }
+
+    pub fn skip_permissions(&self) -> bool {
+        *self.skip_permissions.lock().unwrap()
+    }
+
+    pub fn set_sandbox_override(&self, sandbox: Option<SandboxOverride>) {
+        *self.sandbox_override.lock().unwrap() = sandbox;
+    }
+
+    pub fn sandbox_override(&self) -> Option<SandboxOverride> {
+        *self.sandbox_override.lock().unwrap()
     }
 
     pub fn cwd(&self) -> &Path {
@@ -155,6 +179,8 @@ impl PermissionEngine {
         let detail = summarize_call(tool, args);
 
         let local_target = self.target == "local" || self.target.is_empty();
+        let skip_perms = self.skip_permissions() && mode != PermissionMode::Plan;
+        let sandbox_ovr = self.sandbox_override();
         let mut extra_rw = policies.extra_rw.clone();
         extra_rw.extend(decision.extra_rw.iter().cloned());
 
@@ -178,7 +204,14 @@ impl PermissionEngine {
                 bail!("permission denied: {}", decision.reason);
             }
             Effect::Allow => {
-                let sandbox = sandbox_for(local_target, &self.cwd, &extra_rw, false);
+                let sandbox = sandbox_for(
+                    local_target,
+                    &self.cwd,
+                    &extra_rw,
+                    skip_perms && decision.needs_net,
+                    skip_perms,
+                    sandbox_ovr,
+                );
                 audit::record_decision(
                     &self.data_dir,
                     audit::PermissionAuditEntry {
@@ -195,6 +228,53 @@ impl PermissionEngine {
                     },
                 );
                 Ok(ToolAuth { sandbox })
+            }
+            Effect::Ask if skip_perms => {
+                let sandbox = sandbox_for(
+                    local_target,
+                    &self.cwd,
+                    &extra_rw,
+                    true,
+                    true,
+                    sandbox_ovr,
+                );
+                audit::record_decision(
+                    &self.data_dir,
+                    audit::PermissionAuditEntry {
+                        ts_ms: audit::now_ms(),
+                        session_id: &self.session_id,
+                        target: &self.target,
+                        mode: mode.label(),
+                        tool,
+                        detail,
+                        decision: "ask",
+                        resolution: "dangerously_skip_permissions",
+                        reason: &decision.reason,
+                        sandbox: sandbox_label(&sandbox),
+                    },
+                );
+                Ok(ToolAuth { sandbox })
+            }
+            Effect::Ask if asks.is_non_interactive() => {
+                audit::record_decision(
+                    &self.data_dir,
+                    audit::PermissionAuditEntry {
+                        ts_ms: audit::now_ms(),
+                        session_id: &self.session_id,
+                        target: &self.target,
+                        mode: mode.label(),
+                        tool,
+                        detail,
+                        decision: "ask",
+                        resolution: "headless_ask_denied",
+                        reason: &decision.reason,
+                        sandbox: "none",
+                    },
+                );
+                bail!(
+                    "tool `{tool}` requires interactive approval ({}); re-run with --permission-mode auto or --dangerously-skip-permissions",
+                    decision.reason
+                );
             }
             Effect::Ask => {
                 let prompt_res =
@@ -269,7 +349,14 @@ impl PermissionEngine {
                 let sandbox = if full_host {
                     SandboxPolicy::DangerFullAccess
                 } else {
-                    sandbox_for(local_target, &self.cwd, &extra_rw, allow_net)
+                    sandbox_for(
+                        local_target,
+                        &self.cwd,
+                        &extra_rw,
+                        allow_net,
+                        false,
+                        sandbox_ovr,
+                    )
                 };
                 audit::record_decision(
                     &self.data_dir,
@@ -292,14 +379,35 @@ impl PermissionEngine {
     }
 }
 
-fn sandbox_for(local: bool, cwd: &Path, extra_rw: &[String], allow_net: bool) -> SandboxPolicy {
+fn sandbox_for(
+    local: bool,
+    cwd: &Path,
+    extra_rw: &[String],
+    allow_net: bool,
+    skip_perms: bool,
+    override_policy: Option<SandboxOverride>,
+) -> SandboxPolicy {
     if !local {
         return SandboxPolicy::Off;
     }
-    SandboxPolicy::WorkspaceWrite {
-        cwd: cwd.display().to_string(),
-        extra_rw: extra_rw.to_vec(),
-        allow_net,
+    match override_policy {
+        Some(SandboxOverride::Off) => SandboxPolicy::Off,
+        Some(SandboxOverride::DangerFullAccess) => SandboxPolicy::DangerFullAccess,
+        Some(SandboxOverride::ReadOnly) => SandboxPolicy::ReadOnly {
+            cwd: cwd.display().to_string(),
+            allow_net,
+        },
+        Some(SandboxOverride::WorkspaceWrite) => SandboxPolicy::WorkspaceWrite {
+            cwd: cwd.display().to_string(),
+            extra_rw: extra_rw.to_vec(),
+            allow_net,
+        },
+        None if skip_perms => SandboxPolicy::DangerFullAccess,
+        None => SandboxPolicy::WorkspaceWrite {
+            cwd: cwd.display().to_string(),
+            extra_rw: extra_rw.to_vec(),
+            allow_net,
+        },
     }
 }
 
@@ -311,133 +419,6 @@ fn sandbox_label(s: &SandboxPolicy) -> &'static str {
         SandboxPolicy::WorkspaceWrite { allow_net: false, .. } => "ws:offline",
         SandboxPolicy::WorkspaceWrite { allow_net: true, .. } => "ws:net",
         SandboxPolicy::DangerFullAccess => "danger-full-access",
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ApprovalChoice {
-    OnceOffline,
-    OnceWithNet,
-    OnceOutsideSandbox,
-    Session,
-    Project,
-    Deny,
-}
-
-async fn prompt_user_approval(
-    tool: &str,
-    detail: &str,
-    decision: &Decision,
-    asks: &Arc<AskBroker>,
-    tx: &mpsc::UnboundedSender<AgentEvent>,
-) -> Result<ApprovalChoice> {
-    let mut options = Vec::new();
-    if tool == "exec" && decision.needs_net {
-        options.push(AskOption {
-            label: "Allow once (with network)".into(),
-            description: Some("Run in workspace sandbox with network enabled for this command".into()),
-            recommended: false,
-        });
-        options.push(AskOption {
-            label: "Allow once (offline)".into(),
-            description: Some("Run inside default network-disabled sandbox".into()),
-            recommended: false,
-        });
-    } else if tool == "exec" && decision.outside_workspace {
-        options.push(AskOption {
-            label: "Allow once (with expanded path)".into(),
-            description: Some("Run inside sandbox with the referenced path bound".into()),
-            recommended: false,
-        });
-        options.push(AskOption {
-            label: "Allow once (unsandboxed)".into(),
-            description: Some("Run without OS sandbox restrictions for this command only".into()),
-            recommended: false,
-        });
-    } else {
-        options.push(AskOption {
-            label: "Allow once".into(),
-            description: Some("Approve this single tool invocation".into()),
-            recommended: false,
-        });
-    }
-    if let Some(rule) = &decision.suggested_rule {
-        options.push(AskOption {
-            label: "Allow for session".into(),
-            description: Some(format!("Session allow: {rule}")),
-            recommended: false,
-        });
-        options.push(AskOption {
-            label: "Always allow (project)".into(),
-            description: Some(format!("Save to .envoy/permissions.json: {rule}")),
-            recommended: false,
-        });
-    }
-    let deny_idx = options.len();
-    options.push(AskOption {
-        label: "Deny".into(),
-        description: Some("Refuse this operation".into()),
-        recommended: true,
-    });
-
-    let question = format!(
-        "Permission required for `{tool}` ({}):\n  {detail}",
-        decision.reason
-    );
-    let timeout_s = 120u64;
-    let _gate = asks.acquire_prompt().await;
-    let id = asks.next_id();
-    let (send, recv) = oneshot::channel();
-    asks.register(id, send);
-    let _ = tx.send(AgentEvent::Ask {
-        id,
-        question,
-        options: options.clone(),
-        recommended: deny_idx,
-        timeout_ms: timeout_s * 1000,
-    });
-
-    let answer = tokio::time::timeout(Duration::from_secs(timeout_s), recv).await;
-    asks.forget(id);
-    let chosen = match answer {
-        Ok(Ok(label)) => label,
-        _ => {
-            let _ = tx.send(AgentEvent::AskClosed { id });
-            return Ok(ApprovalChoice::Deny);
-        }
-    };
-
-    Ok(match chosen.as_str() {
-        "Allow once (with network)" | "Allow once (with expanded path)" => {
-            ApprovalChoice::OnceWithNet
-        }
-        "Allow once (unsandboxed)" => ApprovalChoice::OnceOutsideSandbox,
-        "Allow once" | "Allow once (offline)" => ApprovalChoice::OnceOffline,
-        "Allow for session" => ApprovalChoice::Session,
-        "Always allow (project)" => ApprovalChoice::Project,
-        _ => ApprovalChoice::Deny,
-    })
-}
-
-fn summarize_call(tool: &str, args: &Value) -> String {
-    match tool {
-        "exec" => args["command"].as_str().unwrap_or("").to_string(),
-        "read" | "write" | "edit" | "ls" => args["path"].as_str().unwrap_or(".").to_string(),
-        "glob" | "grep" => format!(
-            "{} ({})",
-            args["pattern"].as_str().unwrap_or("*"),
-            args["root"].as_str().unwrap_or(".")
-        ),
-        "webfetch" => args["url"].as_str().unwrap_or("").to_string(),
-        "delegate" => args["agent"]
-            .as_str()
-            .map(|a| format!("delegate {a}"))
-            .unwrap_or_else(|| "delegate batch".into()),
-        "monitor" => format!(
-            "monitor {}",
-            args["action"].as_str().unwrap_or("list")
-        ),
-        other => other.to_string(),
     }
 }
 
@@ -601,6 +582,63 @@ mod tests {
         let log = std::fs::read_to_string(audit::audit_log_path(&data)).unwrap();
         assert!(log.contains("\"resolution\":\"user_once_net\""), "{log}");
         assert!(log.contains("\"sandbox\":\"ws:net\""), "{log}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn headless_fast_fails_ask_while_skip_permissions_and_sandbox_override_work() {
+        let root = tmpdir("headless-perm");
+        let data = root.join("data");
+        let work = root.join("work");
+        let managed = root.join("managed.json");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(&managed, r#"{"deny":["Bash(sudo *)"]}"#).unwrap();
+
+        let eng = PermissionEngine::new(
+            data.clone(),
+            work.clone(),
+            "s-hl".into(),
+            "local".into(),
+            PermissionMode::Default,
+        );
+        let eng = Arc::new(
+            Arc::try_unwrap(eng)
+                .unwrap()
+                .with_managed_override(managed),
+        );
+        let asks = AskBroker::new_headless();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        // Without skip_permissions, headless Ask fails immediately without 120s wait.
+        let err = eng
+            .authorize_tool_call("exec", &json!({"command": "curl https://example.com"}), &asks, &tx)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("requires interactive approval"), "{err}");
+
+        // With skip_permissions, Ask is bypassed with DangerFullAccess by default,
+        // and SandboxOverride can still tighten/change it. Managed Deny stays enforced.
+        eng.set_skip_permissions(true);
+        let auth = eng
+            .authorize_tool_call("exec", &json!({"command": "curl https://example.com"}), &asks, &tx)
+            .await
+            .unwrap();
+        assert_eq!(auth.sandbox, SandboxPolicy::DangerFullAccess);
+
+        eng.set_sandbox_override(Some(SandboxOverride::WorkspaceWrite));
+        let auth_ws = eng
+            .authorize_tool_call("exec", &json!({"command": "ls"}), &asks, &tx)
+            .await
+            .unwrap();
+        assert!(matches!(auth_ws.sandbox, SandboxPolicy::WorkspaceWrite { .. }));
+
+        let denied = eng
+            .authorize_tool_call("exec", &json!({"command": "sudo id"}), &asks, &tx)
+            .await
+            .unwrap_err();
+        assert!(denied.to_string().contains("managed deny"), "{denied}");
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }

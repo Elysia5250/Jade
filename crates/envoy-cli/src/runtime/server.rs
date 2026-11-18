@@ -6,7 +6,7 @@ use super::ops::seed_checkpoint_user_turns;
 use super::protocol::{AgentReq, AgentResp, SendMode, SeqEvent, SessionInfo};
 use crate::agent::checkpoint::CheckpointStore;
 use crate::agent::MonitorBroker;
-use crate::auth::resolve_active_provider;
+use crate::auth::resolve_provider_with_overrides;
 use crate::hooks::HookEngine;
 use crate::llm::{AgentEvent, AskBroker, TurnConfig};
 use crate::permissions::{PermissionEngine, PermissionMode};
@@ -43,6 +43,8 @@ pub(crate) struct Live {
     pub(crate) checkpoints: CheckpointStore,
     pub(crate) active_checkpoint_id: Option<u64>,
     pub(crate) user_turns: usize,
+    pub(crate) model_override: Option<String>,
+    pub(crate) max_steps: Option<usize>,
     subs: Vec<mpsc::UnboundedSender<SeqEvent>>,
     turn: Option<tokio::task::JoinHandle<()>>,
     pump: Option<tokio::task::JoinHandle<()>>,
@@ -93,10 +95,18 @@ impl Live {
             checkpoints,
             active_checkpoint_id: None,
             user_turns,
+            model_override: None,
+            max_steps: None,
             subs: Vec::new(),
             turn: None,
             pump: None,
         }
+    }
+
+    pub(crate) fn subscribe(&mut self) -> mpsc::UnboundedReceiver<SeqEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.subs.push(tx);
+        rx
     }
 
     fn info(&self, id: &str) -> SessionInfo {
@@ -174,7 +184,10 @@ impl Runtime {
         live: Arc<Mutex<Live>>,
         prompt: Option<String>,
     ) {
-        let Some((provider, model)) = resolve_active_provider(&self.data_dir) else {
+        let model_override = live.lock().unwrap().model_override.clone();
+        let Some((provider, model)) =
+            resolve_provider_with_overrides(&self.data_dir, model_override.as_deref())
+        else {
             let mut state = live.lock().unwrap();
             if let Some(text) = prompt {
                 self.publish(
@@ -192,6 +205,17 @@ impl Runtime {
             );
             return;
         };
+        if model.model_id.trim().is_empty() {
+            let mut state = live.lock().unwrap();
+            state.running = false;
+            self.publish(
+                &mut state,
+                AgentEvent::TurnError(
+                    "no model selected: pass --model or set ENVOY_MODEL".into(),
+                ),
+            );
+            return;
+        }
 
         let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
         let (
@@ -206,6 +230,7 @@ impl Runtime {
             hook_state,
             hook_state_sink,
             turn_seq,
+            max_steps,
         ) = {
             let mut state = live.lock().unwrap();
             state.running = true;
@@ -224,6 +249,7 @@ impl Runtime {
                 hook_state,
                 Some(Arc::clone(&state.hook_state)),
                 state.turn_seq,
+                state.max_steps,
             )
         };
 
@@ -243,6 +269,7 @@ impl Runtime {
             hook_state,
             hook_state_sink,
             turn_seq,
+            max_steps,
         };
         debug!(session = %id, turn_seq, "turn start");
         let turn = tokio::spawn(Arc::clone(self).run_turn_with_hooks(
@@ -361,7 +388,10 @@ impl Runtime {
         let Some(live) = self.session(id) else {
             bail!("no such session: {id}");
         };
-        let Some((provider, model)) = resolve_active_provider(&self.data_dir) else {
+        let model_override = live.lock().unwrap().model_override.clone();
+        let Some((provider, model)) =
+            resolve_provider_with_overrides(&self.data_dir, model_override.as_deref())
+        else {
             bail!("no model configured: run /login");
         };
         let (cwd, target, mut messages) = {

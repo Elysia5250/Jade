@@ -201,6 +201,12 @@ pub async fn confirm_hook_ask(
     reason: &str,
     by: &str,
 ) -> std::result::Result<(), String> {
+    if asks.is_non_interactive() {
+        return Err(format!(
+            "hook `{by}` ({}) requires interactive confirmation in headless mode: {reason}",
+            stage.label()
+        ));
+    }
     let _gate = asks.acquire_prompt().await;
     let id = asks.next_id();
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();

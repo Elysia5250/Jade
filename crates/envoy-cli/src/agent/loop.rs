@@ -25,7 +25,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-const MAX_TOOL_STEPS: usize = 25;
+const DEFAULT_TOOL_STEPS: usize = 25;
+const HARD_MAX_TOOL_STEPS: usize = 250;
 
 pub(crate) struct LoopOptions {
     pub(crate) system: String,
@@ -64,7 +65,7 @@ pub async fn run_agent_turn(cfg: TurnConfig, tx: mpsc::UnboundedSender<AgentEven
     };
     let opts = LoopOptions {
         system: build_system_prompt(&cfg.target, &cfg.cwd),
-        max_steps: MAX_TOOL_STEPS,
+        max_steps: cfg.max_steps.unwrap_or(DEFAULT_TOOL_STEPS),
         depth: 0,
         allowed_tools: None,
         connect_mcp: true,
@@ -139,7 +140,7 @@ pub(crate) async fn execute_loop(
     let system = opts.system;
     let overhead = tools_overhead(extra_tools.len());
     let mut plan = resolve_budget(&cfg.data_dir, &cfg.provider.id, &cfg.model.model_id);
-    let max_steps = opts.max_steps.clamp(1, MAX_TOOL_STEPS);
+    let max_steps = opts.max_steps.clamp(1, HARD_MAX_TOOL_STEPS);
     let mut hook_session = TurnHookSession {
         engine: cfg.hooks.clone(),
         session_id: cfg.permissions.session_id().to_string(),
@@ -645,6 +646,7 @@ mod tests {
             hook_state: BTreeMap::new(),
             hook_state_sink: None,
             turn_seq: 0,
+            max_steps: None,
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let system = "sys";

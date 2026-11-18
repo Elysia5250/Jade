@@ -302,6 +302,7 @@ async fn run_single_subagent(
         hook_state: child_hook_state.clone(),
         hook_state_sink: None,
         turn_seq: host.turn_seq,
+        max_steps: None,
     };
 
     let system = build_subagent_system_prompt(&host.target, &host.cwd, &spec.system_prompt);

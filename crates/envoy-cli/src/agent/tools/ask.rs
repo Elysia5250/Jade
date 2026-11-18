@@ -36,6 +36,13 @@ pub(crate) async fn ask_tool(
         .iter()
         .position(|o| o.recommended)
         .unwrap_or(0);
+    if asks.is_non_interactive() {
+        return Ok(json!({
+            "answer": options[recommended].label,
+            "via": "headless"
+        })
+        .to_string());
+    }
     let timeout_s = args["timeout_s"].as_u64().unwrap_or(300).clamp(5, 3600);
     let _gate = asks.acquire_prompt().await;
     let id = asks.next_id();

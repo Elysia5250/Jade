@@ -176,6 +176,7 @@ async fn session_start_and_user_prompt_submit_thread_hook_context_and_block() {
             hook_state,
             hook_state_sink: Some(Arc::clone(&st.hook_state)),
             turn_seq,
+            max_steps: None,
         }
     };
 

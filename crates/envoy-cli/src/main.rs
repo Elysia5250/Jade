@@ -11,6 +11,7 @@ mod agent;
 mod auth;
 mod cli_ops;
 mod daemon;
+mod headless;
 pub mod hooks;
 mod llm;
 pub mod mcp;
@@ -70,6 +71,9 @@ struct Cli {
     /// Resume a specific session ID.
     #[arg(short = 's', long = "session")]
     session: Option<String>,
+
+    #[command(flatten)]
+    headless: headless::HeadlessArgs,
 
     /// Subcommand; with none, `envoy` opens the terminal console.
     #[command(subcommand)]
@@ -294,11 +298,12 @@ impl Ctx {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let is_mcp = matches!(cli.cmd.as_ref(), Some(Commands::Mcp { .. }));
+    let is_headless = cli.headless.is_active();
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("envoy=info,envoy_service=info"));
     let builder = tracing_subscriber::fmt().with_env_filter(filter);
-    if is_mcp {
-        // MCP speaks JSON-RPC on stdout; logs must stay on stderr.
+    if is_mcp || is_headless {
+        // MCP and `-p` output write clean responses/JSON on stdout; logs stay on stderr.
         builder.with_writer(std::io::stderr).init();
     } else {
         builder.init();
@@ -319,6 +324,9 @@ async fn main() -> Result<()> {
     };
 
     let Some(command) = cli.cmd else {
+        if is_headless {
+            return headless::run(&ctx, cli.continue_last, cli.session.clone(), cli.headless).await;
+        }
         // Bare `envoy` is the opencode-style entry point: open the console in
         // the current directory.
         return tui::run(
@@ -332,6 +340,9 @@ async fn main() -> Result<()> {
         )
         .await;
     };
+    if is_headless {
+        bail!("--print / -p cannot be combined with a subcommand");
+    }
 
     match command {
         Commands::Status => cmd_status(&ctx).await,

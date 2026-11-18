@@ -1,6 +1,9 @@
 //! Subagent model target parsing and tier/cross-provider resolution.
 
-use super::{effective_providers, is_retired_model, ModelRef, StoredProvider};
+use super::{
+    default_model_for, effective_providers_with, is_retired_model, load_prefs,
+    Credential, ModelRef, ProviderProtocol, StoredProvider, BUILTIN_PROVIDERS,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -60,7 +63,7 @@ pub fn resolve_model_target(
     parent_model: &ModelRef,
     spec: &str,
 ) -> (StoredProvider, ModelRef) {
-    let providers = effective_providers(data_dir);
+    let providers = super::effective_providers(data_dir);
     match parse_model_spec(spec, &providers) {
         ModelTargetSpec::Inherit => (parent_provider.clone(), parent_model.clone()),
         ModelTargetSpec::Explicit {
@@ -224,6 +227,268 @@ fn tier_score(model_id: &str, tier: Tier) -> i32 {
     }
 }
 
+pub(crate) fn env_base_url_var(provider_id: &str) -> Option<&'static str> {
+    match provider_id {
+        "openai" => Some("OPENAI_BASE_URL"),
+        "anthropic" => Some("ANTHROPIC_BASE_URL"),
+        "deepseek" => Some("DEEPSEEK_BASE_URL"),
+        "google" => Some("GEMINI_BASE_URL"),
+        "openrouter" => Some("OPENROUTER_BASE_URL"),
+        "opencode-zen" => Some("OPENCODE_BASE_URL"),
+        "opencode-go" => Some("OPENCODE_GO_BASE_URL"),
+        _ => None,
+    }
+}
+
+pub fn default_env_model(provider_id: &str) -> &'static str {
+    match provider_id {
+        "openai" => "gpt-5.4",
+        "anthropic" => "claude-sonnet-4-5",
+        "deepseek" => "deepseek-v3.2",
+        "google" => "gemini-2.5-pro",
+        "openrouter" => "anthropic/claude-sonnet-4.5",
+        "opencode-zen" | "opencode-go" => "claude-sonnet-4-5",
+        _ => "",
+    }
+}
+
+fn non_empty_env(env: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String> {
+    env(name)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn parse_env_protocol(raw: &str) -> Option<ProviderProtocol> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "anthropic" | "anthropic_messages" => Some(ProviderProtocol::Anthropic),
+        "openai" | "openai_chat" | "openai-chat" | "openai-compatible" => {
+            Some(ProviderProtocol::OpenAiChat)
+        }
+        "openai_codex" | "openai-codex" | "codex" => Some(ProviderProtocol::OpenAiCodex),
+        _ => None,
+    }
+}
+
+pub(crate) fn merge_env_providers(
+    map: &mut BTreeMap<String, StoredProvider>,
+    env: &dyn Fn(&str) -> Option<String>,
+) {
+    for builtin in BUILTIN_PROVIDERS {
+        if map.contains_key(builtin.id) {
+            continue;
+        }
+        let Some(var) = builtin.env_var else {
+            continue;
+        };
+        let Some(val) = non_empty_env(env, var) else {
+            continue;
+        };
+        let base_url = env_base_url_var(builtin.id)
+            .and_then(|v| non_empty_env(env, v))
+            .unwrap_or_else(|| builtin.default_base_url.to_string());
+        map.insert(
+            builtin.id.to_string(),
+            StoredProvider {
+                id: builtin.id.to_string(),
+                name: format!("{} (env)", builtin.name),
+                protocol: builtin.protocol,
+                base_url,
+                credential: Credential::ApiKey { key: val },
+                custom_models: Vec::new(),
+                model_routes: BTreeMap::new(),
+                updated_ms: 0,
+            },
+        );
+    }
+    if !map.contains_key("custom") {
+        if let Some(key) = non_empty_env(env, "ENVOY_API_KEY") {
+            let base_url = non_empty_env(env, "ENVOY_BASE_URL")
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let protocol = non_empty_env(env, "ENVOY_PROTOCOL")
+                .and_then(|p| parse_env_protocol(&p))
+                .unwrap_or(ProviderProtocol::OpenAiChat);
+            map.insert(
+                "custom".to_string(),
+                StoredProvider {
+                    id: "custom".to_string(),
+                    name: "Custom (env)".to_string(),
+                    protocol,
+                    base_url,
+                    credential: Credential::ApiKey { key },
+                    custom_models: Vec::new(),
+                    model_routes: BTreeMap::new(),
+                    updated_ms: 0,
+                },
+            );
+        }
+    }
+}
+
+fn infer_provider_id_from_model<'a>(
+    model_id: &str,
+    providers: &'a BTreeMap<String, StoredProvider>,
+) -> Option<&'a str> {
+    let lower = model_id.to_ascii_lowercase();
+    let candidate = if lower.starts_with("claude") {
+        if providers.contains_key("anthropic") {
+            Some("anthropic")
+        } else if providers.contains_key("openrouter") {
+            Some("openrouter")
+        } else {
+            None
+        }
+    } else if lower.starts_with("gpt-")
+        || lower.starts_with("o1")
+        || lower.starts_with("o3")
+        || lower.starts_with("o4")
+    {
+        providers.contains_key("openai").then_some("openai")
+    } else if lower.starts_with("gemini") {
+        providers.contains_key("google").then_some("google")
+    } else if lower.starts_with("deepseek") {
+        providers.contains_key("deepseek").then_some("deepseek")
+    } else {
+        None
+    };
+    candidate
+}
+
+/// Resolve the active provider and model, honoring CLI `--model`, `ENVOY_MODEL`,
+/// `ENVOY_BASE_URL`, `ENVOY_PROTOCOL`, and `<PROVIDER>_BASE_URL` env overrides.
+pub fn resolve_provider_with_overrides(
+    data_dir: &Path,
+    model_override: Option<&str>,
+) -> Option<(StoredProvider, ModelRef)> {
+    resolve_provider_with_env(data_dir, model_override, &|k| std::env::var(k).ok())
+}
+
+pub(crate) fn resolve_provider_with_env(
+    data_dir: &Path,
+    model_override: Option<&str>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Option<(StoredProvider, ModelRef)> {
+    let providers = effective_providers_with(data_dir, env);
+    if providers.is_empty() {
+        return None;
+    }
+    let prefs = load_prefs(data_dir);
+    let default_pair = || -> Option<(StoredProvider, ModelRef)> {
+        if let Some(active) = prefs.active.as_ref() {
+            if let Some(prov) = providers.get(&active.provider_id) {
+                let model_id = if active.model_id.is_empty()
+                    || is_retired_model(&active.provider_id, &active.model_id)
+                {
+                    let d = default_model_for(prov);
+                    if d.is_empty() {
+                        default_env_model(&prov.id).to_string()
+                    } else {
+                        d
+                    }
+                } else {
+                    active.model_id.clone()
+                };
+                return Some((
+                    prov.clone(),
+                    ModelRef {
+                        provider_id: prov.id.clone(),
+                        model_id,
+                    },
+                ));
+            }
+        }
+        let first = providers.values().next()?.clone();
+        let d = default_model_for(&first);
+        let model_id = if d.is_empty() {
+            default_env_model(&first.id).to_string()
+        } else {
+            d
+        };
+        Some((
+            first.clone(),
+            ModelRef {
+                provider_id: first.id,
+                model_id,
+            },
+        ))
+    };
+
+    let spec = model_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| non_empty_env(env, "ENVOY_MODEL"));
+
+    let (mut prov, model_ref) = match spec {
+        Some(raw) => {
+            if let Some((left, right)) = raw.split_once('/') {
+                let pid = left.trim();
+                let mid = right.trim();
+                if let Some(p) = (!mid.is_empty()).then(|| providers.get(pid)).flatten() {
+                    (
+                        p.clone(),
+                        ModelRef {
+                            provider_id: p.id.clone(),
+                            model_id: mid.to_string(),
+                        },
+                    )
+                } else if let Some((p, _)) = default_pair() {
+                    (
+                        p.clone(),
+                        ModelRef {
+                            provider_id: p.id,
+                            model_id: raw,
+                        },
+                    )
+                } else {
+                    return None;
+                }
+            } else if let Some(p) = providers
+                .values()
+                .find(|p| p.custom_models.iter().any(|m| m == &raw))
+            {
+                (
+                    p.clone(),
+                    ModelRef {
+                        provider_id: p.id.clone(),
+                        model_id: raw,
+                    },
+                )
+            } else if let Some(pid) = infer_provider_id_from_model(&raw, &providers) {
+                let p = providers.get(pid)?.clone();
+                (
+                    p.clone(),
+                    ModelRef {
+                        provider_id: p.id,
+                        model_id: raw,
+                    },
+                )
+            } else if let Some((p, _)) = default_pair() {
+                (
+                    p.clone(),
+                    ModelRef {
+                        provider_id: p.id,
+                        model_id: raw,
+                    },
+                )
+            } else {
+                return None;
+            }
+        }
+        None => default_pair()?,
+    };
+
+    if let Some(base_url) = non_empty_env(env, "ENVOY_BASE_URL").or_else(|| {
+        env_base_url_var(&prov.id).and_then(|var| non_empty_env(env, var))
+    }) {
+        prov.base_url = base_url;
+    }
+    if let Some(proto) = non_empty_env(env, "ENVOY_PROTOCOL").and_then(|s| parse_env_protocol(&s)) {
+        prov.protocol = proto;
+    }
+
+    Some((prov, model_ref))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +557,46 @@ mod tests {
         let (p_fb, m_fb) = resolve_model_target(&dir, &ant, &parent_ref, "missing-prov/foo");
         assert_eq!(p_fb.id, "anthropic");
         assert_eq!(m_fb.model_id, "claude-sonnet-5");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolves_env_provider_base_url_and_cli_model_overrides() {
+        let dir = tmpdir("env-overrides");
+        let env_fn = |k: &str| -> Option<String> {
+            match k {
+                "OPENAI_API_KEY" => Some("sk-oai-env".into()),
+                "OPENAI_BASE_URL" => Some("http://127.0.0.1:8080/v1".into()),
+                "ANTHROPIC_API_KEY" => Some("sk-ant-env".into()),
+                "ENVOY_MODEL" => Some("gpt-5.4-mini".into()),
+                _ => None,
+            }
+        };
+        let (prov, model) = resolve_provider_with_env(&dir, None, &env_fn).unwrap();
+        assert_eq!(prov.id, "openai");
+        assert_eq!(prov.base_url, "http://127.0.0.1:8080/v1");
+        assert_eq!(model.model_id, "gpt-5.4-mini");
+
+        let (prov2, model2) =
+            resolve_provider_with_env(&dir, Some("anthropic/claude-opus-4-5"), &env_fn).unwrap();
+        assert_eq!(prov2.id, "anthropic");
+        assert_eq!(model2.model_id, "claude-opus-4-5");
+
+        let custom_env = |k: &str| -> Option<String> {
+            match k {
+                "ENVOY_API_KEY" => Some("sk-custom".into()),
+                "ENVOY_BASE_URL" => Some("http://localhost:4000".into()),
+                "ENVOY_PROTOCOL" => Some("anthropic".into()),
+                "ENVOY_MODEL" => Some("relay-sonnet".into()),
+                _ => None,
+            }
+        };
+        let (prov3, model3) = resolve_provider_with_env(&dir, None, &custom_env).unwrap();
+        assert_eq!(prov3.id, "custom");
+        assert_eq!(prov3.protocol, ProviderProtocol::Anthropic);
+        assert_eq!(prov3.base_url, "http://localhost:4000");
+        assert_eq!(model3.model_id, "relay-sonnet");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

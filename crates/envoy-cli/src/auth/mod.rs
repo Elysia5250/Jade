@@ -21,7 +21,7 @@ mod routing;
 pub use catalog::BUILTIN_PROVIDERS;
 pub use cli::{cmd_auth_list, cmd_auth_login, cmd_auth_logout};
 pub use github::{copilot_session_token, poll_github_copilot_device, start_github_copilot_device};
-pub use routing::resolve_model_target;
+pub use routing::{resolve_model_target, resolve_provider_with_overrides};
 pub use oauth_anthropic::{anthropic_authorize_url, exchange_anthropic_code, parse_code_and_state};
 pub use oauth_openai::{
     bind_openai_callback_listener, exchange_openai_code, openai_authorize_url,
@@ -290,32 +290,15 @@ pub fn save_prefs(data_dir: &Path, prefs: &ModelPrefs) -> Result<()> {
 
 /// Merge persisted credentials in `auth.json` with environment-variable API keys.
 pub fn effective_providers(data_dir: &Path) -> BTreeMap<String, StoredProvider> {
+    effective_providers_with(data_dir, &|k| std::env::var(k).ok())
+}
+
+pub(crate) fn effective_providers_with(
+    data_dir: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> BTreeMap<String, StoredProvider> {
     let mut map = load_auth(data_dir).credentials;
-    for builtin in BUILTIN_PROVIDERS {
-        if map.contains_key(builtin.id) {
-            continue;
-        }
-        if let Some(var) = builtin.env_var {
-            if let Ok(val) = std::env::var(var) {
-                let val = val.trim().to_string();
-                if !val.is_empty() {
-                    map.insert(
-                        builtin.id.to_string(),
-                        StoredProvider {
-                            id: builtin.id.to_string(),
-                            name: format!("{} (env)", builtin.name),
-                            protocol: builtin.protocol,
-                            base_url: builtin.default_base_url.to_string(),
-                            credential: Credential::ApiKey { key: val },
-                            custom_models: Vec::new(),
-                            model_routes: BTreeMap::new(),
-                            updated_ms: 0,
-                        },
-                    );
-                }
-            }
-        }
-    }
+    routing::merge_env_providers(&mut map, env);
     map
 }
 

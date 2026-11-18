@@ -226,6 +226,7 @@ async fn loop_hooks_pipeline_permission_recheck_and_stop_reentry() {
         hook_state: BTreeMap::new(),
         hook_state_sink: None,
         turn_seq: 1,
+        max_steps: None,
     };
 
     let opts = LoopOptions {

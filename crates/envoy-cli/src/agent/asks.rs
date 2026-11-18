@@ -10,6 +10,7 @@ pub struct AskBroker {
     next: AtomicU64,
     pending: Mutex<HashMap<u64, oneshot::Sender<String>>>,
     prompt_gate: tokio::sync::Mutex<()>,
+    non_interactive: bool,
 }
 
 impl std::fmt::Debug for AskBroker {
@@ -21,6 +22,17 @@ impl std::fmt::Debug for AskBroker {
 impl AskBroker {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    pub fn new_headless() -> Arc<Self> {
+        Arc::new(Self {
+            non_interactive: true,
+            ..Self::default()
+        })
+    }
+
+    pub fn is_non_interactive(&self) -> bool {
+        self.non_interactive
     }
 
     /// Serialize UI ask/approval prompts so concurrent subagents never overwrite

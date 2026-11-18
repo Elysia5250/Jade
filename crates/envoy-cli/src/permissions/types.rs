@@ -112,3 +112,24 @@ pub struct Decision {
 pub struct ToolAuth {
     pub sandbox: SandboxPolicy,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxOverride {
+    WorkspaceWrite,
+    ReadOnly,
+    Off,
+    DangerFullAccess,
+}
+
+impl SandboxOverride {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "workspace-write" | "ws" => Some(Self::WorkspaceWrite),
+            "read-only" | "ro" | "readonly" => Some(Self::ReadOnly),
+            "off" | "none" => Some(Self::Off),
+            "danger-full-access" | "full" | "unrestricted" => Some(Self::DangerFullAccess),
+            _ => None,
+        }
+    }
+}
