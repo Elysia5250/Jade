@@ -58,6 +58,9 @@ pub fn resolve_path_pair(cwd: &Path, raw_path: &str) -> ResolvedPath {
     }
 }
 
+/// Credential/secret basenames that even Auto mode must prompt for on access.
+const CREDENTIAL_BASENAMES: &[&str] = &[".ssh", ".env", ".codex", ".agents", ".aws"];
+
 /// True if `path` or any component matches protected secret/repo directories or
 /// `.env*` files. Checks both requested and canonical paths.
 pub fn is_protected(resolved: &ResolvedPath) -> bool {
@@ -65,7 +68,33 @@ pub fn is_protected(resolved: &ResolvedPath) -> bool {
         || path_has_protected_component(&resolved.canonical)
 }
 
+/// True if `resolved` touches credential/secret paths (excluding `.git`/`.envoy`).
+pub fn is_credential_protected(resolved: &ResolvedPath) -> bool {
+    path_has_credential_component(&resolved.requested)
+        || path_has_credential_component(&resolved.canonical)
+}
+
+/// True if `resolved` points inside `/tmp`, `/var/tmp`, or the active temp dir.
+pub fn is_temp_path(resolved: &ResolvedPath) -> bool {
+    let sys_tmp = canonicalize_with_missing_tail(&std::env::temp_dir());
+    let tmp = Path::new("/tmp");
+    let var_tmp = Path::new("/var/tmp");
+    is_under(&resolved.canonical, tmp)
+        || is_under(&resolved.canonical, var_tmp)
+        || is_under(&resolved.canonical, &sys_tmp)
+        || is_under(&resolved.requested, tmp)
+        || is_under(&resolved.requested, var_tmp)
+}
+
 pub fn path_has_protected_component(path: &Path) -> bool {
+    has_component_in(path, PROTECTED_BASENAMES)
+}
+
+fn path_has_credential_component(path: &Path) -> bool {
+    has_component_in(path, CREDENTIAL_BASENAMES)
+}
+
+fn has_component_in(path: &Path, basenames: &[&str]) -> bool {
     let s = path.to_string_lossy();
     if s == "/etc/shadow" || s == "/etc/gshadow" || s == "/etc/sudoers" {
         return true;
@@ -75,7 +104,7 @@ pub fn path_has_protected_component(path: &Path) -> bool {
             continue;
         };
         let name = os.to_string_lossy();
-        if PROTECTED_BASENAMES.contains(&name.as_ref()) || name.starts_with(".env.") {
+        if basenames.contains(&name.as_ref()) || name.starts_with(".env.") {
             return true;
         }
     }

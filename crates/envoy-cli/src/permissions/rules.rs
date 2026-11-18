@@ -5,7 +5,8 @@
 //!   > Managed Allow > Local Allow > Mode Baseline.
 
 use super::paths::{
-    expand_tilde, is_in_workspace, is_plan_file, is_protected, resolve_path_pair,
+    expand_tilde, is_credential_protected, is_in_workspace, is_plan_file, is_protected,
+    is_temp_path, resolve_path_pair,
 };
 use super::shell::analyze_shell;
 use super::types::{
@@ -154,6 +155,13 @@ pub fn save_rule(
     write_json(&path, &policy)
 }
 
+pub fn save_default_mode(data_dir: &Path, mode: PermissionMode) -> Result<()> {
+    let path = user_policy_path(data_dir);
+    let mut policy: PolicyFile = read_json(&path).unwrap_or_default();
+    policy.default_mode = Some(mode);
+    write_json(&path, &policy)
+}
+
 fn push_policy_rules(scope: RuleScope, file: &PolicyFile, out: &mut Vec<PermissionRule>) {
     for pat in &file.deny {
         out.push(PermissionRule {
@@ -214,9 +222,13 @@ pub fn evaluate_tool_call(
     }
 
     // 4. Protected-path & symlink-escape guard (cannot be silently auto-allowed by mode).
+    let allow_non_credential_in_auto = mode == PermissionMode::Auto
+        && !ctx.credential_protected
+        && (tool == "read" || (tool == "exec" && !ctx.destructive));
     if ctx.protected_hit
         && matches!(tool, "write" | "edit" | "read" | "exec")
         && !ctx.is_plan_target
+        && !allow_non_credential_in_auto
     {
         // Explicit Managed/Local Ask overrides below will also catch; ensure at least Ask.
         if let Some(rule) = find_match(&policies.rules, Effect::Ask, Some(RuleScope::Managed), &ctx) {
@@ -273,9 +285,11 @@ fn mode_baseline(mode: PermissionMode, tool: &str, ctx: &InspectContext) -> Deci
             }
         }
         "write" | "edit" => {
-            if ctx.outside_workspace {
+            if mode == PermissionMode::Auto && (!ctx.outside_workspace || ctx.is_temp_target) {
+                allow("auto mode workspace edit", ctx)
+            } else if ctx.outside_workspace {
                 ask("write outside workspace", ctx)
-            } else if matches!(mode, PermissionMode::AcceptEdits | PermissionMode::Auto)
+            } else if mode == PermissionMode::AcceptEdits
                 || (mode == PermissionMode::Plan && ctx.is_plan_target)
             {
                 allow(format!("{} mode workspace edit", mode.label()), ctx)
@@ -283,8 +297,18 @@ fn mode_baseline(mode: PermissionMode, tool: &str, ctx: &InspectContext) -> Deci
                 ask("workspace file modification", ctx)
             }
         }
-        "webfetch" => ask("external web fetch", ctx),
+        "webfetch" => match mode {
+            PermissionMode::Auto => allow("auto mode web fetch", ctx),
+            _ => ask("external web fetch", ctx),
+        },
         "exec" => {
+            if mode == PermissionMode::Auto {
+                return if ctx.catastrophic {
+                    ask("destructive shell command", ctx)
+                } else {
+                    allow("auto mode workspace command", ctx)
+                };
+            }
             if ctx.destructive {
                 return ask("destructive shell command", ctx);
             }
@@ -326,14 +350,17 @@ struct InspectContext {
     segment_keys: Vec<Vec<String>>,
     suggested_rule: Option<String>,
     protected_hit: bool,
+    credential_protected: bool,
     symlink_escape: bool,
     outside_workspace: bool,
+    is_temp_target: bool,
     is_plan_target: bool,
     parse_failed: bool,
     uses_sudo: bool,
     shell_readonly: bool,
     needs_net: bool,
     destructive: bool,
+    catastrophic: bool,
     extra_rw: Vec<String>,
 }
 
@@ -344,14 +371,17 @@ impl InspectContext {
             segment_keys: Vec::new(),
             suggested_rule: None,
             protected_hit: false,
+            credential_protected: false,
             symlink_escape: false,
             outside_workspace: false,
+            is_temp_target: false,
             is_plan_target: false,
             parse_failed: false,
             uses_sudo: false,
             shell_readonly: false,
             needs_net: false,
             destructive: false,
+            catastrophic: false,
             extra_rw: Vec::new(),
         };
 
@@ -379,6 +409,8 @@ impl InspectContext {
                 }
                 ctx.suggested_rule = Some(format!("{rule_tool}({canon_s})"));
                 ctx.protected_hit = is_protected(&resolved);
+                ctx.credential_protected = is_credential_protected(&resolved);
+                ctx.is_temp_target = is_temp_path(&resolved);
                 ctx.symlink_escape = resolved.escaped_via_symlink;
                 ctx.outside_workspace = !is_in_workspace(cwd, &resolved);
                 ctx.is_plan_target = is_plan_file(data_dir, cwd, &resolved);
@@ -403,7 +435,10 @@ impl InspectContext {
                     if is_protected(&r) {
                         ctx.protected_hit = true;
                     }
-                    if !is_in_workspace(cwd, &r) {
+                    if is_credential_protected(&r) {
+                        ctx.credential_protected = true;
+                    }
+                    if !is_in_workspace(cwd, &r) && !is_temp_path(&r) {
                         ctx.outside_workspace = true;
                         ctx.extra_rw.push(r.canonical.display().to_string());
                     }
@@ -412,6 +447,7 @@ impl InspectContext {
                     Ok(a) => {
                         ctx.needs_net = a.needs_net;
                         ctx.destructive = a.destructive;
+                        ctx.catastrophic = a.catastrophic;
                         ctx.shell_readonly = a.read_only_all;
                         ctx.uses_sudo = a.segments.iter().any(|s| s.uses_sudo);
                         for seg in &a.segments {
@@ -424,10 +460,13 @@ impl InspectContext {
                             if is_protected(&r) {
                                 ctx.protected_hit = true;
                             }
+                            if is_credential_protected(&r) {
+                                ctx.credential_protected = true;
+                            }
                             if r.escaped_via_symlink {
                                 ctx.symlink_escape = true;
                             }
-                            if !is_in_workspace(cwd, &r) {
+                            if !is_in_workspace(cwd, &r) && !is_temp_path(&r) {
                                 ctx.outside_workspace = true;
                                 if a.write_paths.contains(p) {
                                     ctx.extra_rw.push(r.canonical.display().to_string());

@@ -132,11 +132,11 @@ pub fn resolve_model_target(
             (parent_provider.clone(), parent_model.clone())
         }
         ModelTargetSpec::Fast => {
-            pick_by_tier(parent_provider, &providers, Tier::Fast)
+            pick_by_tier(parent_provider, &parent_model.model_id, &providers, Tier::Fast)
                 .unwrap_or_else(|| (parent_provider.clone(), parent_model.clone()))
         }
         ModelTargetSpec::Flagship => {
-            pick_by_tier(parent_provider, &providers, Tier::Flagship)
+            pick_by_tier(parent_provider, &parent_model.model_id, &providers, Tier::Flagship)
                 .unwrap_or_else(|| (parent_provider.clone(), parent_model.clone()))
         }
     }
@@ -150,6 +150,7 @@ enum Tier {
 
 fn pick_by_tier(
     parent_provider: &StoredProvider,
+    parent_model_id: &str,
     providers: &BTreeMap<String, StoredProvider>,
     tier: Tier,
 ) -> Option<(StoredProvider, ModelRef)> {
@@ -164,7 +165,12 @@ fn pick_by_tier(
             if base <= 0 {
                 continue;
             }
-            let score = base + if same_provider { 25 } else { 0 };
+            let active_bonus = if same_provider && model_id == parent_model_id {
+                15
+            } else {
+                0
+            };
+            let score = base + if same_provider { 25 } else { 0 } + active_bonus;
             let replace = best
                 .as_ref()
                 .map(|(s, _, _)| score > *s)

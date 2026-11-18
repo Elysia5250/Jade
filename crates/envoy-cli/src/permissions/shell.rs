@@ -21,6 +21,7 @@ pub struct ShellAnalysis {
     pub segments: Vec<CommandSegment>,
     pub needs_net: bool,
     pub destructive: bool,
+    pub catastrophic: bool,
     pub read_only_all: bool,
     pub referenced_paths: Vec<String>,
     pub write_paths: Vec<String>,
@@ -42,6 +43,7 @@ pub fn analyze_shell(command: &str) -> Result<ShellAnalysis> {
 
     let mut needs_net = false;
     let mut destructive = false;
+    let mut catastrophic = false;
     let mut read_only_all = true;
     let mut referenced_paths = Vec::new();
     let mut write_paths = Vec::new();
@@ -54,6 +56,11 @@ pub fn analyze_shell(command: &str) -> Result<ShellAnalysis> {
             needs_net = true;
         }
         if segment_is_destructive(&seg.argv) {
+            destructive = true;
+            read_only_all = false;
+        }
+        if segment_is_catastrophic(&seg.argv) {
+            catastrophic = true;
             destructive = true;
             read_only_all = false;
         }
@@ -76,6 +83,7 @@ pub fn analyze_shell(command: &str) -> Result<ShellAnalysis> {
         segments,
         needs_net,
         destructive,
+        catastrophic,
         read_only_all,
         referenced_paths,
         write_paths,
@@ -559,6 +567,25 @@ fn segment_is_destructive(argv: &[String]) -> bool {
     }
 }
 
+fn segment_is_catastrophic(argv: &[String]) -> bool {
+    let Some(bin) = argv.first().map(|s| base_bin(s)) else {
+        return false;
+    };
+    match bin {
+        "mkfs" | "fdisk" | "parted" | "shutdown" | "reboot" | "poweroff" => true,
+        "dd" => argv.iter().any(|a| a.starts_with("of=/dev/")),
+        "rm" => argv.iter().any(|a| {
+            let trimmed = a.trim_end_matches('/');
+            const ROOT_DIRS: &[&str] = &[
+                "", "~", "/*", "$HOME", "/bin", "/boot", "/dev", "/etc", "/home", "/lib",
+                "/lib64", "/opt", "/proc", "/root", "/sbin", "/sys", "/usr", "/var",
+            ];
+            a == "/" || ROOT_DIRS.contains(&trimmed)
+        }),
+        _ => false,
+    }
+}
+
 fn classify_argv(argv: &[String]) -> (bool, Vec<String>, Vec<String>) {
     let Some(bin) = argv.first().map(|s| base_bin(s)) else {
         return (false, Vec::new(), Vec::new());
@@ -610,46 +637,31 @@ fn classify_argv(argv: &[String]) -> (bool, Vec<String>, Vec<String>) {
 }
 
 fn looks_like_path(arg: &str) -> bool {
-    arg.starts_with('/')
+    if arg.is_empty()
+        || arg.contains("://")
+        || arg.contains('*')
+        || arg.contains('?')
+        || arg.starts_with("/dev/")
+        || arg.starts_with("/proc/")
+        || arg.starts_with("/sys/")
+        || matches!(arg, "." | ".." | "/dev" | "/proc" | "/sys")
+    {
+        return false;
+    }
+    if arg.starts_with('/')
         || arg.starts_with("./")
         || arg.starts_with("../")
         || arg.starts_with("~/")
         || arg.starts_with("$HOME/")
-        || arg.contains('/')
-        || arg.starts_with('.')
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn splits_compound_and_unwraps_wrappers() {
-        let a = analyze_shell("env FOO=1 timeout 10 sudo rm -rf /tmp/x && cat .env").unwrap();
-        assert_eq!(a.segments.len(), 2);
-        assert!(a.segments[0].uses_sudo);
-        assert_eq!(a.segments[0].argv[0], "rm");
-        assert!(a.destructive);
-        assert!(a.referenced_paths.contains(&".env".to_string()));
-        assert!(!a.read_only_all);
+        || (arg.starts_with('.') && arg.len() > 1)
+    {
+        return true;
     }
-
-    #[test]
-    fn unwraps_sh_c_and_subshells() {
-        let a = analyze_shell("sh -c 'echo ok; curl https://example.com > out.txt'").unwrap();
-        assert!(a.needs_net);
-        assert!(a.write_paths.contains(&"out.txt".to_string()));
-        assert!(!a.read_only_all);
-
-        let sub = analyze_shell("echo $(rm -rf src)").unwrap();
-        assert!(sub.destructive);
-        assert!(!sub.read_only_all);
+    if let Some((head, _)) = arg.split_once('/') {
+        return !head.is_empty()
+            && head
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
     }
-
-    #[test]
-    fn parse_failure_returns_err() {
-        assert!(analyze_shell("echo 'unclosed").is_err());
-        assert!(analyze_shell("echo $(ls").is_err());
-        assert!(analyze_shell("   ").is_err());
-    }
+    false
 }

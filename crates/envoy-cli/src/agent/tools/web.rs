@@ -147,7 +147,6 @@ pub(crate) fn is_blocked_ip(ip: IpAddr) -> bool {
 fn is_blocked_v4(v4: Ipv4Addr) -> bool {
     let o = v4.octets();
     let is_cgnat = o[0] == 100 && (o[1] & 0b1100_0000 == 64); // 100.64.0.0/10
-    let is_bench = o[0] == 198 && (o[1] == 18 || o[1] == 19); // 198.18.0.0/15
     let is_reserved = o[0] >= 240; // 240.0.0.0/4
     v4.is_loopback()
         || v4.is_private()
@@ -157,7 +156,6 @@ fn is_blocked_v4(v4: Ipv4Addr) -> bool {
         || v4.is_multicast()
         || v4.is_documentation()
         || is_cgnat
-        || is_bench
         || is_reserved
 }
 

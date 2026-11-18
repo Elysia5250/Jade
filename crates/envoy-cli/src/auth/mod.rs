@@ -151,7 +151,11 @@ impl StoredProvider {
 }
 
 pub fn is_retired_model(provider_id: &str, model_id: &str) -> bool {
-    provider_id == "deepseek" && matches!(model_id, "deepseek-chat" | "deepseek-reasoner")
+    provider_id == "deepseek"
+        && matches!(
+            model_id,
+            "deepseek-chat" | "deepseek-reasoner" | "deepseek-v4.1-flash"
+        )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
