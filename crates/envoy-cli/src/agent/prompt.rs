@@ -61,7 +61,7 @@ pub(crate) fn build_subagent_system_prompt(
 fn host_line(target: &str) -> String {
     if target.is_empty() || target == "local" {
         format!(
-            "Operating system: {} {}",
+            "Operating system: {} {}\nLocal sandbox: `exec` mounts the working directory read-write, keeps `~` and other host paths read-only, and isolates `/tmp` per command; put scratch files shared across commands or tools inside the working directory.",
             std::env::consts::OS,
             std::env::consts::ARCH
         )
