@@ -407,4 +407,68 @@ impl App {
             }
         }
     }
+
+    pub(in crate::tui) fn handle_login_paste(&mut self, mut login: LoginModal, clean: &str) {
+        if !clean.is_empty() {
+            match &mut login {
+                LoginModal::SelectProvider { filter, selected } => {
+                    filter.push_str(clean);
+                    *selected = 0;
+                }
+                LoginModal::ApiKeyForm {
+                    key,
+                    base_url,
+                    model,
+                    focus_field,
+                    error,
+                    ..
+                } => {
+                    *error = None;
+                    match *focus_field {
+                        0 => key.push_str(clean),
+                        1 => base_url.push_str(clean),
+                        _ => model.push_str(clean),
+                    }
+                }
+                LoginModal::CustomForm {
+                    name,
+                    base_url,
+                    key,
+                    model,
+                    focus_field,
+                    error,
+                    ..
+                } => {
+                    *error = None;
+                    match *focus_field {
+                        1 => name.push_str(clean),
+                        2 => base_url.push_str(clean),
+                        3 => key.push_str(clean),
+                        4 => model.push_str(clean),
+                        _ => {}
+                    }
+                }
+                LoginModal::OAuthBrowser {
+                    pasted,
+                    busy,
+                    error,
+                    ..
+                } if !*busy => {
+                    *error = None;
+                    pasted.push_str(clean);
+                }
+                LoginModal::OAuthCodePaste {
+                    code_input,
+                    busy,
+                    error,
+                    ..
+                } if !*busy => {
+                    *error = None;
+                    code_input.push_str(clean);
+                }
+                _ => {}
+            }
+        }
+        self.modal = Some(Modal::Login(login));
+    }
 }

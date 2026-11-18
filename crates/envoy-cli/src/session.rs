@@ -453,7 +453,7 @@ pub fn recent_workspaces(data_dir: &Path) -> Vec<WorkspaceHit> {
     rows
 }
 
-pub fn latest_session_for_cwd(data_dir: &Path, cwd: &Path) -> Option<Session> {
+pub fn exact_session_for_cwd(data_dir: &Path, cwd: &Path) -> Option<Session> {
     let list = list_sessions(data_dir);
     let canon = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     for s in &list {
@@ -464,7 +464,15 @@ pub fn latest_session_for_cwd(data_dir: &Path, cwd: &Path) -> Option<Session> {
             }
         }
     }
-    list.first()
+    None
+}
+
+pub fn latest_session_for_cwd(data_dir: &Path, cwd: &Path) -> Option<Session> {
+    if let Some(exact) = exact_session_for_cwd(data_dir, cwd) {
+        return Some(exact);
+    }
+    list_sessions(data_dir)
+        .first()
         .and_then(|s| load_session(data_dir, &s.id).ok())
 }
 

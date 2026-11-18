@@ -21,12 +21,7 @@ impl App {
         cwd: PathBuf,
     ) -> Self {
         let prefs = load_prefs(&data_dir);
-        let has_provider = resolve_active_provider(&data_dir).is_some();
-        let mode = if has_provider {
-            InputMode::Agent
-        } else {
-            InputMode::Shell
-        };
+        let mode = InputMode::Agent;
         let session = Session::new(cwd.clone(), target.clone());
         let perm_mode = PermissionEngine::new(
             data_dir.clone(),
@@ -60,6 +55,7 @@ impl App {
             history: Vec::new(),
             history_pos: None,
             menu_selected: 0,
+            at_dismissed_at: None,
             modal: None,
             theme: prefs.theme % THEMES.len(),
             leader_at: None,
@@ -103,11 +99,44 @@ impl App {
         THEMES[self.theme].1
     }
 
-    pub(in crate::tui) fn load_existing_session(&mut self, loaded: Session) {
+    pub(in crate::tui) fn load_existing_session(&mut self, mut loaded: Session) {
         self.persist_session();
         if loaded.cwd.is_dir() {
             self.session_cwd_set(loaded.cwd.clone());
         }
+        let mut last_notice: Option<String> = None;
+        loaded.items.retain_mut(|item| match item {
+            TranscriptItem::Tool { name, .. } if name == "say" => false,
+            TranscriptItem::Tool { collapsed, .. } => {
+                last_notice = None;
+                *collapsed = true;
+                true
+            }
+            TranscriptItem::Assistant {
+                reasoning_collapsed,
+                ..
+            } => {
+                last_notice = None;
+                *reasoning_collapsed = true;
+                true
+            }
+            TranscriptItem::Notice {
+                text,
+                is_error: false,
+                ..
+            } => {
+                if last_notice.as_deref() == Some(text.as_str()) {
+                    false
+                } else {
+                    last_notice = Some(text.clone());
+                    true
+                }
+            }
+            _ => {
+                last_notice = None;
+                true
+            }
+        });
         self.session = loaded;
         self.selected_card = None;
         self.follow = true;

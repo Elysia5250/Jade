@@ -48,8 +48,9 @@ pub(crate) use crate::permissions::{
 };
 pub(crate) use crate::runtime::{self, AgentReq, AgentResp, SendMode};
 pub(crate) use crate::session::{
-    delete_session, latest_session_for_cwd, list_sessions, load_session, recent_workspaces,
-    save_session, CardStatus, ChatMessage, ChatRole, Session, SessionSummary, TranscriptItem,
+    delete_session, exact_session_for_cwd, latest_session_for_cwd, list_sessions, load_session,
+    recent_workspaces, save_session, CardStatus, ChatMessage, ChatRole, Session, SessionSummary,
+    TranscriptItem,
 };
 pub(crate) use anyhow::{bail, Result};
 pub(crate) use envoy_proto::{
@@ -60,9 +61,9 @@ pub(crate) use envoy_service::{
 };
 pub(crate) use ratatui::backend::CrosstermBackend;
 pub(crate) use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton,
+    MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 pub(crate) use ratatui::crossterm::execute;
 pub(crate) use ratatui::crossterm::terminal::{
@@ -101,6 +102,7 @@ fn model_list_needs_fetch(data_dir: &std::path::Path) -> bool {
             .any(|id| is_retired_model(&prov.id, id))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     data_dir: PathBuf,
     target: String,
@@ -109,12 +111,12 @@ pub async fn run(
     continue_last: bool,
     session_id: Option<String>,
     pick_workspace: bool,
+    new_session: bool,
 ) -> Result<()> {
     if !stdout().is_terminal() {
-        bail!("`envoy` opens a console; use a subcommand for scripts (envoy jobs)");
-    }
-    if target == "local" || target.is_empty() {
-        daemon::ensure(&data_dir).await?;
+        bail!(
+            "`envoy` TUI requires a terminal stdout; use `envoy -p \"...\"` or `envoy ask \"...\"` for non-interactive runs"
+        );
     }
     let mut remote: Remote<AnyDialer> =
         Remote::new(dialer_for(&data_dir, &target, conduit.clone()));
@@ -132,30 +134,56 @@ pub async fn run(
         if let Ok(loaded) = load_session(&data_dir, &id) {
             app.load_existing_session(loaded);
         }
-    } else if continue_last {
-        if let Some(loaded) = latest_session_for_cwd(&data_dir, &cwd) {
+    } else if !pick_workspace && !new_session {
+        let loaded = if continue_last {
+            latest_session_for_cwd(&data_dir, &cwd)
+        } else {
+            exact_session_for_cwd(&data_dir, &cwd)
+        };
+        if let Some(loaded) = loaded {
             app.load_existing_session(loaded);
         }
     }
 
-    let client = ConduitClient::new(conduit.clone().unwrap_or_else(default_control_socket));
-    if let Ok(rx) = client.watch().await {
-        app.watch = Some(rx);
+    // Enter alternate screen immediately before daemon/conduit startup so frame 1 is instant.
+    let mut tui = Tui::enter()?;
+    app.agent_retry_at = Instant::now() + Duration::from_millis(800);
+    app.last_refresh = Instant::now();
+    {
+        let app_ref = &mut app;
+        let _ = execute!(stdout(), BeginSynchronizedUpdate);
+        tui.terminal.draw(|frame| view::draw(frame, app_ref))?;
+        let _ = execute!(stdout(), EndSynchronizedUpdate);
     }
 
-    // The turn lives in the daemon; the console attaches to its stream.
-    // A welcome screen picks the directory first, so the attach waits.
-    if app.welcome.is_none() {
-        app.spawn_agent_attach();
-    }
+    let boot_data = data_dir.clone();
+    let boot_target = target.clone();
+    let boot_conduit = conduit.clone();
+    let boot_tx = app.notice_tx.clone();
+    tokio::spawn(async move {
+        if boot_target == "local" || boot_target.is_empty() {
+            match daemon::ensure(&boot_data).await {
+                Ok(()) => {
+                    let _ = boot_tx.send(UiNotice::DaemonReady);
+                }
+                Err(e) => {
+                    let _ = boot_tx.send(UiNotice::Toast(format!("daemon: {e:#}"), true));
+                }
+            }
+        } else {
+            let _ = boot_tx.send(UiNotice::DaemonReady);
+        }
+        let client = ConduitClient::new(boot_conduit.unwrap_or_else(default_control_socket));
+        if let Ok(rx) = client.watch().await {
+            let _ = boot_tx.send(UiNotice::ConduitWatch(rx));
+        }
+    });
+
     // An empty list, or a stored DeepSeek id that the API retired, would 400
-    // on the next turn. Fetch before the user sends anything.
+    // on the next turn. Fetch in the background before the user sends anything.
     if model_list_needs_fetch(&app.data_dir) {
         app.spawn_model_refresh();
     }
-
-    let mut tui = Tui::enter()?;
-    app.refresh(&remote).await;
 
     loop {
         while event::poll(Duration::ZERO)? {
@@ -209,6 +237,10 @@ pub async fn run(
                             app.mouse_capture = on;
                         }
                     }
+                }
+                Event::Paste(text) => {
+                    app.selection = None;
+                    app.handle_paste(&text);
                 }
                 Event::Mouse(mouse) => {
                     if let Some(Action::AttachJob(job)) = app.handle_mouse(mouse) {
@@ -437,6 +469,10 @@ pub(crate) struct ShellWatch {
 // ------------------------------------------------------------------ App
 
 pub(crate) enum UiNotice {
+    /// Background daemon ensure succeeded; console can attach and refresh immediately.
+    DaemonReady,
+    /// Background conduit watch receiver connected.
+    ConduitWatch(watch::Receiver<Option<Status>>),
     /// A send failed because the daemon went away; put the items back in the
     /// outbox so the next attach can deliver them.
     Requeue(Vec<(String, SendMode)>),
@@ -484,6 +520,7 @@ pub(crate) struct App {
     history: Vec<String>,
     history_pos: Option<usize>,
     menu_selected: usize,
+    at_dismissed_at: Option<usize>,
 
     modal: Option<Modal>,
     theme: usize,
@@ -563,7 +600,12 @@ fn terminal_supports_csi_u() -> bool {
 impl Tui {
     fn enter() -> Result<Self> {
         enable_raw_mode()?;
-        execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+        execute!(
+            stdout(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )?;
         let enhanced_keys = terminal_supports_csi_u();
         if enhanced_keys {
             let _ = execute!(
@@ -597,6 +639,7 @@ impl Drop for Tui {
         if self.mouse_capture {
             let _ = execute!(self.terminal.backend_mut(), DisableMouseCapture);
         }
+        let _ = execute!(self.terminal.backend_mut(), DisableBracketedPaste);
         let _ = disable_raw_mode();
         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
         let _ = self.terminal.show_cursor();
@@ -607,3 +650,5 @@ impl Drop for Tui {
 mod tests;
 #[cfg(test)]
 mod tests_inspector;
+#[cfg(test)]
+mod tests_ux;

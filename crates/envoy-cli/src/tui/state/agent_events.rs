@@ -1,5 +1,6 @@
 //! Fold daemon agent events into the local transcript.
 use super::*;
+use crate::session::OutputLine;
 
 impl App {
     pub(in crate::tui) fn apply_event(&mut self, seq: u64, event: AgentEvent) {
@@ -31,6 +32,23 @@ impl App {
                 self.agent_running = true;
             }
             AgentEvent::AssistantStart { model } => {
+                if let Some(TranscriptItem::Assistant {
+                    id,
+                    text,
+                    reasoning,
+                    error,
+                    done,
+                    model: slot_model,
+                    ..
+                }) = self.session.items.last_mut()
+                {
+                    if text.is_empty() && reasoning.is_empty() && error.is_none() {
+                        *done = false;
+                        *slot_model = model;
+                        self.active_assistant_id = Some(*id);
+                        return;
+                    }
+                }
                 let id = self.session.alloc_id();
                 self.session.items.push(TranscriptItem::Assistant {
                     id,
@@ -344,9 +362,26 @@ impl App {
                     .last()
                     .map(|s| format!(" — {}", truncate_width(s, 100)))
                     .unwrap_or_default();
-                let notice =
-                    format!("[monitor #{id} {label} (job {job_id})] trigger {cap}{suffix}{preview}");
-                self.push_notice(notice, false);
+                let line_text = format!("#{id} {label} (job {job_id}) trigger {cap}{suffix}{preview}");
+                let card = self
+                    .session
+                    .items
+                    .iter_mut()
+                    .rev()
+                    .find(|i| matches!(i, TranscriptItem::Tool { name, .. } if name == "monitor"));
+                if let Some(TranscriptItem::Tool {
+                    output, subtitle, ..
+                }) = card
+                {
+                    output.push(OutputLine {
+                        text: line_text,
+                        err: false,
+                    });
+                    *subtitle = format!("trigger {cap}{suffix}");
+                } else {
+                    let notice = format!("[monitor {line_text}]");
+                    self.push_notice(notice, false);
+                }
                 self.set_toast(format!("monitor #{id} {label} ({cap})"), false);
                 self.persist_session();
             }

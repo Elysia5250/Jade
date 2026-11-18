@@ -5,7 +5,8 @@ impl App {
     pub(in crate::tui) fn open_welcome(&mut self) {
         let here =
             std::fs::canonicalize(&self.session.cwd).unwrap_or_else(|_| self.session.cwd.clone());
-        let mut rows = vec![WelcomeRow::Here(here.clone())];
+        let here_resumes = exact_session_for_cwd(&self.data_dir, &here).is_some();
+        let mut rows = vec![WelcomeRow::Here(here.clone(), here_resumes)];
         for hit in recent_workspaces(&self.data_dir) {
             if hit.cwd == here {
                 continue;
@@ -23,8 +24,23 @@ impl App {
             selected: 0,
             path_mode: false,
             path: String::new(),
+            path_selected: 0,
             error: None,
         });
+    }
+
+    pub(in crate::tui) fn handle_welcome_paste(&mut self, text: &str) {
+        let clean: String = text.chars().filter(|c| !matches!(c, '\r' | '\n')).collect();
+        if clean.is_empty() {
+            return;
+        }
+        if let Some(w) = self.welcome.as_mut() {
+            if w.path_mode {
+                w.path.push_str(&clean);
+                w.path_selected = 0;
+                w.error = None;
+            }
+        }
     }
 
     pub(in crate::tui) fn handle_welcome_key(&mut self, key: KeyEvent) -> Action {
@@ -39,21 +55,54 @@ impl App {
                 match key.code {
                     KeyCode::Esc => {
                         welcome.path_mode = false;
+                        welcome.path_selected = 0;
                         welcome.error = None;
+                    }
+                    KeyCode::Up => {
+                        welcome.path_selected = welcome.path_selected.saturating_sub(1);
+                    }
+                    KeyCode::Down => {
+                        let comps = complete_directories(&cwd, &welcome.path);
+                        if !comps.is_empty() {
+                            welcome.path_selected =
+                                (welcome.path_selected + 1).min(comps.len() - 1);
+                        }
                     }
                     KeyCode::Backspace => {
                         welcome.path.pop();
+                        welcome.path_selected = 0;
                         welcome.error = None;
                     }
                     KeyCode::Tab => {
                         let comps = complete_directories(&cwd, &welcome.path);
-                        if let Some((_, arg)) = comps.first() {
+                        let idx = welcome.path_selected.min(comps.len().saturating_sub(1));
+                        if let Some((_, arg)) = comps.get(idx) {
                             welcome.path = arg.clone();
+                            welcome.path_selected = 0;
+                            welcome.error = None;
                         }
                     }
-                    KeyCode::Enter => submit = Some(welcome.path.clone()),
+                    KeyCode::Enter => {
+                        let comps = complete_directories(&cwd, &welcome.path);
+                        let sel = welcome.path_selected.min(comps.len().saturating_sub(1));
+                        let typed = welcome.path.trim();
+                        let typed_is_dir =
+                            !typed.is_empty() && resolve_cd_path(&cwd, typed).is_dir();
+                        if welcome.path_selected > 0 {
+                            if let Some((_, arg)) = comps.get(sel) {
+                                submit = Some(arg.clone());
+                            }
+                        } else if typed_is_dir || typed.is_empty() {
+                            submit = Some(welcome.path.clone());
+                        } else if let Some((_, arg)) = comps.get(sel) {
+                            submit = Some(arg.clone());
+                        } else {
+                            submit = Some(welcome.path.clone());
+                        }
+                    }
                     KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                         welcome.path.push(c);
+                        welcome.path_selected = 0;
                         welcome.error = None;
                     }
                     _ => {}
@@ -82,6 +131,16 @@ impl App {
                     w.selected = (w.selected + 1).min(len - 1);
                 }
             }
+            KeyCode::Char('n') => {
+                let row = self
+                    .welcome
+                    .as_ref()
+                    .and_then(|w| w.rows.get(w.selected))
+                    .cloned();
+                if let Some(WelcomeRow::Here(path, _) | WelcomeRow::Recent(path, _)) = row {
+                    self.activate_workspace_with_mode(path, false);
+                }
+            }
             KeyCode::Enter => {
                 let row = self
                     .welcome
@@ -92,10 +151,11 @@ impl App {
                     Some(WelcomeRow::OpenPath) => {
                         if let Some(w) = self.welcome.as_mut() {
                             w.path_mode = true;
+                            w.path_selected = 0;
                             w.error = None;
                         }
                     }
-                    Some(WelcomeRow::Here(path) | WelcomeRow::Recent(path, _)) => {
+                    Some(WelcomeRow::Here(path, _) | WelcomeRow::Recent(path, _)) => {
                         self.activate_workspace(path);
                     }
                     None => {}
@@ -120,11 +180,16 @@ impl App {
     }
 
     fn activate_workspace(&mut self, path: PathBuf) {
+        self.activate_workspace_with_mode(path, true);
+    }
+
+    fn activate_workspace_with_mode(&mut self, path: PathBuf, resume: bool) {
         self.welcome = None;
-        let loaded = latest_session_for_cwd(&self.data_dir, &path).filter(|loaded| {
-            std::fs::canonicalize(&loaded.cwd).unwrap_or_else(|_| loaded.cwd.clone())
-                == std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone())
-        });
+        let loaded = if resume {
+            exact_session_for_cwd(&self.data_dir, &path)
+        } else {
+            None
+        };
         if let Some(loaded) = loaded {
             self.load_existing_session(loaded);
         } else {

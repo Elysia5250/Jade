@@ -11,7 +11,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
     };
 
     let mut right_spans: Vec<Span> = Vec::new();
-    if let Some((prov, model)) = resolve_active_provider(&app.data_dir) {
+    let unauthed = if let Some((prov, model)) = resolve_active_provider(&app.data_dir) {
         let (used, estimated) = context_used(&app.session);
         let budget =
             crate::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
@@ -53,13 +53,31 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
             ),
             Style::default().fg(theme.dim),
         ));
+        false
     } else {
-        right_spans.push(Span::styled("sign in", Style::default().fg(theme.warn)));
-    }
+        right_spans.push(Span::styled(
+            "/login to sign in",
+            Style::default()
+                .fg(theme.warn)
+                .add_modifier(Modifier::UNDERLINED),
+        ));
+        true
+    };
 
     let right = Line::from(right_spans);
     let right_w = (right.width() as u16).min(area.width.saturating_sub(4));
     let left_budget = area.width.saturating_sub(right_w + 1) as usize;
+    if unauthed && right_w > 0 && area.width >= right_w {
+        app.hit_regions.push(HitRegion {
+            rect: Rect {
+                x: area.x + area.width - right_w,
+                y: area.y,
+                width: right_w,
+                height: 1,
+            },
+            target: HitTarget::OpenLogin,
+        });
+    }
 
     let remote = app.target != "local" && !app.target.is_empty();
     let offline = app.agent_offline || !app.connected;

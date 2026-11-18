@@ -525,4 +525,26 @@ impl App {
             }
         }
     }
+
+    pub(in crate::tui) fn handle_modal_paste(&mut self, modal: Modal, text: &str) {
+        let clean: String = text.chars().filter(|c| !matches!(c, '\r' | '\n')).collect();
+        match modal {
+            Modal::Picker(mut p) => {
+                if !clean.is_empty() {
+                    p.query.push_str(&clean);
+                    p.selected = 0;
+                }
+                self.modal = Some(Modal::Picker(p));
+            }
+            Modal::Models(mut m) => {
+                if !clean.is_empty() {
+                    m.filter.push_str(&clean);
+                    m.selected = 0;
+                }
+                self.modal = Some(Modal::Models(m));
+            }
+            Modal::Login(login) => self.handle_login_paste(login, &clean),
+            other => self.modal = Some(other),
+        }
+    }
 }

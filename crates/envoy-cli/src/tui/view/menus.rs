@@ -90,3 +90,43 @@ pub(super) fn draw_cd_menu(frame: &mut Frame, app: &App, theme: &Theme, editor: 
         );
     frame.render_stateful_widget(list, area, &mut state);
 }
+
+pub(super) fn draw_at_menu(frame: &mut Frame, app: &App, theme: &Theme, editor: Rect) {
+    let items = app.file_completions();
+    if items.is_empty() {
+        return;
+    }
+    let height = (items.len() as u16 + 2)
+        .min(editor.y.saturating_sub(1))
+        .min(12);
+    if height < 3 {
+        return;
+    }
+    let width = editor.width.saturating_sub(2).min(72);
+    let area = Rect {
+        x: editor.x + 1,
+        y: editor.y.saturating_sub(height),
+        width,
+        height,
+    };
+    frame.render_widget(Clear, area);
+    let rows: Vec<ListItem> = items
+        .iter()
+        .map(|path| ListItem::new(Line::raw(format!(" @{path}"))))
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(app.menu_selected.min(items.len() - 1)));
+    let list = List::new(rows)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.accent))
+                .title(Span::styled(" files (@) ", Style::default().fg(theme.dim))),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(theme.selection)
+                .add_modifier(Modifier::BOLD),
+        );
+    frame.render_stateful_widget(list, area, &mut state);
+}

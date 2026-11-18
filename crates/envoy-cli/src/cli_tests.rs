@@ -58,3 +58,28 @@ fn cwd_flag_is_global() {
         other => panic!("expected Run, got {other:?}"),
     }
 }
+
+#[test]
+fn ask_subcommand_and_new_flag_parse() {
+    let cli = Cli::try_parse_from(["envoy", "--cwd", "/tmp/x", "--new"]).expect("parse --new");
+    assert!(cli.new_session);
+    assert!(cli.cmd.is_none());
+
+    let cli = Cli::try_parse_from([
+        "envoy",
+        "ask",
+        "--output-format",
+        "json",
+        "--permission-mode",
+        "auto",
+        "explain",
+        "this",
+    ])
+    .expect("parse ask");
+    assert_eq!(cli.headless.output_format, headless::OutputFormat::Json);
+    assert_eq!(cli.headless.permission_mode.as_deref(), Some("auto"));
+    match cli.cmd {
+        Some(Commands::Ask { prompt }) => assert_eq!(prompt, vec!["explain", "this"]),
+        other => panic!("expected Ask, got {other:?}"),
+    }
+}

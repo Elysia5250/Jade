@@ -65,7 +65,9 @@ pub(crate) fn complete_directories(cwd: &Path, raw: &str) -> Vec<(String, String
     let Ok(entries) = std::fs::read_dir(&dir_to_read) else {
         return Vec::new();
     };
-    let mut dirs = Vec::new();
+    let q = name_prefix.to_lowercase();
+    let q_chars = q.chars().count();
+    let mut dirs: Vec<(u8, String, String, String)> = Vec::new();
     for entry in entries.flatten() {
         let Ok(ft) = entry.file_type() else {
             continue;
@@ -78,15 +80,28 @@ pub(crate) fn complete_directories(cwd: &Path, raw: &str) -> Vec<(String, String
         if name.starts_with('.') && !name_prefix.starts_with('.') {
             continue;
         }
-        if !name_prefix.is_empty() && !name.starts_with(&name_prefix) {
+        let lower = name.to_lowercase();
+        let rank = if q.is_empty() {
+            0
+        } else if name.starts_with(&name_prefix) {
+            0
+        } else if lower.starts_with(&q) {
+            1
+        } else if lower.contains(&q) {
+            2
+        } else if q_chars >= 2 && crate::tui::links::is_subsequence(&q, &lower) {
+            3
+        } else {
             continue;
-        }
+        };
         let completed = format!("{arg_dir_prefix}{name}/");
-        dirs.push((format!("{name}/"), completed));
+        dirs.push((rank, lower, format!("{name}/"), completed));
     }
-    dirs.sort_by(|a, b| a.0.cmp(&b.0));
-    dirs.truncate(10);
-    dirs
+    dirs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)).then_with(|| a.2.cmp(&b.2)));
+    dirs.into_iter()
+        .take(10)
+        .map(|(_, _, display, completed)| (display, completed))
+        .collect()
 }
 
 // ------------------------------------------------------------------ drawing

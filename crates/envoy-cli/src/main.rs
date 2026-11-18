@@ -68,6 +68,10 @@ struct Cli {
     #[arg(short = 'c', long = "continue")]
     continue_last: bool,
 
+    /// Start a fresh session instead of resuming the directory's latest session.
+    #[arg(long = "new", global = true)]
+    new_session: bool,
+
     /// Resume a specific session ID.
     #[arg(short = 's', long = "session")]
     session: Option<String>,
@@ -82,6 +86,11 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Ask the AI agent a one-shot prompt (headless mode).
+    Ask {
+        #[arg(trailing_var_arg = true, required = true)]
+        prompt: Vec<String>,
+    },
     /// Show policy, daemon state, conduit status, and job counts.
     Status,
     /// Connect an LLM provider (API key, OAuth, or custom endpoint).
@@ -121,7 +130,7 @@ enum Commands {
     },
     /// Queue a job and print its id (never waits for it).
     Submit(TaskArgs),
-    /// Queue a job, follow its output, and exit with its code.
+    /// Queue a shell job, follow its output, and exit with its code.
     Run(TaskArgs),
     /// List known jobs.
     Jobs,
@@ -298,12 +307,14 @@ impl Ctx {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let is_mcp = matches!(cli.cmd.as_ref(), Some(Commands::Mcp { .. }));
-    let is_headless = cli.headless.is_active();
+    let piped_stdin = cli.cmd.is_none() && !std::io::IsTerminal::is_terminal(&std::io::stdin());
+    let is_ask = matches!(cli.cmd.as_ref(), Some(Commands::Ask { .. }));
+    let is_headless = cli.headless.is_active() || piped_stdin || is_ask;
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("envoy=info,envoy_service=info"));
     let builder = tracing_subscriber::fmt().with_env_filter(filter);
     if is_mcp || is_headless {
-        // MCP and `-p` output write clean responses/JSON on stdout; logs stay on stderr.
+        // MCP, `ask`, and `-p`/piped output write clean responses/JSON on stdout; logs stay on stderr.
         builder.with_writer(std::io::stderr).init();
     } else {
         builder.init();
@@ -322,29 +333,35 @@ async fn main() -> Result<()> {
         conduit: cli.conduit_socket.clone(),
         cwd,
     };
+    let pick_workspace =
+        cli.cwd.is_none() && !cli.continue_last && cli.session.is_none() && !cli.new_session;
+    let cont = cli.continue_last && !cli.new_session;
 
     let Some(command) = cli.cmd else {
         if is_headless {
-            return headless::run(&ctx, cli.continue_last, cli.session.clone(), cli.headless).await;
+            let h = headless::piped_headless_args(cli.headless);
+            return headless::run(&ctx, cont, cli.session, h).await;
         }
-        // Bare `envoy` is the opencode-style entry point: open the console in
-        // the current directory.
         return tui::run(
-            ctx.data_dir.clone(),
-            ctx.on.clone(),
-            ctx.conduit.clone(),
-            ctx.cwd.clone(),
+            ctx.data_dir,
+            ctx.on,
+            ctx.conduit,
+            ctx.cwd,
             cli.continue_last,
-            cli.session.clone(),
-            cli.cwd.is_none() && !cli.continue_last && cli.session.is_none(),
+            cli.session,
+            pick_workspace,
+            cli.new_session,
         )
         .await;
     };
-    if is_headless {
+    if cli.headless.is_active() {
         bail!("--print / -p cannot be combined with a subcommand");
     }
 
     match command {
+        Commands::Ask { prompt } => {
+            headless::run_ask(&ctx, cont, cli.session, cli.headless, prompt).await
+        }
         Commands::Status => cmd_status(&ctx).await,
         Commands::Login => auth::cmd_auth_login(&ctx.data_dir).await,
         Commands::Auth { cmd } => match cmd {
@@ -398,13 +415,14 @@ async fn main() -> Result<()> {
         } => cmd_copy(&ctx, &from, &from_path, &to, &to_path, &mode).await,
         Commands::Ui => {
             tui::run(
-                ctx.data_dir.clone(),
-                ctx.on.clone(),
-                ctx.conduit.clone(),
-                ctx.cwd.clone(),
+                ctx.data_dir,
+                ctx.on,
+                ctx.conduit,
+                ctx.cwd,
                 cli.continue_last,
-                cli.session.clone(),
-                cli.cwd.is_none() && !cli.continue_last && cli.session.is_none(),
+                cli.session,
+                pick_workspace,
+                cli.new_session,
             )
             .await
         }

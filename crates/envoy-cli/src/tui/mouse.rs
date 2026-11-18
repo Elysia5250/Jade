@@ -224,6 +224,9 @@ impl App {
                 HitTarget::StopMonitor(monitor_id) => {
                     self.stop_monitor_by_id(monitor_id);
                 }
+                HitTarget::OpenLogin => {
+                    self.open_login_modal();
+                }
             }
             return None;
         }

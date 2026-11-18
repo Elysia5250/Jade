@@ -52,7 +52,7 @@ fn opens_with_input_focused_and_welcome_screen() {
         .map(|c| c.symbol())
         .collect();
 
-    for needle in ["/tmp/project", "shell", "sign in"] {
+    for needle in ["/tmp/project", "agent", "/login to sign in"] {
         assert!(text.contains(needle), "missing {needle:?}:\n{text}");
     }
     assert!(
@@ -136,7 +136,7 @@ fn slash_menu_filters_completes_and_opens_login() {
 fn login_api_key_flow_persists_and_enables_agent_mode() {
     let dir = tmpdir();
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    assert_eq!(app.mode, InputMode::Shell);
+    assert_eq!(app.mode, InputMode::Agent);
 
     app.run_slash("/login");
     // Filter to deepseek
@@ -428,7 +428,7 @@ fn slash_choices_open_a_picker_instead_of_cycling() {
     let dir = tmpdir();
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
     assert_eq!(app.perm_mode, PermissionMode::Default);
-    assert_eq!(app.mode, InputMode::Shell);
+    assert_eq!(app.mode, InputMode::Agent);
 
     app.run_slash("/permission");
     {
@@ -456,11 +456,11 @@ fn slash_choices_open_a_picker_instead_of_cycling() {
         let Some(Modal::Picker(picker)) = app.modal.as_ref() else {
             panic!("expected a mode picker");
         };
-        assert_eq!(picker.selected, 1);
+        assert_eq!(picker.selected, 0);
     }
-    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.mode, InputMode::Agent);
+    assert_eq!(app.mode, InputMode::Shell);
 
     app.run_slash("/theme");
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));

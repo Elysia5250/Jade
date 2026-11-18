@@ -100,6 +100,62 @@ impl WorkspaceIndex {
 
         None
     }
+
+    pub(crate) fn search_files(&self, query: &str, limit: usize) -> Vec<String> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let q = query.trim().to_ascii_lowercase();
+        let mut scored: Vec<(u8, usize, usize, &str)> = self
+            .files
+            .iter()
+            .filter_map(|path| {
+                let depth = path.matches('/').count();
+                if q.is_empty() {
+                    return Some((0, depth, path.len(), path.as_str()));
+                }
+                let lower = path.to_ascii_lowercase();
+                let base = Path::new(&lower)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(&lower);
+                let rank = if base.starts_with(&q) {
+                    0
+                } else if base.contains(&q) {
+                    1
+                } else if lower.contains(&q) {
+                    2
+                } else if q.len() >= 2 && is_subsequence(&q, &lower) {
+                    3
+                } else {
+                    return None;
+                };
+                Some((rank, depth, path.len(), path.as_str()))
+            })
+            .collect();
+        scored.sort_unstable();
+        scored
+            .into_iter()
+            .take(limit)
+            .map(|(_, _, _, p)| p.to_string())
+            .collect()
+    }
+}
+
+pub(crate) fn is_subsequence(needle: &str, haystack: &str) -> bool {
+    let mut n = needle.chars();
+    let Some(mut cur) = n.next() else {
+        return true;
+    };
+    for ch in haystack.chars() {
+        if ch == cur {
+            let Some(next) = n.next() else {
+                return true;
+            };
+            cur = next;
+        }
+    }
+    false
 }
 
 fn walk_workspace(root: &Path, dir: &Path, out: &mut Vec<String>) {

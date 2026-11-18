@@ -85,7 +85,36 @@ impl App {
             }
         }
 
-        // 3. Multiline newline bindings (Shift+Enter, Alt+Enter, Ctrl+J)
+        // 3. `@file` workspace completion popup
+        let at_files = self.file_completions();
+        if !at_files.is_empty() {
+            let last = at_files.len() - 1;
+            match key.code {
+                KeyCode::Up => {
+                    self.menu_selected = self.menu_selected.saturating_sub(1);
+                    return Action::None;
+                }
+                KeyCode::Down => {
+                    self.menu_selected = (self.menu_selected + 1).min(last);
+                    return Action::None;
+                }
+                KeyCode::Tab | KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
+                    let chosen = at_files[self.menu_selected.min(last)].clone();
+                    self.accept_at_completion(&chosen);
+                    return Action::None;
+                }
+                KeyCode::Esc => {
+                    if let Some((start_ch, _, _)) = self.at_mention_span() {
+                        self.at_dismissed_at = Some(start_ch);
+                    }
+                    self.menu_selected = 0;
+                    return Action::None;
+                }
+                _ => {}
+            }
+        }
+
+        // 4. Multiline newline bindings (Shift+Enter, Ctrl+J)
         if (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT))
             || (key.code == KeyCode::Char('j') && key.modifiers.contains(KeyModifiers::CONTROL))
         {
@@ -106,6 +135,7 @@ impl App {
                 self.input.clear();
                 self.input_cursor = 0;
                 self.menu_selected = 0;
+                self.at_dismissed_at = None;
 
                 if text.starts_with('/') {
                     return self.run_slash(&text);
@@ -181,12 +211,26 @@ impl App {
                 }
                 Action::None
             }
+            KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.delete_word_before_cursor();
+                Action::None
+            }
             KeyCode::Backspace => {
                 self.delete_before_cursor();
                 Action::None
             }
             KeyCode::Delete => {
                 self.delete_at_cursor();
+                Action::None
+            }
+            KeyCode::Left if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                self.move_cursor_word(-1);
+                Action::None
+            }
+            KeyCode::Right
+                if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                self.move_cursor_word(1);
                 Action::None
             }
             KeyCode::Left => {
@@ -244,18 +288,29 @@ impl App {
                     'u' => {
                         self.input.clear();
                         self.input_cursor = 0;
+                        self.at_dismissed_at = None;
                     }
                     'a' => self.input_cursor = self.line_start_char(self.input_cursor),
                     'e' => self.input_cursor = self.line_end_char(self.input_cursor),
                     'k' => {
                         let byte = self.byte_index(self.input_cursor);
                         self.input.truncate(byte);
+                        self.at_dismissed_at = None;
                     }
+                    'w' => self.delete_word_before_cursor(),
                     _ => {}
                 }
                 Action::None
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.move_cursor_word(-1);
+                Action::None
+            }
+            KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.move_cursor_word(1);
+                Action::None
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::ALT) => {
                 self.insert_char(c);
                 Action::None
             }
@@ -263,11 +318,83 @@ impl App {
         }
     }
 
+    pub(in crate::tui) fn handle_paste(&mut self, text: &str) {
+        if self.welcome.is_some() {
+            self.handle_welcome_paste(text);
+            return;
+        }
+        if let Some(modal) = self.modal.take() {
+            self.handle_modal_paste(modal, text);
+            return;
+        }
+        if self.pending_ask.is_some() {
+            return;
+        }
+        self.focus = Focus::Input;
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        if normalized.is_empty() {
+            return;
+        }
+        let at = self.byte_index(self.input_cursor);
+        self.input.insert_str(at, &normalized);
+        self.input_cursor += normalized.chars().count();
+        self.menu_selected = 0;
+        self.at_dismissed_at = None;
+        if self.at_mention_span().is_some() {
+            self.workspace_index.ensure_fresh(&self.session.cwd);
+        }
+    }
+
+    pub(in crate::tui) fn at_mention_span(&self) -> Option<(usize, usize, String)> {
+        if self.slash_query().is_some() || self.cd_query().is_some() {
+            return None;
+        }
+        let chars: Vec<char> = self.input.chars().collect();
+        let cursor = self.input_cursor.min(chars.len());
+        let mut i = cursor;
+        while i > 0 && !chars[i - 1].is_whitespace() {
+            i -= 1;
+        }
+        if i < cursor && chars[i] == '@' && (i == 0 || chars[i - 1].is_whitespace()) {
+            let query: String = chars[i + 1..cursor].iter().collect();
+            Some((i, cursor, query))
+        } else {
+            None
+        }
+    }
+
+    pub(in crate::tui) fn file_completions(&self) -> Vec<String> {
+        let Some((start_ch, _, query)) = self.at_mention_span() else {
+            return Vec::new();
+        };
+        if self.at_dismissed_at == Some(start_ch) {
+            return Vec::new();
+        }
+        self.workspace_index.search_files(&query, 10)
+    }
+
+    pub(in crate::tui) fn accept_at_completion(&mut self, chosen: &str) {
+        let Some((start_ch, end_ch, _)) = self.at_mention_span() else {
+            return;
+        };
+        let b0 = self.byte_index(start_ch);
+        let b1 = self.byte_index(end_ch);
+        let replacement = format!("@{chosen} ");
+        self.input.replace_range(b0..b1, &replacement);
+        self.input_cursor = start_ch + replacement.chars().count();
+        self.menu_selected = 0;
+        self.at_dismissed_at = None;
+    }
+
     pub(in crate::tui) fn insert_char(&mut self, c: char) {
         let at = self.byte_index(self.input_cursor);
         self.input.insert(at, c);
         self.input_cursor += 1;
         self.menu_selected = 0;
+        self.at_dismissed_at = None;
+        if c == '@' || self.at_mention_span().is_some() {
+            self.workspace_index.ensure_fresh(&self.session.cwd);
+        }
     }
 
     pub(in crate::tui) fn delete_before_cursor(&mut self) {
@@ -278,6 +405,7 @@ impl App {
         self.input.remove(at);
         self.input_cursor -= 1;
         self.menu_selected = 0;
+        self.at_dismissed_at = None;
     }
 
     pub(in crate::tui) fn delete_at_cursor(&mut self) {
@@ -287,6 +415,53 @@ impl App {
         let at = self.byte_index(self.input_cursor);
         self.input.remove(at);
         self.menu_selected = 0;
+        self.at_dismissed_at = None;
+    }
+
+    pub(in crate::tui) fn delete_word_before_cursor(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        let chars: Vec<char> = self.input.chars().collect();
+        let end = self.input_cursor.min(chars.len());
+        let mut start = end;
+        while start > 0 && chars[start - 1].is_whitespace() && chars[start - 1] != '\n' {
+            start -= 1;
+        }
+        if start == end && start > 0 && chars[start - 1] == '\n' {
+            start -= 1;
+        } else {
+            while start > 0 && !chars[start - 1].is_whitespace() {
+                start -= 1;
+            }
+        }
+        let b0 = self.byte_index(start);
+        let b1 = self.byte_index(end);
+        self.input.replace_range(b0..b1, "");
+        self.input_cursor = start;
+        self.menu_selected = 0;
+        self.at_dismissed_at = None;
+    }
+
+    pub(in crate::tui) fn move_cursor_word(&mut self, dir: isize) {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut i = self.input_cursor.min(chars.len());
+        if dir < 0 {
+            while i > 0 && chars[i - 1].is_whitespace() {
+                i -= 1;
+            }
+            while i > 0 && !chars[i - 1].is_whitespace() {
+                i -= 1;
+            }
+        } else {
+            while i < chars.len() && chars[i].is_whitespace() {
+                i += 1;
+            }
+            while i < chars.len() && !chars[i].is_whitespace() {
+                i += 1;
+            }
+        }
+        self.input_cursor = i;
     }
 
     pub(in crate::tui) fn byte_index(&self, chars: usize) -> usize {

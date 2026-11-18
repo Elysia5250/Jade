@@ -122,6 +122,16 @@ impl App {
         }
         for notice in notices {
             match notice {
+                UiNotice::DaemonReady => {
+                    self.last_refresh = Instant::now() - self.interval;
+                    self.agent_retry_at = Instant::now();
+                    if self.welcome.is_none() && self.agent_stream.is_none() {
+                        self.spawn_agent_attach();
+                    }
+                }
+                UiNotice::ConduitWatch(rx) => {
+                    self.watch = Some(rx);
+                }
                 UiNotice::Requeue(items) => {
                     self.agent_offline = true;
                     self.agent_ready = false;
@@ -265,6 +275,7 @@ impl App {
 
     pub(in crate::tui) fn set_permission_mode(&mut self, mode: PermissionMode) {
         self.perm_mode = mode;
+        let _ = crate::permissions::rules::save_default_mode(&self.data_dir, mode);
         self.set_toast(format!("permissions: {}", mode.label()), false);
         self.push_permission_mode_to_daemon(mode);
     }
@@ -280,9 +291,26 @@ impl App {
         });
     }
 
+    fn ensure_provider_or_login(&mut self, prompt: &str) -> bool {
+        if resolve_active_provider(&self.data_dir).is_some() {
+            return true;
+        }
+        if self.input.is_empty() {
+            self.input = prompt.to_string();
+            self.input_cursor = self.input.chars().count();
+        }
+        self.focus = Focus::Input;
+        self.set_toast("no provider connected - complete /login first", true);
+        self.open_login_modal();
+        false
+    }
+
     /// Enter while idle starts a turn; while running it steers the loop with
     /// the user's exact words at the next tool boundary.
     pub(in crate::tui) fn submit_agent(&mut self, prompt: String) {
+        if !self.ensure_provider_or_login(&prompt) {
+            return;
+        }
         let was_running = self.agent_running;
         // Always `Prompt`: the daemon starts a turn when idle and steers the
         // live one otherwise. Keeping the decision on the server side means a
@@ -295,6 +323,9 @@ impl App {
 
     /// Alt+Enter: deliver after the current run finishes.
     pub(in crate::tui) fn queue_followup(&mut self, prompt: String) {
+        if !self.ensure_provider_or_login(&prompt) {
+            return;
+        }
         self.send_agent(prompt.clone(), SendMode::FollowUp);
         self.queued.push_back(prompt);
         self.set_toast("follow-up queued", false);

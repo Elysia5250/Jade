@@ -1,0 +1,429 @@
+use super::*;
+use ratatui::backend::TestBackend;
+
+fn tmpdir(tag: &str) -> PathBuf {
+    let mut b = [0u8; 4];
+    let _ = getrandom::fill(&mut b);
+    let p = std::env::temp_dir().join(format!(
+        "envoy-ux-{tag}-{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3]
+    ));
+    std::fs::create_dir_all(&p).unwrap();
+    p
+}
+
+#[test]
+fn bracketed_paste_preserves_newlines_in_composer_and_strips_in_single_line_fields() {
+    let dir = tmpdir("paste");
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.focus = Focus::Transcript;
+
+    // Main composer: focuses Input and normalizes CRLF/CR to LF without submitting
+    app.handle_paste("line1\r\nline2\rline3");
+    assert_eq!(app.focus, Focus::Input);
+    assert_eq!(app.input, "line1\nline2\nline3");
+    assert_eq!(app.input_cursor, "line1\nline2\nline3".chars().count());
+
+    // Login API key form: strips trailing newline from pasted API key
+    app.open_login_modal();
+    app.handle_paste("deepseek\n");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(matches!(
+        app.modal,
+        Some(Modal::Login(LoginModal::ApiKeyForm { .. }))
+    ));
+    app.handle_paste("sk-pasted-secret\r\n");
+    if let Some(Modal::Login(LoginModal::ApiKeyForm { key, .. })) = app.modal.as_ref() {
+        assert_eq!(key, "sk-pasted-secret");
+    } else {
+        panic!("expected ApiKeyForm");
+    }
+    app.modal = None;
+
+    // Picker modal: strips newlines from search query
+    app.open_picker("test", vec![("alpha".into(), Command::Quit)]);
+    app.handle_paste("al\npha");
+    if let Some(Modal::Picker(p)) = app.modal.as_ref() {
+        assert_eq!(p.query, "alpha");
+    } else {
+        panic!("expected Picker");
+    }
+    app.modal = None;
+
+    // Welcome path mode: strips newlines from pasted path
+    app.open_welcome();
+    if let Some(w) = app.welcome.as_mut() {
+        w.path_mode = true;
+    }
+    app.handle_paste("/tmp/my-dir\n");
+    assert_eq!(app.welcome.as_ref().unwrap().path, "/tmp/my-dir");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unauthenticated_agent_submit_keeps_input_and_opens_login() {
+    let dir = tmpdir("authguard");
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    assert_eq!(app.mode, InputMode::Agent);
+
+    for ch in "explain main.rs".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    let action = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let prompt = match action {
+        Action::SubmitAgent(p) => p,
+        _ => panic!("unauthenticated Enter should yield SubmitAgent, not SubmitShell"),
+    };
+    app.submit_agent(prompt);
+    assert!(matches!(app.modal, Some(Modal::Login(_))));
+    assert_eq!(app.input, "explain main.rs");
+    assert_eq!(app.focus, Focus::Input);
+    app.modal = None;
+
+    // Explicit `!cmd` shell escape still works without a provider
+    app.input = "!echo ok".into();
+    app.input_cursor = app.input.chars().count();
+    match app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+        Action::SubmitShell(req) => assert_eq!(req.spec.display(), "echo ok"),
+        _ => panic!("!cmd should still submit shell"),
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn word_editing_shortcuts_delete_and_move_by_word() {
+    let dir = tmpdir("wordedit");
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.input = "one two three".into();
+    app.input_cursor = app.input.chars().count();
+
+    // Ctrl+Left jumps to start of "three"
+    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL));
+    assert_eq!(app.input_cursor, 8);
+
+    // Alt+B jumps to start of "two"
+    app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
+    assert_eq!(app.input_cursor, 4);
+
+    // Alt+F jumps past "two" to index 7
+    app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT));
+    assert_eq!(app.input_cursor, 7);
+
+    // Ctrl+W deletes "two"
+    app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
+    assert_eq!(app.input, "one  three");
+    assert_eq!(app.input_cursor, 4);
+
+    // Alt+Backspace at end deletes "three"
+    app.input_cursor = app.input.chars().count();
+    app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+    assert_eq!(app.input, "one  ");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn at_file_completion_searches_completes_and_dismisses_cleanly() {
+    let dir = tmpdir("atcomp");
+    let work = dir.join("ws");
+    std::fs::create_dir_all(work.join("src")).unwrap();
+    std::fs::write(work.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(work.join("src/lib.rs"), "pub fn lib() {}\n").unwrap();
+    std::fs::write(work.join("README.md"), "# hi\n").unwrap();
+
+    let mut app = App::new(dir.clone(), "local".into(), None, work.clone());
+    for ch in "check @main".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    let hits = app.file_completions();
+    assert_eq!(hits.first().map(String::as_str), Some("src/main.rs"));
+
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.input, "check @src/main.rs ");
+    assert!(app.file_completions().is_empty());
+
+    // Email-like token must not trigger @ completion
+    app.input = "mail@example".into();
+    app.input_cursor = app.input.chars().count();
+    assert!(app.file_completions().is_empty());
+
+    // Esc dismisses popup without erasing user's text, then Enter submits
+    app.input = "see ".into();
+    app.input_cursor = app.input.chars().count();
+    for ch in "@lib".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    assert!(!app.file_completions().is_empty());
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.file_completions().is_empty());
+    assert_eq!(app.input, "see @lib");
+    match app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
+        Action::SubmitAgent(p) => assert_eq!(p, "see @lib"),
+        _ => panic!("expected SubmitAgent after Esc dismissed @ menu"),
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn welcome_shows_resumes_tag_and_n_starts_fresh_session() {
+    let dir = tmpdir("welcomenew");
+    let here = dir.join("here");
+    std::fs::create_dir_all(&here).unwrap();
+    let mut saved = Session::new(here.clone(), "local".into());
+    saved.title = "prior".into();
+    saved.updated_ms = now_ms();
+    let item_id = saved.alloc_id();
+    saved.items.push(TranscriptItem::User {
+        id: item_id,
+        text: "old".into(),
+        mode: "Agent".into(),
+        cwd: here.display().to_string(),
+        ts_ms: now_ms(),
+    });
+    save_session(&dir, &saved).unwrap();
+
+    let mut app = App::new(dir.clone(), "local".into(), None, here.clone());
+    app.open_welcome();
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(screen.contains("(resumes)"), "welcome screen:\n{screen}");
+    assert!(
+        screen.contains("n new session"),
+        "welcome hint:\n{screen}"
+    );
+
+    // Pressing `n` starts a fresh session rather than resuming `saved.id`
+    app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    assert!(app.welcome.is_none());
+    assert_ne!(app.session.id, saved.id);
+    assert!(app.session.items.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn clicking_status_sign_in_opens_login_modal() {
+    let dir = tmpdir("statusclick");
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.connected = true;
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+
+    let region = app
+        .hit_regions
+        .iter()
+        .find(|hr| hr.target == HitTarget::OpenLogin)
+        .cloned()
+        .expect("OpenLogin hit region should be registered");
+    app.dispatch_click(region.rect.x, region.rect.y);
+    assert!(matches!(app.modal, Some(Modal::Login(_))));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn complete_directories_is_case_insensitive_and_fuzzy() {
+    let dir = tmpdir("dircmp");
+    std::fs::create_dir_all(dir.join("Android")).unwrap();
+    std::fs::create_dir_all(dir.join("Applications")).unwrap();
+    std::fs::create_dir_all(dir.join("MyProject")).unwrap();
+
+    let ci = complete_directories(&dir, "and");
+    assert_eq!(ci.first().map(|(d, _)| d.as_str()), Some("Android/"));
+
+    let sub = complete_directories(&dir, "proj");
+    assert_eq!(sub.first().map(|(d, _)| d.as_str()), Some("MyProject/"));
+
+    let fuzzy = complete_directories(&dir, "mpj");
+    assert_eq!(fuzzy.first().map(|(d, _)| d.as_str()), Some("MyProject/"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn welcome_path_mode_supports_arrow_selection_and_enter() {
+    let dir = tmpdir("warrow");
+    let a = dir.join("Alpha");
+    let b = dir.join("Beta");
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.open_welcome();
+    if let Some(w) = app.welcome.as_mut() {
+        w.path_mode = true;
+    }
+
+    // Move Down from Alpha (0) to Beta (1), then Tab completes "Beta/"
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.welcome.as_ref().unwrap().path_selected, 1);
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(app.welcome.as_ref().unwrap().path, "Beta/");
+    assert_eq!(app.welcome.as_ref().unwrap().path_selected, 0);
+
+    // Clear, type partial lowercase "al", Down/Up stays clamped, Enter opens Alpha
+    app.welcome.as_mut().unwrap().path = "al".to_string();
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.welcome.is_none());
+    assert_eq!(app.session.cwd, std::fs::canonicalize(&a).unwrap());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice() {
+    let dir = tmpdir("fold");
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.connected = true;
+
+    let uid = app.session.alloc_id();
+    app.session.items.push(TranscriptItem::User {
+        id: uid,
+        text: "run checks".into(),
+        mode: "Agent".into(),
+        cwd: ".".into(),
+        ts_ms: now_ms(),
+    });
+
+    // Cross-step tools separated by an empty collapsed-thought Assistant turn
+    let t1 = app.session.alloc_id();
+    app.session.items.push(TranscriptItem::Tool {
+        id: t1,
+        call_id: "c1".into(),
+        name: "read".into(),
+        title: "read Cargo.toml".into(),
+        subtitle: String::new(),
+        job_id: None,
+        target: "local".into(),
+        output: Vec::new(),
+        status: CardStatus::Done,
+        collapsed: true,
+        duration_ms: Some(10),
+        exit_code: Some(0),
+        started_ms: now_ms(),
+    });
+    let aid = app.session.alloc_id();
+    app.session.items.push(TranscriptItem::Assistant {
+        id: aid,
+        text: String::new(),
+        reasoning: "internal step".into(),
+        reasoning_collapsed: true,
+        model: "m".into(),
+        done: true,
+        error: None,
+    });
+    let t2 = app.session.alloc_id();
+    app.session.items.push(TranscriptItem::Tool {
+        id: t2,
+        call_id: "c2".into(),
+        name: "monitor".into(),
+        title: "monitor start watch".into(),
+        subtitle: String::new(),
+        job_id: Some(7),
+        target: "local".into(),
+        output: Vec::new(),
+        status: CardStatus::Done,
+        collapsed: true,
+        duration_ms: Some(20),
+        exit_code: Some(0),
+        started_ms: now_ms(),
+    });
+
+    // MonitorFired appends onto monitor tool output instead of pushing top-level Notice
+    let notice_before = app
+        .session
+        .items
+        .iter()
+        .filter(|i| matches!(i, TranscriptItem::Notice { .. }))
+        .count();
+    app.apply_event(
+        10,
+        AgentEvent::MonitorFired {
+            id: 1,
+            label: "watch".into(),
+            job_id: 7,
+            matched_lines: vec!["tick 1".into()],
+            trigger_count: 1,
+            max_triggers: Some(2),
+            stopped: false,
+        },
+    );
+    let notice_after = app
+        .session
+        .items
+        .iter()
+        .filter(|i| matches!(i, TranscriptItem::Notice { .. }))
+        .count();
+    assert_eq!(notice_before, notice_after);
+
+    let rid = app.session.alloc_id();
+    app.session.items.push(TranscriptItem::Assistant {
+        id: rid,
+        text: "Final summary ready.".into(),
+        reasoning: String::new(),
+        reasoning_collapsed: true,
+        model: "m".into(),
+        done: true,
+        error: None,
+    });
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    let collapsed: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(
+        collapsed.contains("Explored 2 ops (read x1, monitor x1)"),
+        "collapsed:\n{collapsed}"
+    );
+    assert!(collapsed.contains("▌ run checks"), "user card:\n{collapsed}");
+    assert!(
+        collapsed.contains("● Final summary ready."),
+        "reply:\n{collapsed}"
+    );
+
+    // Click group -> expands with [collapse]; click [collapse] -> folds again
+    let grp = app
+        .hit_regions
+        .iter()
+        .find(|hr| matches!(hr.target, HitTarget::ToggleToolGroup(_)))
+        .unwrap()
+        .rect;
+    app.dispatch_click(grp.x, grp.y);
+    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    let expanded: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(expanded.contains("[collapse]"), "expanded:\n{expanded}");
+    assert!(expanded.contains("monitor start watch"), "expanded:\n{expanded}");
+
+    let col_btn = app
+        .hit_regions
+        .iter()
+        .find(|hr| matches!(hr.target, HitTarget::ToggleToolGroup(_)))
+        .unwrap()
+        .rect;
+    app.dispatch_click(col_btn.x, col_btn.y);
+    assert!(app.expanded_explore_groups.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

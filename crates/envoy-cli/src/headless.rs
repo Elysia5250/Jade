@@ -14,7 +14,7 @@ use clap::{Args, ValueEnum};
 use envoy_service::AgentServer;
 use serde::Serialize;
 use std::io::{Read, Write};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::oneshot;
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -32,27 +32,27 @@ pub struct HeadlessArgs {
     pub prompt: Option<String>,
 
     /// Override model (`<provider>/<model>` or `<model>`).
-    #[arg(long, env = "ENVOY_MODEL")]
+    #[arg(long, global = true, env = "ENVOY_MODEL")]
     pub model: Option<String>,
 
     /// Permission mode (`default`, `accept-edits`, `plan`, `auto`).
-    #[arg(long = "permission-mode", value_name = "MODE")]
+    #[arg(long = "permission-mode", global = true, value_name = "MODE")]
     pub permission_mode: Option<String>,
 
     /// Bypass interactive permission prompts and default OS sandbox restrictions.
-    #[arg(long = "dangerously-skip-permissions")]
+    #[arg(long = "dangerously-skip-permissions", global = true)]
     pub dangerously_skip_permissions: bool,
 
     /// Override tool OS sandbox (`workspace-write`, `read-only`, `off`, `danger-full-access`).
-    #[arg(long = "sandbox", value_name = "POLICY")]
+    #[arg(long = "sandbox", global = true, value_name = "POLICY")]
     pub sandbox: Option<String>,
 
     /// Maximum LLM/tool steps for this run (1..=250; default 100 in headless mode).
-    #[arg(long = "max-steps", value_name = "N")]
+    #[arg(long = "max-steps", global = true, value_name = "N")]
     pub max_steps: Option<usize>,
 
     /// Output format for `-p/--print` runs.
-    #[arg(long = "output-format", value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(long = "output-format", global = true, value_enum, default_value_t = OutputFormat::Text)]
     pub output_format: OutputFormat,
 }
 
@@ -60,6 +60,13 @@ impl HeadlessArgs {
     pub fn is_active(&self) -> bool {
         self.prompt.is_some()
     }
+}
+
+pub(crate) fn piped_headless_args(mut args: HeadlessArgs) -> HeadlessArgs {
+    if args.prompt.is_none() {
+        args.prompt = Some("-".into());
+    }
+    args
 }
 
 #[derive(Debug, Serialize)]
@@ -77,9 +84,19 @@ struct JsonReport {
 }
 
 struct EphemeralServer {
-    _lock: daemon::InstanceLock,
+    dir: std::path::PathBuf,
+    socket: std::path::PathBuf,
     stop_tx: Option<oneshot::Sender<()>>,
     task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for EphemeralServer {
+    fn drop(&mut self) {
+        if let Some(tx) = self.stop_tx.take() {
+            let _ = tx.send(());
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 impl EphemeralServer {
@@ -88,27 +105,26 @@ impl EphemeralServer {
             return Ok(None);
         }
         std::fs::create_dir_all(data_dir)?;
-        let lock = match daemon::InstanceLock::acquire(data_dir) {
-            Ok(lock) => lock,
-            Err(err) => {
-                for _ in 0..20 {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    if daemon::is_running(data_dir).await {
-                        return Ok(None);
-                    }
-                }
-                return Err(err);
-            }
-        };
-        if daemon::is_running(data_dir).await {
-            return Ok(None);
-        }
 
-        let socket = daemon::socket_path(data_dir);
-        if let Some(parent) = socket.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        let _ = std::fs::remove_file(&socket);
+        let mut b = [0u8; 4];
+        let _ = getrandom::fill(&mut b);
+        let base = std::env::temp_dir();
+        let base = if base.to_string_lossy().len() > 60 && std::path::Path::new("/tmp").is_dir() {
+            std::path::PathBuf::from("/tmp")
+        } else {
+            base
+        };
+        let dir = base.join(format!(
+            "envoy-eph-{}-{:02x}{:02x}{:02x}{:02x}",
+            std::process::id(),
+            b[0],
+            b[1],
+            b[2],
+            b[3]
+        ));
+        std::fs::create_dir_all(&dir)?;
+
+        let socket = dir.join("envoy.sock");
         let listener = tokio::net::UnixListener::bind(&socket)
             .with_context(|| format!("binding {}", socket.display()))?;
         #[cfg(unix)]
@@ -117,17 +133,20 @@ impl EphemeralServer {
             let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
         }
 
-        let server = AgentServer::open_store(data_dir.to_path_buf())?;
+        let host = std::sync::Arc::new(envoy_service::StoreHost::open(data_dir.to_path_buf())?);
+        let server = AgentServer::new(dir.clone(), host);
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
+        let sock_for_srv = socket.clone();
         let task = tokio::spawn(async move {
-            daemon::run_server(server, listener, socket, None, async move {
+            daemon::run_server(server, listener, sock_for_srv, None, async move {
                 let _ = stop_rx.await;
             })
             .await;
         });
 
         Ok(Some(Self {
-            _lock: lock,
+            dir,
+            socket,
             stop_tx: Some(stop_tx),
             task: Some(task),
         }))
@@ -140,6 +159,7 @@ impl EphemeralServer {
         if let Some(task) = self.task.take() {
             let _ = task.await;
         }
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -158,6 +178,17 @@ fn read_prompt(raw: Option<String>) -> Result<String> {
         bail!("empty prompt");
     }
     Ok(prompt)
+}
+
+pub(crate) async fn run_ask(
+    ctx: &Ctx,
+    continue_last: bool,
+    session_id: Option<String>,
+    mut args: HeadlessArgs,
+    prompt_words: Vec<String>,
+) -> Result<()> {
+    args.prompt = Some(prompt_words.join(" "));
+    run(ctx, continue_last, session_id, args).await
 }
 
 pub(crate) async fn run(
@@ -228,8 +259,11 @@ pub(crate) async fn run_with_writers<WOut: Write, WErr: Write>(
         )
         .await;
 
+    let local_socket = ephemeral.as_ref().map(|s| s.socket.clone());
     let mut rx = {
         let mut state = live.lock().unwrap();
+        state.local_socket = local_socket.clone();
+        state.monitors.set_local_socket(local_socket);
         state.asks = AskBroker::new_headless();
         state.permissions.set_mode(perm_mode);
         state
@@ -326,6 +360,7 @@ async fn collect_events<WOut: Write, WErr: Write>(
     let mut need_step_sep = false;
     let mut wrote_text = false;
     let mut last_char_nl = false;
+    let mut saw_approval_denial = false;
 
     while let Some(seq_ev) = rx.recv().await {
         if fmt == OutputFormat::StreamJson {
@@ -360,6 +395,18 @@ async fn collect_events<WOut: Write, WErr: Write>(
                 need_step_sep = true;
                 if fmt == OutputFormat::Text {
                     let _ = writeln!(err, "[tool] {name} {subtitle}");
+                    let _ = err.flush();
+                }
+            }
+            AgentEvent::ToolOutput {
+                err: true, text, ..
+            } => {
+                if !saw_approval_denial && text.contains("requires interactive approval") {
+                    saw_approval_denial = true;
+                    let _ = writeln!(
+                        err,
+                        "[hint] tool approval required in headless mode; re-run with --permission-mode accept-edits / auto or --dangerously-skip-permissions"
+                    );
                     let _ = err.flush();
                 }
             }
@@ -574,5 +621,47 @@ mod tests {
         assert!(stream.contains("\"TurnError\""), "{stream}");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn collect_events_prints_approval_hint_once_on_stderr() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        for n in 1..=2 {
+            tx.send(SeqEvent {
+                seq: n,
+                event: AgentEvent::ToolOutput {
+                    call_id: format!("c{n}"),
+                    text: "tool `exec` requires interactive approval; rejected".into(),
+                    err: true,
+                },
+            })
+            .unwrap();
+        }
+        tx.send(SeqEvent {
+            seq: 3,
+            event: AgentEvent::TurnDone {
+                messages: Vec::new(),
+                input_tokens: 1,
+                output_tokens: 1,
+                context_tokens: 1,
+            },
+        })
+        .unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        collect_events(&mut rx, OutputFormat::Json, &mut out, &mut err)
+            .await
+            .unwrap();
+
+        assert!(out.is_empty(), "JSON stdout must stay clean");
+        let stderr = String::from_utf8(err).unwrap();
+        assert_eq!(
+            stderr
+                .matches("[hint] tool approval required in headless mode")
+                .count(),
+            1,
+            "stderr:\n{stderr}"
+        );
     }
 }

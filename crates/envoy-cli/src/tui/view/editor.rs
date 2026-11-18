@@ -1,4 +1,4 @@
-//! Prompt editor with clean rounded framing and mode indicator.
+//! Prompt editor with clean rounded framing, prompt prefix, and mode indicator.
 use crate::tui::*;
 
 pub(super) fn draw_editor(
@@ -19,18 +19,24 @@ pub(super) fn draw_editor(
         theme.border
     };
     let title = match app.mode {
-        InputMode::Agent => " Ask - /cmd - !shell ",
-        InputMode::Shell => " Shell - Tab agent ",
+        InputMode::Agent => Span::styled(
+            " / commands · @ files · ! shell · Ctrl+J newline ",
+            Style::default().fg(theme.dim),
+        ),
+        InputMode::Shell => Span::styled(
+            " ! shell — Tab to return to agent ",
+            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+        ),
     };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(frame_color))
-        .title(Span::styled(title, Style::default().fg(theme.dim)))
+        .title_bottom(title.into_right_aligned_line())
         .style(Style::default().bg(theme.panel));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if inner.width == 0 || inner.height == 0 {
+    if inner.width < 4 || inner.height == 0 {
         return;
     }
 
@@ -43,19 +49,49 @@ pub(super) fn draw_editor(
         width: inner.width.saturating_sub(2),
         height: inner.height,
     };
+    let prompt_glyph = match app.mode {
+        InputMode::Agent => Span::styled(
+            "❯ ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        InputMode::Shell => Span::styled(
+            "$ ",
+            Style::default()
+                .fg(theme.warn)
+                .add_modifier(Modifier::BOLD),
+        ),
+    };
+    let text_budget = content.width.saturating_sub(2) as usize;
+
     let lines: Vec<Line> = if app.input.is_empty() {
         let placeholder = match app.mode {
-            InputMode::Agent => "Ask anything. (Shift+Tab permissions, Ctrl+B panel)",
-            InputMode::Shell => "Run shell command.",
+            InputMode::Agent if resolve_active_provider(&app.data_dir).is_none() => {
+                "Sign in first (/login or press Enter to connect a provider)"
+            }
+            InputMode::Agent => "Message Envoy…",
+            InputMode::Shell => "Run a shell command…",
         };
-        vec![Line::styled(
-            truncate_width(placeholder, content.width as usize),
-            Style::default().fg(theme.dim),
-        )]
+        vec![Line::from(vec![
+            prompt_glyph,
+            Span::styled(
+                truncate_width(placeholder, text_budget),
+                Style::default().fg(theme.dim),
+            ),
+        ])]
     } else {
         visual_lines[skip..end]
             .iter()
-            .map(|text| Line::raw(text.clone()))
+            .enumerate()
+            .map(|(i, text)| {
+                let prefix = if i == 0 && skip == 0 {
+                    prompt_glyph.clone()
+                } else {
+                    Span::raw("  ")
+                };
+                Line::from(vec![prefix, Span::raw(text.clone())])
+            })
             .collect()
     };
     frame.render_widget(Paragraph::new(lines), content);

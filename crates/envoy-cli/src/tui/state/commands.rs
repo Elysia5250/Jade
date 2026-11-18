@@ -216,9 +216,6 @@ impl App {
                         let id = prov.id.clone();
                         match remove_provider(&self.data_dir, &id) {
                             Ok(true) => {
-                                if resolve_active_provider(&self.data_dir).is_none() {
-                                    self.mode = InputMode::Shell;
-                                }
                                 self.set_toast(format!("logged out of {id}"), false);
                             }
                             Ok(false) => {
@@ -235,9 +232,6 @@ impl App {
                 } else {
                     match remove_provider(&self.data_dir, arg) {
                         Ok(true) => {
-                            if resolve_active_provider(&self.data_dir).is_none() {
-                                self.mode = InputMode::Shell;
-                            }
                             self.set_toast(format!("logged out of {arg}"), false);
                         }
                         Ok(false) => {

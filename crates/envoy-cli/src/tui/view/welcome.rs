@@ -31,7 +31,7 @@ pub(super) fn draw_workspace_picker(frame: &mut Frame, app: &mut App, theme: &Th
             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         ),
         Line::styled(
-            "  j/k move   enter open   ctrl-c quit",
+            "  j/k move   enter open   n new session   ctrl-c quit",
             Style::default().fg(theme.dim),
         ),
         Line::from(""),
@@ -46,13 +46,21 @@ pub(super) fn draw_workspace_picker(frame: &mut Frame, app: &mut App, theme: &Th
             Span::raw(welcome.path.clone()),
         ]));
         let comps = complete_directories(&app.session.cwd, &welcome.path);
-        for (i, (label, _)) in comps.iter().take(6).enumerate() {
-            let style = if i == 0 {
-                Style::default().fg(theme.text)
+        let sel = welcome.path_selected.min(comps.len().saturating_sub(1));
+        let window = 6usize;
+        let start = if sel >= window { sel + 1 - window } else { 0 };
+        for (offset, (label, _)) in comps.iter().skip(start).take(window).enumerate() {
+            let idx = start + offset;
+            let is_sel = idx == sel;
+            let marker = if is_sel { "  › " } else { "    " };
+            let style = if is_sel {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.dim)
             };
-            lines.push(Line::styled(format!("    {label}"), style));
+            lines.push(Line::styled(format!("{marker}{label}"), style));
         }
         if let Some(err) = &welcome.error {
             lines.push(Line::styled(
@@ -61,7 +69,7 @@ pub(super) fn draw_workspace_picker(frame: &mut Frame, app: &mut App, theme: &Th
             ));
         }
         lines.push(Line::styled(
-            "  tab completes   esc back",
+            "  ↑/↓ select   tab completes   enter open   esc back",
             Style::default().fg(theme.dim),
         ));
     } else {
@@ -69,8 +77,14 @@ pub(super) fn draw_workspace_picker(frame: &mut Frame, app: &mut App, theme: &Th
             let selected = idx == welcome.selected;
             let marker = if selected { "> " } else { "  " };
             let text = match row {
-                WelcomeRow::Here(path) => format!("current   {}", collapse_home(path)),
-                WelcomeRow::Recent(_, label) => format!("recent    {label}"),
+                WelcomeRow::Here(path, resumes) => {
+                    if *resumes {
+                        format!("current   {}  (resumes)", collapse_home(path))
+                    } else {
+                        format!("current   {}", collapse_home(path))
+                    }
+                }
+                WelcomeRow::Recent(_, label) => format!("recent    {label}  (resumes)"),
                 WelcomeRow::OpenPath => "open a path...".to_string(),
             };
             let style = if selected {

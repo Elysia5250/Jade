@@ -58,6 +58,7 @@ pub(crate) enum HitTarget {
     CyclePermission,
     SelectAskOption(usize),
     StopMonitor(u64),
+    OpenLogin,
 }
 
 #[derive(Debug, Clone)]
@@ -160,12 +161,13 @@ pub(crate) struct Welcome {
     pub(crate) selected: usize,
     pub(crate) path_mode: bool,
     pub(crate) path: String,
+    pub(crate) path_selected: usize,
     pub(crate) error: Option<String>,
 }
 
 #[derive(Clone)]
 pub(crate) enum WelcomeRow {
-    Here(PathBuf),
+    Here(PathBuf, bool),
     Recent(PathBuf, String),
     OpenPath,
 }

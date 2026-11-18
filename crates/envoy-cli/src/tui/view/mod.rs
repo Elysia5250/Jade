@@ -10,11 +10,12 @@ mod queued;
 mod sidebar;
 mod status;
 mod transcript;
+mod transcript_cards;
 mod welcome;
 
 use ask::{ask_inline_height, draw_ask};
 use editor::draw_editor;
-use menus::{draw_cd_menu, draw_slash_menu};
+use menus::{draw_at_menu, draw_cd_menu, draw_slash_menu};
 use modals::draw_modal;
 use queued::draw_queued;
 use sidebar::draw_sidebar;
@@ -90,10 +91,10 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     let column = centered_column(main_area, 108);
-    let editor_inner_width = column.width.saturating_sub(6).max(10) as usize;
+    let editor_inner_width = column.width.saturating_sub(8).max(10) as usize;
     let (visual_lines, cursor_row, cursor_col) =
         layout_editor_text(&app.input, app.input_cursor, editor_inner_width);
-    let inner_rows = visual_lines.len().clamp(1, 8) as u16;
+    let inner_rows = visual_lines.len().clamp(2, 8) as u16;
     let editor_height = inner_rows + 2;
     let max_rows = inner_rows as usize;
     let editor_skip = if cursor_row >= max_rows {
@@ -143,6 +144,8 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
                 draw_cd_menu(frame, app, &theme, editor_area);
             } else if !app.filtered_slash().is_empty() {
                 draw_slash_menu(frame, app, &theme, editor_area);
+            } else if !app.file_completions().is_empty() {
+                draw_at_menu(frame, app, &theme, editor_area);
             }
         }
         if app.modal.is_some() {
@@ -151,7 +154,7 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     if app.modal.is_none() && app.pending_ask.is_none() && app.focus == Focus::Input {
-        let x = editor_area.x + 2 + cursor_col as u16;
+        let x = editor_area.x + 4 + cursor_col as u16;
         let visible_row = cursor_row
             .saturating_sub(editor_skip)
             .min(max_rows.saturating_sub(1));
