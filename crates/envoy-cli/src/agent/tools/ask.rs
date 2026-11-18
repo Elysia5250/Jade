@@ -32,18 +32,11 @@ pub(crate) async fn ask_tool(
     if options.is_empty() {
         bail!("`ask` needs at least one option");
     }
-    let recommended = options
-        .iter()
-        .position(|o| o.recommended)
-        .unwrap_or(0);
+    let recommended = options.iter().position(|o| o.recommended).unwrap_or(0);
     if asks.is_non_interactive() {
-        return Ok(json!({
-            "answer": options[recommended].label,
-            "via": "headless"
-        })
-        .to_string());
+        bail!("user did not answer");
     }
-    let timeout_s = args["timeout_s"].as_u64().unwrap_or(300).clamp(5, 3600);
+    let timeout_s = args["timeout_s"].as_u64().unwrap_or(120).clamp(5, 3600);
     let _gate = asks.acquire_prompt().await;
     let id = asks.next_id();
     let (send, recv) = oneshot::channel();
@@ -58,15 +51,11 @@ pub(crate) async fn ask_tool(
 
     let answer = tokio::time::timeout(Duration::from_secs(timeout_s), recv).await;
     asks.forget(id);
-    let (label, via) = match answer {
-        Ok(Ok(label)) => (label, "user"),
-        // Timeout or the UI went away: take the recommended option.
-        _ => {
-            let _ = tx.send(AgentEvent::AskClosed { id });
-            (options[recommended].label.clone(), "timeout")
-        }
+    let Ok(Ok(label)) = answer else {
+        let _ = tx.send(AgentEvent::AskClosed { id });
+        bail!("user did not answer");
     };
-    Ok(json!({ "answer": label, "via": via }).to_string())
+    Ok(json!({ "answer": label, "via": "user" }).to_string())
 }
 
 #[cfg(test)]
@@ -99,4 +88,20 @@ mod tests {
         assert!(out.contains("\"via\":\"user\""), "{out}");
     }
 
+    #[tokio::test]
+    async fn ask_tool_fails_when_nobody_can_answer() {
+        let asks = AskBroker::new_headless();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let err = ask_tool(
+            &asks,
+            &tx,
+            &json!({
+                "question": "which?",
+                "options": [{"label": "A", "recommended": true}, {"label": "B"}]
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("user did not answer"), "{err}");
+    }
 }

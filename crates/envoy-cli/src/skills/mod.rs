@@ -3,7 +3,8 @@
 pub mod loader;
 
 pub use loader::{
-    discover_skills, format_skills_catalog, load_skill, LoadedSkill, SkillScope, SkillSummary,
+    discover_skills, format_skills_catalog, load_skill, prompt_skills, LoadedSkill, SkillScope,
+    SkillSummary,
 };
 
 #[cfg(test)]
@@ -39,7 +40,11 @@ mod tests {
 
         let proj_skill = cwd.join(".envoy").join("skills").join("deploy-helper");
         std::fs::create_dir_all(proj_skill.join("scripts")).unwrap();
-        std::fs::write(proj_skill.join("scripts").join("check.sh"), "#!/bin/sh\necho ok\n").unwrap();
+        std::fs::write(
+            proj_skill.join("scripts").join("check.sh"),
+            "#!/bin/sh\necho ok\n",
+        )
+        .unwrap();
         std::fs::write(
             proj_skill.join("SKILL.md"),
             "---\nname: deploy-helper\ndescription: Project deployment checklist\n---\n\nAlways verify dry-run first.\n",
@@ -50,7 +55,10 @@ mod tests {
         assert_eq!(untrusted.len(), 1);
         assert_eq!(untrusted[0].name, "rust-review");
         assert_eq!(untrusted[0].allowed_tools, vec!["read", "grep"]);
-        assert_eq!(untrusted[0].metadata.get("author").map(String::as_str), Some("envoy"));
+        assert_eq!(
+            untrusted[0].metadata.get("author").map(String::as_str),
+            Some("envoy")
+        );
 
         let missing = load_skill(&data, &cwd, "deploy-helper").unwrap_err();
         assert!(missing.to_string().contains("available: rust-review"));
@@ -73,6 +81,56 @@ mod tests {
         assert!(catalog.contains("<available_skills>"));
         assert!(catalog.contains("name=\"deploy-helper\""));
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prompt_lists_only_envoy_skill_roots() {
+        let root = tmpdir("inject");
+        let data = root.join("data");
+        let cwd = root.join("repo");
+        for (rel, name) in [
+            ("skills/from-data", "from-data"),
+            (".envoy/skills/from-envoy", "from-envoy"),
+            (".claude/skills/from-claude", "from-claude"),
+            (".agents/skills/from-agents", "from-agents"),
+        ] {
+            let dir = if rel.starts_with("skills/") {
+                data.join(rel)
+            } else {
+                cwd.join(rel)
+            };
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {name} steps\n---\n\nbody\n"),
+            )
+            .unwrap();
+        }
+        set_workspace_trusted(&data, &cwd, true).unwrap();
+
+        let discovered = discover_skills(&data, &cwd);
+        let names: Vec<_> = discovered.iter().map(|skill| skill.name.as_str()).collect();
+        assert!(names.contains(&"from-data"), "{names:?}");
+        assert!(names.contains(&"from-envoy"), "{names:?}");
+        assert!(names.contains(&"from-claude"), "{names:?}");
+        assert!(names.contains(&"from-agents"), "{names:?}");
+
+        let prompted = prompt_skills(&data, &cwd);
+        let prompted_names: Vec<_> = prompted.iter().map(|skill| skill.name.as_str()).collect();
+        assert!(prompted_names.contains(&"from-data"), "{prompted_names:?}");
+        assert!(prompted_names.contains(&"from-envoy"), "{prompted_names:?}");
+        assert!(
+            !prompted_names.contains(&"from-claude"),
+            "{prompted_names:?}"
+        );
+        assert!(
+            !prompted_names.contains(&"from-agents"),
+            "{prompted_names:?}"
+        );
+
+        let loaded = load_skill(&data, &cwd, "from-claude").unwrap();
+        assert!(loaded.body.contains("body"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

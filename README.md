@@ -1,9 +1,12 @@
 # Envoy (`envoy/`)
 
-Detached remote execution, a policy gate, and a stdio MCP server. Zero network
-dependencies: peers are reached through whatever transport you plug in. The
-default transport is `conduit run`'s control socket — over a Unix socket, with
-no compile-time coupling in either direction.
+A daemon-owned coding agent with a thin terminal client. The daemon owns the
+turn, the queue, and detached jobs. Closing the console does not stop them.
+The same process is the policy gate and the stdio MCP server.
+
+Peers are reached through whatever transport you plug in. The default is
+`conduit run`'s control socket — a Unix socket, with no compile-time coupling
+in either direction.
 
 ## Install
 
@@ -41,6 +44,7 @@ watch can live for minutes without blocking anything else.
 
 | Layer | Where | Responsibility |
 |---|---|---|
+| Agent | `envoy-cli` runtime | Turns, tools, permissions, skills, and compaction. The console only renders state and sends requests. |
 | Interaction | `envoy-service` (server/client) | One short request per stream: submit, list, status, log cursor, cancel, file ops |
 | Execution | `envoy-core::job` / `exec` / `log` | Job table, queueing, process groups, timeouts, cancellation, log records |
 | Policy | `envoy-core::config` | `agent.json`: enabled + caller allowlist + `max_jobs` |
@@ -52,14 +56,16 @@ watch can live for minutes without blocking anything else.
 - `envoy-proto`: protocol v2 — `Op`, `Reply`, `ClientMsg`, `Job`, `JobState`,
   `JobResult`, `LogRecord`, and length-prefixed postcard framing.
 - `envoy-core`: job table (`Jobs`), detached execution (`exec`), append-only job
-  logs with resume cursors (`log`), filesystem primitives (`fs`), policy
-  (`config`), audit trail.
+  logs with resume cursors (`log`), filesystem primitives (`fs`), the OS sandbox
+  (`sandbox`), search (`search`), policy (`config`), audit trail.
 - `envoy-service`: `AgentServer::serve_stream` (one request per stream), a
   client (`Remote<D>`, plus stream-level helpers), transport traits, and the
   `conduit` runtime adapter (`ConduitClient`, `ConduitDialer`, `WsByteStream`,
   accept pool).
-- `envoy-cli` (`envoy`): daemon (`envoy serve`), job and file commands, the
-  interactive console (`envoy ui`), and the stdio MCP server.
+- `envoy-cli` (`envoy`): daemon lifecycle, the agent loop (tools, providers,
+  permissions, skills, sessions), the terminal console, headless `envoy ask`,
+  and the stdio MCP server.
+
 The old `bridge/` crate (which linked the conduit crates and started a second
 engine) has been removed — it conflicts with `conduit run` owning the device
 identity and TUN. It remains in git history up to `55944b0`.
@@ -75,17 +81,17 @@ envoy auth list                        # list stored credentials
 envoy models                           # list available models
 ```
 
-That is the main entry point: bare `envoy` starts the terminal console, with the
-current directory as the working directory for everything you run. Before `/login`
-it starts in **Shell** mode (commands execute directly as detached daemon jobs);
-once connected via `/login` (or env vars like `OPENAI_API_KEY` /
-`ANTHROPIC_API_KEY`) it switches to **Agent** mode where prompts stream from
-your LLM and invoke `exec`/`read`/`write`/`edit`/`ls`/`job` on `local` or any
-`conduit` peer.
+That is the main entry point: bare `envoy` starts the terminal console in
+**Agent** mode, with the current directory as the working directory. `/login`
+(or env vars like `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`) connects a model so
+prompts can call the tools in [Agent](#agent) on `local` or any `conduit` peer.
+`/mode` switches to **Shell**, where a command runs directly as a detached
+daemon job.
 
 Scripted use (the daemon auto-starts; jobs outlive your terminal):
 
 ```bash
+envoy ask "where is the daemon socket" # one headless turn, no console
 envoy run "make -j8 && echo built"     # queue, follow, exit with its code
 envoy submit "cargo test"             # print a job id and return
 envoy jobs
@@ -121,8 +127,10 @@ the screen. One status line is the only chrome.
 - **Prompt panel**: `Shift+Enter` or `Ctrl+J` inserts a newline; `Tab` toggles
   `agent` / `shell` mode; `!cmd` always executes directly as a shell job.
 - **`/` command menu & `/cd` autocomplete**: type `/` to open the filterable
-  command menu (`/login`, `/models`, `/cd`, `/machine`, `/sessions`, `/new`,
-  `/mode`, `/expand`, `/sidebar`, `/theme`, `/help`, `/quit`); `/cd ` offers
+  command menu (`/login`, `/models`, `/compact`, `/handoff`, `/budget`,
+  `/permissions`, `/plan`, `/skill`, `/mcp`, `/rewind`, `/monitor`, `/cd`,
+  `/machine`, `/sessions`, `/new`, `/mode`, `/expand`, `/sidebar`, `/theme`,
+  `/help`, `/quit`); `/cd ` offers
   live subdirectory completion (`Tab` completes, `Enter` switches).
 - **Providers & OAuth (`/login`)**: API Keys (OpenAI, Anthropic, DeepSeek,
   Gemini, OpenRouter, OpenCode Zen/Go), OAuth (ChatGPT Plus/Pro Browser PKCE &
@@ -167,15 +175,46 @@ short RPCs — a UI exit never affects a running job. When conduit is connected,
 `/machine` and `ctrl+p` list only peers advertising service 16. The status
 line names the target when it is not `local`.
 
+## Agent
+
+A console turn runs in the daemon. The model calls tools on `local` or a
+conduit peer:
+
+- Files and search: `read`, `write`, `edit`, `ls`, `glob`, `grep`.
+- Shell: `exec`, `job`, `monitor`.
+- Web: `webfetch`.
+- Skills: `skill`. The prompt lists `~/.envoy/skills`, the data directory's
+  `skills`, and — once the workspace is trusted — `.envoy/skills`.
+  `~/.agents/skills`, `~/.claude/skills`, and the project's `.agents/skills`
+  and `.claude/skills` stay loadable by name with `/skill` or the `skill` tool.
+- Subagents: `delegate` (`explore`, `plan`, `review`, `coder`, or a preset).
+- Conversation: `say`, `ask`, `todo`.
+
+Permission decisions use an explicit ladder: managed and local deny, the hard
+protected paths, then ask, then allow, then the mode baseline (`default`,
+`accept-edits`, `plan`, `auto`). Plan mode is read-only except for its own plan
+files. After an allow, the OS sandbox is the boundary. `/permissions` and
+`/plan` change the session. Decisions are appended to
+`~/.envoy/audit/permissions.jsonl`.
+
+Context is compacted in two stages. Older tool output is folded first, then the
+old head is summarized across tool-call boundaries. `/compact`, `/handoff`, and
+`/budget` control that. If a provider rejects a prompt as too long, the turn
+compacts once and retries. `/rewind` restores workspace files and the
+conversation to a checkpoint.
+
+`envoy ask "…"` runs one prompt without the console. A console turn and a
+headless turn both default to 100 tool steps.
+
 ## MCP tools
 
-`envoy mcp serve` exposes six primitives, in the spirit of a minimal agent
-harness: `exec`, `read`, `write`, `edit`, `ls`, `job` (`list` / `status` /
-`logs` / `cancel`).
+`envoy mcp serve` exposes eight primitives: `exec`, `read`, `write`, `edit`,
+`ls`, `glob`, `grep`, and `job` (`list` / `status` / `logs` / `cancel`).
 
-Deliberately absent: `copy` (compose `read` + `write`), policy editing (CLI
-only), plans, sub-agents, and any hidden permission layer. The daemon's policy
-gate decides what may run; everything heavier is the caller's job.
+The MCP server does not expose `delegate`, skills, monitors, or permission
+editing. `copy` stays a CLI command. Remote allowlisting (`envoy enable` /
+`envoy allow`) stays CLI-only. Calls still pass the daemon's permission check.
+In a non-interactive MCP session an `ask` fails instead of prompting.
 
 ## Policy and trust
 
@@ -199,7 +238,7 @@ gate decides what may run; everything heavier is the caller's job.
 
 ```bash
 envoy enable
-envoy allow 3fa9c1d2a0b7e451      # the device id from `envoy devices`
+envoy allow 3fa9c1d2a0b7e451      # remote device id from `envoy devices`, not a tool rule
 ```
 
 ## Multi-machine: conduit

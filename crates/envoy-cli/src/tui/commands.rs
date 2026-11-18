@@ -53,8 +53,8 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "permissions",
         aliases: &["permission", "perm"],
-        args: "[mode|allow <rule>|deny <rule>]",
-        about: "inspect or set permission mode and rules",
+        args: "[mode|allow <tool-rule>|deny <tool-rule>]",
+        about: "inspect or set permission mode and tool rules (not remote device ids)",
     },
     SlashCommand {
         name: "plan",

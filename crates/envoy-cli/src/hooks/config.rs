@@ -34,10 +34,22 @@ struct HookEntry {
     always_run: bool,
     #[serde(default = "default_true")]
     enabled: bool,
+    /// `off` / `none` / `false` opts a project hook out of the workspace sandbox.
+    #[serde(default)]
+    sandbox: Option<String>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn sandbox_opt_out(raw: &Option<String>) -> bool {
+    raw.as_deref().map(str::trim).is_some_and(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "off" | "none" | "false"
+        )
+    })
 }
 
 pub fn user_hooks_path(data_dir: &Path) -> PathBuf {
@@ -84,9 +96,11 @@ fn push_scope_rules(scope: HookScope, file: HooksFile, out: &mut Vec<HookRule>) 
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| format!("{}:{}:{}", scope.label(), event.label(), decl_index));
             let fail_closed = entry.fail_closed.unwrap_or_else(|| {
-                scope == HookScope::Managed && !matches!(event.capability(), StageCapability::ObserveOnly)
+                scope == HookScope::Managed
+                    && !matches!(event.capability(), StageCapability::ObserveOnly)
             });
             let timeout_ms = effective_timeout_ms(event, entry.timeout_ms);
+            let sandbox_off = scope != HookScope::Project || sandbox_opt_out(&entry.sandbox);
             out.push(HookRule {
                 id,
                 scope,
@@ -98,6 +112,7 @@ fn push_scope_rules(scope: HookScope, file: HooksFile, out: &mut Vec<HookRule>) 
                 timeout_ms,
                 fail_closed,
                 always_run: entry.always_run,
+                sandbox_off,
             });
         }
     }
@@ -150,9 +165,7 @@ pub fn matches_rule(rule: &HookRule, ctx: &HookContext) -> bool {
         HookEvent::SubagentStart | HookEvent::SubagentStop => {
             ctx.subagent_name.as_deref().unwrap_or("")
         }
-        HookEvent::PreModelCall | HookEvent::PostModelCall => {
-            ctx.model_id.as_deref().unwrap_or("")
-        }
+        HookEvent::PreModelCall | HookEvent::PostModelCall => ctx.model_id.as_deref().unwrap_or(""),
         _ => ctx.event.label(),
     };
     m.split('|')
@@ -239,9 +252,50 @@ mod tests {
         // Even with priority -999, Project still executes strictly AFTER Managed and User.
         assert_eq!(
             ids_trusted,
-            vec!["m-early", "m-late", "u-prio-neg", "u-first", "u-second", "p-one"]
+            vec![
+                "m-early",
+                "m-late",
+                "u-prio-neg",
+                "u-first",
+                "u-second",
+                "p-one"
+            ]
         );
+        assert!(trusted
+            .iter()
+            .any(|rule| rule.id == "p-one" && !rule.sandbox_off));
+        assert!(trusted
+            .iter()
+            .filter(|rule| rule.scope != HookScope::Project)
+            .all(|rule| rule.sandbox_off));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_hook_can_opt_out_of_the_sandbox() {
+        let dir = tmpdir("sandbox-off");
+        let data = dir.join("data");
+        let cwd = dir.join("ws");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(cwd.join(".envoy")).unwrap();
+        std::fs::write(
+            project_hooks_path(&cwd),
+            r#"{
+              "hooks": {
+                "PreToolUse": [
+                  { "id": "boxed", "command": "echo in" },
+                  { "id": "open", "command": "echo out", "sandbox": "off" }
+                ]
+              }
+            }"#,
+        )
+        .unwrap();
+        let rules = load_hooks(&data, &cwd, true, None);
+        let boxed = rules.iter().find(|rule| rule.id == "boxed").unwrap();
+        let open = rules.iter().find(|rule| rule.id == "open").unwrap();
+        assert!(!boxed.sandbox_off);
+        assert!(open.sandbox_off);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -267,6 +321,7 @@ mod tests {
             timeout_ms: 1000,
             fail_closed: false,
             always_run: false,
+            sandbox_off: true,
         };
         assert!(matches_rule(&r, &ctx));
         ctx.tool_name = Some("read".into());

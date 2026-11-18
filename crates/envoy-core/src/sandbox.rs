@@ -1,10 +1,11 @@
-//! OS-level execution sandbox (`bwrap` with Linux Landlock fallback).
+//! OS-level execution sandbox.
 //!
 //! Policy evaluation in the agent decides *whether* a command may run; this
 //! module enforces the real OS boundary so a command cannot escape its
 //! allowed filesystem roots, mutate protected metadata (`.git`, `.envoy`),
 //! read secrets (`.env`, `~/.ssh`, `~/.aws`), or open network sockets unless
-//! explicitly permitted.
+//! explicitly permitted. Backends are `bwrap`, then Linux Landlock, then
+//! macOS Seatbelt. A requested sandbox with no backend fails closed.
 
 use anyhow::{bail, Result};
 use envoy_proto::SandboxPolicy;
@@ -16,6 +17,7 @@ const PROTECTED_DIRS: &[&str] = &[".git", ".envoy", ".codex", ".agents", ".ssh",
 pub enum SandboxBackend {
     Bwrap(PathBuf),
     Landlock(u32),
+    Seatbelt(PathBuf),
     None,
 }
 
@@ -32,6 +34,9 @@ pub struct PreparedCommand {
     pub argv: Vec<String>,
     pub cwd_override: Option<String>,
     pub landlock: Option<LandlockPlan>,
+    /// Private directory exported as `$TMPDIR` for this command. Callers remove
+    /// it after the process exits.
+    pub scratch_dir: Option<PathBuf>,
 }
 
 /// Probe which OS sandbox backend is active on this host.
@@ -43,14 +48,19 @@ pub fn probe_backend() -> SandboxBackend {
     if let Some(abi) = landlock_abi() {
         return SandboxBackend::Landlock(abi);
     }
+    #[cfg(target_os = "macos")]
+    if let Some(path) = crate::seatbelt::find_sandbox_exec() {
+        return SandboxBackend::Seatbelt(path);
+    }
     SandboxBackend::None
 }
 
-/// Short status badge label (`"bwrap"`, `"landlock"`, or `"none"`).
+/// Short status token (`"bwrap"`, `"landlock"`, `"seatbelt"`, or `"none"`).
 pub fn backend_label() -> &'static str {
     match probe_backend() {
         SandboxBackend::Bwrap(_) => "bwrap",
         SandboxBackend::Landlock(_) => "landlock",
+        SandboxBackend::Seatbelt(_) => "seatbelt",
         SandboxBackend::None => "none",
     }
 }
@@ -70,6 +80,7 @@ pub fn prepare_command(
             argv: argv.to_vec(),
             cwd_override: None,
             landlock: None,
+            scratch_dir: None,
         }),
         SandboxPolicy::ReadOnly {
             cwd: policy_cwd,
@@ -82,6 +93,9 @@ pub fn prepare_command(
                 }
                 SandboxBackend::Landlock(abi) => {
                     build_landlock(abi, argv, &root, &[], false, *allow_net)
+                }
+                SandboxBackend::Seatbelt(bin) => {
+                    build_seatbelt(&bin, argv, &root, &[], false, *allow_net)
                 }
                 SandboxBackend::None => host_without_sandbox(argv, "read-only"),
             }
@@ -99,30 +113,38 @@ pub fn prepare_command(
                 SandboxBackend::Landlock(abi) => {
                     build_landlock(abi, argv, &root, extra_rw, true, *allow_net)
                 }
+                SandboxBackend::Seatbelt(bin) => {
+                    build_seatbelt(&bin, argv, &root, extra_rw, true, *allow_net)
+                }
                 SandboxBackend::None => host_without_sandbox(argv, "workspace-write"),
             }
         }
     }
 }
 
-/// Linux without `bwrap` or Landlock still refuses, so a server does not
-/// silently drop isolation. Other hosts have no backend yet; the permission
-/// engine remains the gate and the command runs.
+/// Isolation was requested and this host has no backend that can apply it.
 fn host_without_sandbox(argv: &[String], kind: &str) -> Result<PreparedCommand> {
-    #[cfg(target_os = "linux")]
-    {
-        let _ = argv;
-        bail!("sandbox requested ({kind}), but neither `bwrap` nor Landlock is available")
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = kind;
-        Ok(PreparedCommand {
-            argv: argv.to_vec(),
-            cwd_override: None,
-            landlock: None,
-        })
-    }
+    let _ = argv;
+    bail!(
+        "sandbox requested ({kind}), but no sandbox backend is available (`bwrap`, Landlock, or `sandbox-exec`)"
+    )
+}
+
+fn build_seatbelt(
+    bin: &Path,
+    argv: &[String],
+    cwd: &Path,
+    extra_rw: &[String],
+    writable_cwd: bool,
+    allow_net: bool,
+) -> Result<PreparedCommand> {
+    let wrapped = crate::seatbelt::wrap(bin, argv, cwd, extra_rw, writable_cwd, allow_net)?;
+    Ok(PreparedCommand {
+        argv: wrapped.argv,
+        cwd_override: cwd.exists().then(|| cwd.display().to_string()),
+        landlock: None,
+        scratch_dir: Some(wrapped.scratch_dir),
+    })
 }
 
 fn effective_cwd(policy_cwd: &str, exec_cwd: &str) -> PathBuf {
@@ -267,6 +289,7 @@ fn build_bwrap(
         argv: out,
         cwd_override: cwd.exists().then(|| cwd.display().to_string()),
         landlock: None,
+        scratch_dir: None,
     }
 }
 
@@ -325,6 +348,7 @@ fn build_landlock(
             ro_paths,
             deny_net: !allow_net,
         }),
+        scratch_dir: None,
     })
 }
 
@@ -360,7 +384,12 @@ pub fn apply_landlock_in_child(plan: &LandlockPlan) -> std::io::Result<()> {
     }
     const RULE_PATH_BENEATH: u32 = 1;
     const FS_READ: u64 = (1 << 2) | (1 << 3) | (1 << 4);
-    const FS_WRITE: u64 = (1 << 1) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8) | (1 << 9)
+    const FS_WRITE: u64 = (1 << 1)
+        | (1 << 5)
+        | (1 << 6)
+        | (1 << 7)
+        | (1 << 8)
+        | (1 << 9)
         | (1 << 10)
         | (1 << 11)
         | (1 << 12)
@@ -501,22 +530,43 @@ mod tests {
 
     #[cfg(not(target_os = "linux"))]
     #[test]
-    fn host_without_a_backend_still_runs_the_requested_command() {
-        if !matches!(probe_backend(), SandboxBackend::None) {
-            return;
-        }
+    fn seatbelt_wraps_workspace_write_or_refuses_without_a_backend() {
         let argv = vec!["sh".into(), "-c".into(), "echo ok".into()];
-        let prep = prepare_command(
+        let dir = tmpdir("seatbelt");
+        let result = prepare_command(
             &argv,
-            "/tmp",
+            dir.to_str().unwrap(),
             &SandboxPolicy::WorkspaceWrite {
-                cwd: "/tmp".into(),
+                cwd: dir.display().to_string(),
                 extra_rw: vec![],
                 allow_net: false,
             },
-        )
-        .unwrap();
-        assert_eq!(prep.argv, argv);
-        assert!(prep.landlock.is_none());
+        );
+        match probe_backend() {
+            SandboxBackend::Seatbelt(bin) => {
+                let prep = result.expect("seatbelt prepare");
+                assert_eq!(prep.argv[0], bin.display().to_string());
+                assert!(prep.argv.iter().any(|arg| arg == "-p"));
+                assert!(prep.argv.iter().any(|arg| arg.contains("(deny network*)")));
+                assert!(prep
+                    .argv
+                    .iter()
+                    .any(|arg| arg.contains("(deny file-write* (subpath")));
+                assert!(prep.argv.iter().any(|arg| arg.starts_with("TMPDIR=")));
+                assert!(prep.scratch_dir.is_some());
+                assert!(prep.landlock.is_none());
+                if let Some(scratch) = prep.scratch_dir {
+                    let _ = std::fs::remove_dir_all(scratch);
+                }
+            }
+            SandboxBackend::None => {
+                let err = result
+                    .expect_err("missing backend must fail closed")
+                    .to_string();
+                assert!(err.contains("no sandbox backend"), "{err}");
+            }
+            other => panic!("unexpected non-linux backend {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

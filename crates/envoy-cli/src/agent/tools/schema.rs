@@ -191,7 +191,7 @@ pub(crate) fn openai_tools_json() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "ask",
-                "description": "Ask the user to choose between options. Blocks the turn until answered; on timeout the recommended option is used (default 300s).",
+                "description": "Ask the user to choose between options. Blocks the turn until answered. `recommended` is a highlight only. If nobody answers, the call fails (default 120s).",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -209,7 +209,7 @@ pub(crate) fn openai_tools_json() -> Vec<Value> {
                                 "required": ["label"]
                             }
                         },
-                        "timeout_s": { "type": "integer", "default": 300 }
+                        "timeout_s": { "type": "integer", "default": 120 }
                     },
                     "required": ["question", "options"]
                 }

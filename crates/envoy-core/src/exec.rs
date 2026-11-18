@@ -8,6 +8,7 @@
 use crate::log::LogWriter;
 use crate::sandbox;
 use envoy_proto::{JobResult, SandboxPolicy, AGENT_CHUNK, DEFAULT_EXEC_TIMEOUT, MAX_EXEC_TIMEOUT};
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -55,13 +56,13 @@ pub async fn run_job(
             }
         }
     };
+    // Declared before the process guard so the directory is removed after the
+    // child has been reaped or killed.
+    let _scratch = ScratchGuard(prepared.scratch_dir.clone());
 
     let mut cmd = tokio::process::Command::new(&prepared.argv[0]);
     cmd.args(&prepared.argv[1..]);
-    let effective_cwd = prepared
-        .cwd_override
-        .as_deref()
-        .unwrap_or(&spec.cwd);
+    let effective_cwd = prepared.cwd_override.as_deref().unwrap_or(&spec.cwd);
     if !effective_cwd.is_empty() {
         cmd.current_dir(effective_cwd);
     }
@@ -84,7 +85,8 @@ pub async fn run_job(
         cmd.as_std_mut().process_group(0);
         if let Some(plan) = prepared.landlock {
             unsafe {
-                cmd.as_std_mut().pre_exec(move || sandbox::apply_landlock_in_child(&plan));
+                cmd.as_std_mut()
+                    .pre_exec(move || sandbox::apply_landlock_in_child(&plan));
             }
         }
     }
@@ -167,7 +169,11 @@ pub async fn run_job(
             log.record(fd, &data);
         }
         guard.armed = false;
-        debug!(pid, ms = start.elapsed().as_millis() as u64, "job process finished");
+        debug!(
+            pid,
+            ms = start.elapsed().as_millis() as u64,
+            "job process finished"
+        );
         return match status {
             Ok(st) => match st.code() {
                 Some(0) => JobResult::Success,
@@ -198,6 +204,17 @@ pub async fn run_job(
         JobResult::TimedOut
     } else {
         JobResult::Killed
+    }
+}
+
+/// Removes a Seatbelt scratch directory when the job future ends.
+struct ScratchGuard(Option<PathBuf>);
+
+impl Drop for ScratchGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_dir_all(path);
+        }
     }
 }
 
@@ -354,13 +371,16 @@ mod tests {
             Arc::new(Notify::new()),
         )
         .await;
-        assert!(matches!(result, JobResult::FailedToSpawn { .. }), "{result:?}");
+        assert!(
+            matches!(result, JobResult::FailedToSpawn { .. }),
+            "{result:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(not(target_os = "linux"))]
     #[tokio::test]
-    async fn workspace_write_without_a_backend_still_runs() {
+    async fn workspace_write_without_a_backend_fails_closed() {
         if !matches!(sandbox::probe_backend(), sandbox::SandboxBackend::None) {
             return;
         }
@@ -373,15 +393,17 @@ mod tests {
             extra_rw: vec![],
             allow_net: false,
         };
-        let result = run_job(job, log, Arc::new(AtomicU32::new(0)), Arc::new(Notify::new())).await;
-        assert_eq!(result, JobResult::Success);
-        let (recs, _) = read_from(&path, 0, 4096).unwrap();
-        let out: String = recs
-            .iter()
-            .filter(|r| r.fd == 0)
-            .map(|r| String::from_utf8_lossy(&r.data).to_string())
-            .collect();
-        assert!(out.contains("sandbox-ok"), "{out}");
+        let result = run_job(
+            job,
+            log,
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(Notify::new()),
+        )
+        .await;
+        assert!(
+            matches!(result, JobResult::FailedToSpawn { .. }),
+            "{result:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -423,7 +445,10 @@ mod tests {
         )
         .await;
         assert_eq!(res, JobResult::Success);
-        assert_eq!(std::fs::read_to_string(work.join("allowed.txt")).unwrap(), "ok\n");
+        assert_eq!(
+            std::fs::read_to_string(work.join("allowed.txt")).unwrap(),
+            "ok\n"
+        );
         assert!(!work.join(".git/hook").exists());
         assert!(!outside.join("escape").exists());
         let (recs, _) = read_from(&log_path, 0, 8192).unwrap();

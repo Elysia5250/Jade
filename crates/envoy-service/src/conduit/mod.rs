@@ -17,24 +17,25 @@
 //! Failure modes are carried as HTTP status + `{"error": "..."}`, so CLI errors
 //! name the real reason (unknown device, ambiguous name, peer offline).
 
-use crate::server::AgentServer;
 use crate::transport::{AgentDialer, BoxStream};
 use anyhow::{bail, Context, Result};
 use futures::future::BoxFuture;
-use futures::{Sink, SinkExt, Stream, StreamExt};
+use futures::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use std::io;
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
-use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::{client_async, WebSocketStream};
-use tracing::{debug, info};
+use tracing::debug;
+
+mod accept;
+mod ws;
+pub use accept::spawn_accept_pool;
+pub use ws::WsByteStream;
 
 /// The service id envoy registers with conduit.
 pub const AGENT_SERVICE_ID: u16 = envoy_proto::AGENT_SERVICE_ID;
@@ -42,8 +43,6 @@ pub const AGENT_SERVICE_ID: u16 = envoy_proto::AGENT_SERVICE_ID;
 pub const SERVICE_NAME: &str = "envoy";
 /// Largest accepted control-socket response body.
 const MAX_RESPONSE: usize = 4 * 1024 * 1024;
-/// Buffered bytes before a WebSocket write applies backpressure.
-const WS_WRITE_BUFFER: usize = 256 * 1024;
 /// Idle accept connections `envoy serve` keeps parked.
 pub const DEFAULT_POOL: usize = 4;
 /// How often a parked accept connection is pinged.
@@ -464,209 +463,6 @@ impl AgentDialer for ConduitDialer {
         _service_id: u16,
     ) -> BoxFuture<'a, Result<BoxStream>> {
         Box::pin(async move { self.client.open(peer).await })
-    }
-}
-
-/// Keep `size` idle accept connections parked on conduit and serve whatever is
-/// handed off. Each worker owns exactly one parked connection at a time, so the
-/// pool size is the number of simultaneous idle accepts.
-pub fn spawn_accept_pool(
-    server: AgentServer,
-    client: ConduitClient,
-    size: usize,
-) -> tokio::task::JoinHandle<()> {
-    let size = size.max(1);
-    tokio::spawn(async move {
-        info!(
-            socket = %client.socket().display(),
-            pool = size,
-            "conduit accept pool started"
-        );
-        let mut workers = Vec::with_capacity(size);
-        for _ in 0..size {
-            let server = server.clone();
-            let client = client.clone();
-            workers.push(tokio::spawn(async move {
-                accept_worker(server, client).await;
-            }));
-        }
-        for worker in workers {
-            let _ = worker.await;
-        }
-    })
-}
-
-async fn accept_worker(server: AgentServer, client: ConduitClient) {
-    let mut backoff = Duration::from_millis(250);
-    loop {
-        match client.accept().await {
-            Ok(accept) => {
-                backoff = Duration::from_millis(250);
-                let peer = accept.peer_device_id.clone();
-                debug!(peer = %peer, "conduit handed off an inbound stream");
-                let server = server.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = server.serve_stream(&peer, accept.stream).await {
-                        debug!(peer = %peer, error = %e, "inbound agent stream ended");
-                    }
-                });
-            }
-            Err(e) => {
-                // Conduit not running (or restarting) is normal: stay quiet and
-                // keep the local daemon fully usable.
-                debug!(error = %e, "no conduit accept connection; retrying");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(5));
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------- WebSocket
-
-/// A WebSocket carrying a transparent byte stream.
-///
-/// Binary frames are payload; text frames are ignored; ping is answered; close
-/// is EOF. Writes are buffered up to [`WS_WRITE_BUFFER`] so a slow peer applies
-/// backpressure instead of growing memory.
-pub struct WsByteStream<S> {
-    inner: WebSocketStream<S>,
-    read: Vec<u8>,
-    read_pos: usize,
-    write: Vec<u8>,
-    closed: bool,
-    shutdown: bool,
-}
-
-impl<S> WsByteStream<S> {
-    pub fn new(inner: WebSocketStream<S>) -> Self {
-        Self {
-            inner,
-            read: Vec::new(),
-            read_pos: 0,
-            write: Vec::new(),
-            closed: false,
-            shutdown: false,
-        }
-    }
-}
-
-fn ws_err(e: WsError) -> io::Error {
-    match e {
-        WsError::Io(e) => e,
-        other => io::Error::new(io::ErrorKind::Other, other.to_string()),
-    }
-}
-
-impl<S: AsyncRead + AsyncWrite + Unpin> WsByteStream<S> {
-    /// Push the write buffer into the socket and flush it.
-    fn poll_send_buffer(&mut self, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        if self.write.is_empty() {
-            return Pin::new(&mut self.inner).poll_flush(cx).map_err(ws_err);
-        }
-        match Pin::new(&mut self.inner).poll_ready(cx) {
-            Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(ws_err(e))),
-            Poll::Ready(Ok(())) => {}
-        }
-        let chunk = std::mem::take(&mut self.write);
-        if let Err(e) = Pin::new(&mut self.inner).start_send(Message::Binary(chunk.into())) {
-            return Poll::Ready(Err(ws_err(e)));
-        }
-        match Pin::new(&mut self.inner).poll_flush(cx) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(e)) => Poll::Ready(Err(ws_err(e))),
-            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
-        }
-    }
-}
-
-impl<S: AsyncRead + AsyncWrite + Unpin> AsyncRead for WsByteStream<S> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        loop {
-            if this.read_pos < this.read.len() {
-                let n = (this.read.len() - this.read_pos).min(buf.remaining());
-                buf.put_slice(&this.read[this.read_pos..this.read_pos + n]);
-                this.read_pos += n;
-                return Poll::Ready(Ok(()));
-            }
-            if this.closed {
-                return Poll::Ready(Ok(()));
-            }
-            match Pin::new(&mut this.inner).poll_next(cx) {
-                Poll::Ready(Some(Ok(Message::Binary(data)))) => {
-                    this.read = data.to_vec();
-                    this.read_pos = 0;
-                }
-                Poll::Ready(Some(Ok(Message::Text(_))))
-                | Poll::Ready(Some(Ok(Message::Pong(_))))
-                | Poll::Ready(Some(Ok(Message::Frame(_)))) => {}
-                Poll::Ready(Some(Ok(Message::Ping(payload)))) => {
-                    // tungstenite queues the pong but does not flush it for us.
-                    let _ = Pin::new(&mut this.inner).start_send(Message::Pong(payload));
-                    let _ = Pin::new(&mut this.inner).poll_flush(cx);
-                }
-                Poll::Ready(Some(Ok(Message::Close(_)))) | Poll::Ready(None) => {
-                    this.closed = true;
-                    return Poll::Ready(Ok(()));
-                }
-                Poll::Ready(Some(Err(e))) => return Poll::Ready(Err(ws_err(e))),
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-    }
-}
-
-impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WsByteStream<S> {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-        if this.shutdown || this.closed {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "websocket stream closed",
-            )));
-        }
-        if this.write.len() >= WS_WRITE_BUFFER {
-            match this.poll_send_buffer(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Ready(Ok(())) => {}
-            }
-        }
-        this.write.extend_from_slice(buf);
-        // Best effort: a pending socket is fine because the bytes are buffered
-        // and the cap above is what applies backpressure.
-        let _ = this.poll_send_buffer(cx);
-        Poll::Ready(Ok(buf.len()))
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        self.get_mut().poll_send_buffer(cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        if this.shutdown {
-            return Poll::Ready(Ok(()));
-        }
-        if let Poll::Pending = this.poll_send_buffer(cx) {
-            return Poll::Pending;
-        }
-        let _ = Pin::new(&mut this.inner).start_send(Message::Close(None));
-        let flushed = Pin::new(&mut this.inner).poll_flush(cx).map_err(ws_err);
-        if flushed.is_ready() {
-            this.shutdown = true;
-        }
-        flushed
     }
 }
 

@@ -4,6 +4,7 @@ use super::types::{
     HookContext, HookDecision, HookEvent, HookOutput, HookRule, HookStepStatus, HookStepTrace,
     StageCapability,
 };
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -37,6 +38,53 @@ async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut rd: R, cap: usize) -> 
     buf
 }
 
+struct HookLaunch {
+    argv: Vec<String>,
+    scratch: Option<PathBuf>,
+    cwd: Option<PathBuf>,
+}
+
+fn hook_launch(rule: &HookRule, ctx: &HookContext) -> Result<HookLaunch, String> {
+    let raw = vec!["sh".to_string(), "-lc".to_string(), rule.command.clone()];
+    if rule.sandbox_off {
+        return Ok(HookLaunch {
+            argv: raw,
+            scratch: None,
+            cwd: ctx.cwd.exists().then(|| ctx.cwd.clone()),
+        });
+    }
+    let cwd = ctx.cwd.display().to_string();
+    let prepared = envoy_core::prepare_command(
+        &raw,
+        &cwd,
+        &envoy_proto::SandboxPolicy::WorkspaceWrite {
+            cwd: cwd.clone(),
+            extra_rw: vec![],
+            allow_net: false,
+        },
+    )
+    .map_err(|err| format!("sandbox setup failed: {err:#}"))?;
+    let cwd = prepared
+        .cwd_override
+        .map(PathBuf::from)
+        .or_else(|| ctx.cwd.exists().then(|| ctx.cwd.clone()));
+    Ok(HookLaunch {
+        argv: prepared.argv,
+        scratch: prepared.scratch_dir,
+        cwd,
+    })
+}
+
+struct ScratchGuard(Option<PathBuf>);
+
+impl Drop for ScratchGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
 fn kill_process_group(pid: Option<u32>) {
     #[cfg(unix)]
     if let Some(pid) = pid {
@@ -62,10 +110,20 @@ pub async fn run_hook_process(
         .map(|o| o.min(rule.timeout_ms))
         .unwrap_or(rule.timeout_ms);
 
-    let mut cmd = Command::new("sh");
-    cmd.arg("-lc").arg(&rule.command);
-    if ctx.cwd.exists() {
-        cmd.current_dir(&ctx.cwd);
+    let launch = match hook_launch(rule, ctx) {
+        Ok(launch) => launch,
+        Err(err) => {
+            return (
+                HookExecOutcome::SpawnError(err),
+                start.elapsed().as_millis() as u64,
+            );
+        }
+    };
+    let _scratch = ScratchGuard(launch.scratch);
+    let mut cmd = Command::new(&launch.argv[0]);
+    cmd.args(&launch.argv[1..]);
+    if let Some(cwd) = launch.cwd {
+        cmd.current_dir(cwd);
     }
     cmd.env("ENVOY_HOOK_EVENT", ctx.event.label())
         .env("ENVOY_HOOK_ID", &rule.id)
@@ -250,7 +308,14 @@ pub fn apply_step_result(
             stdout,
             ..
         } => {
-            apply_zero_exit(ctx, rule, &stdout, duration_ms, already_halted, &mut mutated_keys);
+            apply_zero_exit(
+                ctx,
+                rule,
+                &stdout,
+                duration_ms,
+                already_halted,
+                &mut mutated_keys,
+            );
         }
         HookExecOutcome::Exited {
             code,
@@ -260,7 +325,8 @@ pub fn apply_step_result(
             let detail = first_non_empty(&[&stderr, &stdout]).unwrap_or_else(|| {
                 format!(
                     "exited with {}",
-                    code.map(|c| c.to_string()).unwrap_or_else(|| "signal".into())
+                    code.map(|c| c.to_string())
+                        .unwrap_or_else(|| "signal".into())
                 )
             });
             if rule.fail_closed && ctx.can_block && !already_halted {
@@ -464,4 +530,74 @@ fn apply_zero_exit(
         reason: trace_reason,
         mutated_keys: std::mem::take(mutated_keys),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hook_launch;
+    use crate::hooks::{HookContext, HookEvent, HookRule, HookScope};
+    use std::collections::BTreeMap;
+
+    fn rule(scope: HookScope, sandbox_off: bool) -> HookRule {
+        HookRule {
+            id: "h".into(),
+            scope,
+            priority: 0,
+            decl_index: 0,
+            event: HookEvent::PreToolUse,
+            matcher: None,
+            command: "echo hi".into(),
+            timeout_ms: 1000,
+            fail_closed: false,
+            always_run: false,
+            sandbox_off,
+        }
+    }
+
+    #[test]
+    fn project_hooks_use_the_sandbox_and_user_hooks_do_not() {
+        let dir = std::env::temp_dir().join(format!("envoy-hook-sb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = HookContext::new(
+            "s",
+            dir.clone(),
+            "local",
+            "default",
+            HookEvent::PreToolUse,
+            BTreeMap::new(),
+        );
+        let project = hook_launch(&rule(HookScope::Project, false), &ctx);
+        match envoy_core::sandbox::probe_backend() {
+            envoy_core::sandbox::SandboxBackend::None => match project {
+                Err(err) => assert!(err.contains("sandbox"), "{err}"),
+                Ok(_) => panic!("missing backend must refuse the hook"),
+            },
+            envoy_core::sandbox::SandboxBackend::Seatbelt(bin) => {
+                let launch = project.expect("seatbelt");
+                assert_eq!(launch.argv[0], bin.display().to_string());
+                assert!(launch
+                    .argv
+                    .iter()
+                    .any(|arg| arg.contains("(deny network*)")));
+                if let Some(scratch) = launch.scratch {
+                    let _ = std::fs::remove_dir_all(scratch);
+                }
+            }
+            envoy_core::sandbox::SandboxBackend::Bwrap(bin) => {
+                let launch = project.expect("bwrap");
+                assert_eq!(launch.argv[0], bin.display().to_string());
+            }
+            envoy_core::sandbox::SandboxBackend::Landlock(_) => {
+                let launch = project.expect("landlock");
+                assert_eq!(launch.argv[0], "sh");
+            }
+        }
+        let user = hook_launch(&rule(HookScope::User, true), &ctx).unwrap();
+        assert_eq!(
+            user.argv,
+            vec!["sh".to_string(), "-lc".into(), "echo hi".into()]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

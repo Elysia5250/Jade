@@ -17,7 +17,7 @@ impl App {
             let sandbox = if self.target == "local" || self.target.is_empty() {
                 envoy_core::sandbox::backend_label()
             } else {
-                "remote"
+                "peer"
             };
             self.push_notice(
                 format!(
@@ -210,5 +210,4 @@ impl App {
             false,
         );
     }
-
 }

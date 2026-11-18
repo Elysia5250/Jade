@@ -5,8 +5,7 @@
 //!   > Managed Allow > Local Allow > Mode Baseline.
 
 use super::paths::{
-    expand_tilde, is_credential_protected, is_in_workspace, is_plan_file, is_protected,
-    is_temp_path, resolve_path_pair,
+    expand_tilde, is_in_workspace, is_plan_file, is_protected, is_temp_path, resolve_path_pair,
 };
 use super::shell::analyze_shell;
 use super::types::{
@@ -73,7 +72,11 @@ pub fn load_policies(
 
     let managed_path = managed_override
         .map(PathBuf::from)
-        .or_else(|| std::env::var("ENVOY_MANAGED_POLICY").ok().map(PathBuf::from))
+        .or_else(|| {
+            std::env::var("ENVOY_MANAGED_POLICY")
+                .ok()
+                .map(PathBuf::from)
+        })
         .unwrap_or_else(|| PathBuf::from(DEFAULT_MANAGED_POLICY_PATH));
     if let Some(p) = read_json::<PolicyFile>(&managed_path) {
         if p.default_mode.is_some() {
@@ -107,12 +110,7 @@ pub fn load_policies(
     }
 }
 
-pub fn save_allow_rule(
-    data_dir: &Path,
-    cwd: &Path,
-    scope: RuleScope,
-    pattern: &str,
-) -> Result<()> {
+pub fn save_allow_rule(data_dir: &Path, cwd: &Path, scope: RuleScope, pattern: &str) -> Result<()> {
     save_rule(data_dir, cwd, scope, Effect::Allow, pattern)
 }
 
@@ -134,7 +132,9 @@ pub fn save_rule(
     match effect {
         Effect::Allow => {
             if policy.deny.iter().any(|d| d == pattern) {
-                anyhow::bail!("refusing to persist allow `{pattern}` because an identical deny rule exists");
+                anyhow::bail!(
+                    "refusing to persist allow `{pattern}` because an identical deny rule exists"
+                );
             }
             if !policy.allow.iter().any(|a| a == pattern) {
                 policy.allow.push(pattern.to_string());
@@ -197,7 +197,12 @@ pub fn evaluate_tool_call(
     let ctx = InspectContext::build(data_dir, cwd, tool, args);
 
     // 1. Managed Deny -> 2. Local Deny (never overridden by any allow).
-    if let Some(rule) = find_match(&policies.rules, Effect::Deny, Some(RuleScope::Managed), &ctx) {
+    if let Some(rule) = find_match(
+        &policies.rules,
+        Effect::Deny,
+        Some(RuleScope::Managed),
+        &ctx,
+    ) {
         return deny(format!("managed deny rule `{}`", rule.pattern), &ctx);
     }
     if let Some(rule) = find_match(&policies.rules, Effect::Deny, None, &ctx) {
@@ -209,7 +214,10 @@ pub fn evaluate_tool_call(
         match tool {
             "write" | "edit" => {
                 if !ctx.is_plan_target {
-                    return deny("plan mode is read-only (only .envoy/plans/*.md may be written)", &ctx);
+                    return deny(
+                        "plan mode is read-only (only .envoy/plans/*.md may be written)",
+                        &ctx,
+                    );
                 }
             }
             "exec" => {
@@ -222,16 +230,13 @@ pub fn evaluate_tool_call(
     }
 
     // 4. Protected-path & symlink-escape guard (cannot be silently auto-allowed by mode).
-    let allow_non_credential_in_auto = mode == PermissionMode::Auto
-        && !ctx.credential_protected
-        && (tool == "read" || (tool == "exec" && !ctx.destructive));
     if ctx.protected_hit
         && matches!(tool, "write" | "edit" | "read" | "exec")
         && !ctx.is_plan_target
-        && !allow_non_credential_in_auto
     {
         // Explicit Managed/Local Ask overrides below will also catch; ensure at least Ask.
-        if let Some(rule) = find_match(&policies.rules, Effect::Ask, Some(RuleScope::Managed), &ctx) {
+        if let Some(rule) = find_match(&policies.rules, Effect::Ask, Some(RuleScope::Managed), &ctx)
+        {
             return ask(format!("managed ask rule `{}`", rule.pattern), &ctx);
         }
         return ask(
@@ -258,7 +263,12 @@ pub fn evaluate_tool_call(
     }
 
     // 7. Managed Allow -> 8. Local Allow
-    if let Some(rule) = find_match(&policies.rules, Effect::Allow, Some(RuleScope::Managed), &ctx) {
+    if let Some(rule) = find_match(
+        &policies.rules,
+        Effect::Allow,
+        Some(RuleScope::Managed),
+        &ctx,
+    ) {
         return allow(format!("managed allow rule `{}`", rule.pattern), &ctx);
     }
     if let Some(rule) = find_match(&policies.rules, Effect::Allow, None, &ctx) {
@@ -267,6 +277,13 @@ pub fn evaluate_tool_call(
 
     // 9. Mode baseline
     mode_baseline(mode, tool, &ctx)
+}
+
+fn sandbox_backend_present() -> bool {
+    !matches!(
+        envoy_core::sandbox::probe_backend(),
+        envoy_core::sandbox::SandboxBackend::None
+    )
 }
 
 fn mode_baseline(mode: PermissionMode, tool: &str, ctx: &InspectContext) -> Decision {
@@ -302,8 +319,13 @@ fn mode_baseline(mode: PermissionMode, tool: &str, ctx: &InspectContext) -> Deci
             _ => ask("external web fetch", ctx),
         },
         "exec" => {
-            if mode == PermissionMode::Auto {
-                return if ctx.catastrophic {
+            // Auto means "a sandbox exists, so ask less". Without one, exec
+            // falls back to the Default asks.
+            let isolated = sandbox_backend_present();
+            if mode == PermissionMode::Auto && isolated {
+                // Catastrophic covers a few commands (rm of a root path) that
+                // the destructive matcher misses. Both must ask.
+                return if ctx.destructive || ctx.catastrophic {
                     ask("destructive shell command", ctx)
                 } else {
                     allow("auto mode workspace command", ctx)
@@ -326,10 +348,16 @@ fn mode_baseline(mode: PermissionMode, tool: &str, ctx: &InspectContext) -> Deci
                         deny("plan mode forbids mutating shell commands", ctx)
                     }
                 }
-                PermissionMode::Auto => allow("auto mode workspace command", ctx),
-                PermissionMode::Default | PermissionMode::AcceptEdits => {
-                    if ctx.shell_readonly {
-                        allow("read-only shell command inside workspace", ctx)
+                PermissionMode::Auto | PermissionMode::Default | PermissionMode::AcceptEdits => {
+                    if ctx.shell_readonly || (isolated && mode != PermissionMode::Auto) {
+                        allow(
+                            if ctx.shell_readonly {
+                                "read-only shell command inside workspace"
+                            } else {
+                                "sandboxed workspace command"
+                            },
+                            ctx,
+                        )
                     } else {
                         ask("shell command execution", ctx)
                     }
@@ -350,7 +378,6 @@ struct InspectContext {
     segment_keys: Vec<Vec<String>>,
     suggested_rule: Option<String>,
     protected_hit: bool,
-    credential_protected: bool,
     symlink_escape: bool,
     outside_workspace: bool,
     is_temp_target: bool,
@@ -371,7 +398,6 @@ impl InspectContext {
             segment_keys: Vec::new(),
             suggested_rule: None,
             protected_hit: false,
-            credential_protected: false,
             symlink_escape: false,
             outside_workspace: false,
             is_temp_target: false,
@@ -401,15 +427,15 @@ impl InspectContext {
                 };
                 ctx.match_keys.push(format!("{rule_tool}({raw})"));
                 ctx.match_keys.push(format!("{rule_tool}({canon_s})"));
-                if let Ok(rel) = resolved.canonical.strip_prefix(
-                    super::paths::canonicalize_with_missing_tail(cwd),
-                ) {
+                if let Ok(rel) = resolved
+                    .canonical
+                    .strip_prefix(super::paths::canonicalize_with_missing_tail(cwd))
+                {
                     ctx.match_keys
                         .push(format!("{rule_tool}({})", rel.display()));
                 }
                 ctx.suggested_rule = Some(format!("{rule_tool}({canon_s})"));
                 ctx.protected_hit = is_protected(&resolved);
-                ctx.credential_protected = is_credential_protected(&resolved);
                 ctx.is_temp_target = is_temp_path(&resolved);
                 ctx.symlink_escape = resolved.escaped_via_symlink;
                 ctx.outside_workspace = !is_in_workspace(cwd, &resolved);
@@ -435,9 +461,6 @@ impl InspectContext {
                     if is_protected(&r) {
                         ctx.protected_hit = true;
                     }
-                    if is_credential_protected(&r) {
-                        ctx.credential_protected = true;
-                    }
                     if !is_in_workspace(cwd, &r) && !is_temp_path(&r) {
                         ctx.outside_workspace = true;
                         ctx.extra_rw.push(r.canonical.display().to_string());
@@ -459,9 +482,6 @@ impl InspectContext {
                             let r = resolve_path_pair(cwd, p);
                             if is_protected(&r) {
                                 ctx.protected_hit = true;
-                            }
-                            if is_credential_protected(&r) {
-                                ctx.credential_protected = true;
                             }
                             if r.escaped_via_symlink {
                                 ctx.symlink_escape = true;
@@ -526,13 +546,10 @@ pub fn rule_matches(pattern: &str, keys: &[String]) -> bool {
         if pat == *k || pat == "*" {
             return true;
         }
-        if let (Some((p_tool, p_arg)), Some((k_tool, k_arg))) =
-            (split_rule(&pat), split_rule(k))
-        {
+        if let (Some((p_tool, p_arg)), Some((k_tool, k_arg))) = (split_rule(&pat), split_rule(k)) {
             if p_tool.eq_ignore_ascii_case(k_tool) {
                 return glob_match(p_arg, k_arg)
-                    || (p_arg.ends_with('*')
-                        && k_arg.starts_with(p_arg.trim_end_matches('*')));
+                    || (p_arg.ends_with('*') && k_arg.starts_with(p_arg.trim_end_matches('*')));
             }
         }
         false

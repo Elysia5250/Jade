@@ -162,7 +162,14 @@ impl PermissionEngine {
 
     pub fn evaluate(&self, tool: &str, args: &Value) -> Decision {
         let policies = self.loaded_policies();
-        rules::evaluate_tool_call(&self.data_dir, &self.cwd, self.mode(), &policies, tool, args)
+        rules::evaluate_tool_call(
+            &self.data_dir,
+            &self.cwd,
+            self.mode(),
+            &policies,
+            tool,
+            args,
+        )
     }
 
     pub async fn authorize_tool_call(
@@ -178,7 +185,6 @@ impl PermissionEngine {
             rules::evaluate_tool_call(&self.data_dir, &self.cwd, mode, &policies, tool, args);
         let detail = summarize_call(tool, args);
 
-        let local_target = self.target == "local" || self.target.is_empty();
         let skip_perms = self.skip_permissions() && mode != PermissionMode::Plan;
         let sandbox_ovr = self.sandbox_override();
         let mut extra_rw = policies.extra_rw.clone();
@@ -205,7 +211,6 @@ impl PermissionEngine {
             }
             Effect::Allow => {
                 let sandbox = sandbox_for(
-                    local_target,
                     &self.cwd,
                     &extra_rw,
                     decision.needs_net,
@@ -230,14 +235,7 @@ impl PermissionEngine {
                 Ok(ToolAuth { sandbox })
             }
             Effect::Ask if skip_perms => {
-                let sandbox = sandbox_for(
-                    local_target,
-                    &self.cwd,
-                    &extra_rw,
-                    true,
-                    true,
-                    sandbox_ovr,
-                );
+                let sandbox = sandbox_for(&self.cwd, &extra_rw, true, true, sandbox_ovr);
                 audit::record_decision(
                     &self.data_dir,
                     audit::PermissionAuditEntry {
@@ -277,8 +275,7 @@ impl PermissionEngine {
                 );
             }
             Effect::Ask => {
-                let prompt_res =
-                    prompt_user_approval(tool, &detail, &decision, asks, tx).await;
+                let prompt_res = prompt_user_approval(tool, &detail, &decision, asks, tx).await;
                 let choice = match prompt_res {
                     Ok(c) => c,
                     Err(e) => {
@@ -349,14 +346,7 @@ impl PermissionEngine {
                 let sandbox = if full_host {
                     SandboxPolicy::DangerFullAccess
                 } else {
-                    sandbox_for(
-                        local_target,
-                        &self.cwd,
-                        &extra_rw,
-                        allow_net,
-                        false,
-                        sandbox_ovr,
-                    )
+                    sandbox_for(&self.cwd, &extra_rw, allow_net, false, sandbox_ovr)
                 };
                 audit::record_decision(
                     &self.data_dir,
@@ -380,16 +370,12 @@ impl PermissionEngine {
 }
 
 fn sandbox_for(
-    local: bool,
     cwd: &Path,
     extra_rw: &[String],
     allow_net: bool,
     skip_perms: bool,
     override_policy: Option<SandboxOverride>,
 ) -> SandboxPolicy {
-    if !local {
-        return SandboxPolicy::Off;
-    }
     match override_policy {
         Some(SandboxOverride::Off) => SandboxPolicy::Off,
         Some(SandboxOverride::DangerFullAccess) => SandboxPolicy::DangerFullAccess,
@@ -414,10 +400,18 @@ fn sandbox_for(
 fn sandbox_label(s: &SandboxPolicy) -> &'static str {
     match s {
         SandboxPolicy::Off => "off",
-        SandboxPolicy::ReadOnly { allow_net: false, .. } => "ro:offline",
-        SandboxPolicy::ReadOnly { allow_net: true, .. } => "ro:net",
-        SandboxPolicy::WorkspaceWrite { allow_net: false, .. } => "ws:offline",
-        SandboxPolicy::WorkspaceWrite { allow_net: true, .. } => "ws:net",
+        SandboxPolicy::ReadOnly {
+            allow_net: false, ..
+        } => "ro:offline",
+        SandboxPolicy::ReadOnly {
+            allow_net: true, ..
+        } => "ro:net",
+        SandboxPolicy::WorkspaceWrite {
+            allow_net: false, ..
+        } => "ws:offline",
+        SandboxPolicy::WorkspaceWrite {
+            allow_net: true, ..
+        } => "ws:net",
         SandboxPolicy::DangerFullAccess => "danger-full-access",
     }
 }

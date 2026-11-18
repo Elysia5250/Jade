@@ -317,6 +317,9 @@ pub struct HookRule {
     pub timeout_ms: u64,
     pub fail_closed: bool,
     pub always_run: bool,
+    /// User and managed hooks always run directly. Project hooks run under the
+    /// workspace sandbox unless the entry set `sandbox` to `off`.
+    pub sandbox_off: bool,
 }
 
 impl HookRule {

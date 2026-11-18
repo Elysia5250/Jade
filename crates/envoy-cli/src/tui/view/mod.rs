@@ -11,6 +11,8 @@ mod sidebar;
 mod status;
 mod transcript;
 mod transcript_cards;
+mod transcript_fold;
+mod transcript_tool;
 mod welcome;
 
 use ask::{ask_inline_height, draw_ask};
@@ -241,10 +243,7 @@ pub(super) fn ensure_trailing_blanks(lines: &mut Vec<LinkedLine>, n: usize) {
     }
     let mut have = 0usize;
     for line in lines.iter().rev() {
-        let blank = line
-            .spans
-            .iter()
-            .all(|s| s.span.content.trim().is_empty());
+        let blank = line.spans.iter().all(|s| s.span.content.trim().is_empty());
         if !blank {
             break;
         }

@@ -4,13 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 /// Directory or file basenames that always require protection.
 const PROTECTED_BASENAMES: &[&str] = &[
-    ".git",
-    ".ssh",
-    ".env",
-    ".envoy",
-    ".codex",
-    ".agents",
-    ".aws",
+    ".git", ".ssh", ".env", ".envoy", ".codex", ".agents", ".aws",
 ];
 
 #[derive(Debug, Clone)]
@@ -49,8 +43,8 @@ pub fn resolve_path_pair(cwd: &Path, raw_path: &str) -> ResolvedPath {
     let requested = lexical_normalize(&joined);
     let canonical = canonicalize_with_missing_tail(&requested);
     let cwd_canon = canonicalize_with_missing_tail(cwd);
-    let escaped_via_symlink = is_under(&requested, &lexical_normalize(cwd))
-        && !is_under(&canonical, &cwd_canon);
+    let escaped_via_symlink =
+        is_under(&requested, &lexical_normalize(cwd)) && !is_under(&canonical, &cwd_canon);
     ResolvedPath {
         requested,
         canonical,
@@ -58,20 +52,11 @@ pub fn resolve_path_pair(cwd: &Path, raw_path: &str) -> ResolvedPath {
     }
 }
 
-/// Credential/secret basenames that even Auto mode must prompt for on access.
-const CREDENTIAL_BASENAMES: &[&str] = &[".ssh", ".env", ".codex", ".agents", ".aws"];
-
 /// True if `path` or any component matches protected secret/repo directories or
 /// `.env*` files. Checks both requested and canonical paths.
 pub fn is_protected(resolved: &ResolvedPath) -> bool {
     path_has_protected_component(&resolved.requested)
         || path_has_protected_component(&resolved.canonical)
-}
-
-/// True if `resolved` touches credential/secret paths (excluding `.git`/`.envoy`).
-pub fn is_credential_protected(resolved: &ResolvedPath) -> bool {
-    path_has_credential_component(&resolved.requested)
-        || path_has_credential_component(&resolved.canonical)
 }
 
 /// True if `resolved` points inside `/tmp`, `/var/tmp`, or the active temp dir.
@@ -88,10 +73,6 @@ pub fn is_temp_path(resolved: &ResolvedPath) -> bool {
 
 pub fn path_has_protected_component(path: &Path) -> bool {
     has_component_in(path, PROTECTED_BASENAMES)
-}
-
-fn path_has_credential_component(path: &Path) -> bool {
-    has_component_in(path, CREDENTIAL_BASENAMES)
 }
 
 fn has_component_in(path: &Path, basenames: &[&str]) -> bool {
@@ -209,7 +190,16 @@ mod tests {
     #[test]
     fn protects_sensitive_dirs_and_env_variants() {
         let work = PathBuf::from("/tmp/proj");
-        for p in [".env", ".env.local", ".git/config", ".envoy/permissions.json", "~/.ssh/id_ed25519", ".aws/credentials", ".codex/auth.json", ".agents/a"] {
+        for p in [
+            ".env",
+            ".env.local",
+            ".git/config",
+            ".envoy/permissions.json",
+            "~/.ssh/id_ed25519",
+            ".aws/credentials",
+            ".codex/auth.json",
+            ".agents/a",
+        ] {
             let r = resolve_path_pair(&work, p);
             assert!(is_protected(&r), "{p} should be protected");
         }

@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-const DEFAULT_TOOL_STEPS: usize = 25;
+pub(super) const DEFAULT_TOOL_STEPS: usize = 100;
 const HARD_MAX_TOOL_STEPS: usize = 250;
 
 pub(crate) struct LoopOptions {
@@ -639,4 +639,3 @@ async fn finalize_step_limit(
         hook_state: hook_session.state.clone(),
     })
 }
-

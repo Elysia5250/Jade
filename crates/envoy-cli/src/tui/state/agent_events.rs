@@ -191,7 +191,7 @@ impl App {
             AgentEvent::AskClosed { id } => {
                 if self.pending_ask.as_ref().map(|a| a.id) == Some(id) {
                     self.pending_ask = None;
-                    self.set_toast("no answer; using the recommended option", false);
+                    self.set_toast("no answer", false);
                 }
             }
             AgentEvent::TurnDone {
@@ -362,13 +362,12 @@ impl App {
                     .last()
                     .map(|s| format!(" — {}", truncate_width(s, 100)))
                     .unwrap_or_default();
-                let line_text = format!("#{id} {label} (job {job_id}) trigger {cap}{suffix}{preview}");
-                let card = self
-                    .session
-                    .items
-                    .iter_mut()
-                    .rev()
-                    .find(|i| matches!(i, TranscriptItem::Tool { name, .. } if name == "monitor"));
+                let line_text =
+                    format!("#{id} {label} (job {job_id}) trigger {cap}{suffix}{preview}");
+                let card =
+                    self.session.items.iter_mut().rev().find(
+                        |i| matches!(i, TranscriptItem::Tool { name, .. } if name == "monitor"),
+                    );
                 if let Some(TranscriptItem::Tool {
                     output, subtitle, ..
                 }) = card

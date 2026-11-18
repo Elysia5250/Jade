@@ -42,11 +42,7 @@ fn explicit_deny_beats_allow_and_managed_beats_local() {
         "local".into(),
         PermissionMode::Auto,
     );
-    let eng = Arc::new(
-        Arc::try_unwrap(eng)
-            .unwrap()
-            .with_managed_override(managed),
-    );
+    let eng = Arc::new(Arc::try_unwrap(eng).unwrap().with_managed_override(managed));
 
     let d1 = eng.evaluate("exec", &json!({"command": "rm -rf build"}));
     assert_eq!(d1.effect, Effect::Deny, "{d1:?}");
@@ -176,23 +172,32 @@ async fn headless_fast_fails_ask_while_skip_permissions_and_sandbox_override_wor
         "local".into(),
         PermissionMode::Default,
     );
-    let eng = Arc::new(
-        Arc::try_unwrap(eng)
-            .unwrap()
-            .with_managed_override(managed),
-    );
+    let eng = Arc::new(Arc::try_unwrap(eng).unwrap().with_managed_override(managed));
     let asks = AskBroker::new_headless();
     let (tx, _rx) = mpsc::unbounded_channel();
 
     let err = eng
-        .authorize_tool_call("exec", &json!({"command": "curl https://example.com"}), &asks, &tx)
+        .authorize_tool_call(
+            "exec",
+            &json!({"command": "curl https://example.com"}),
+            &asks,
+            &tx,
+        )
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("requires interactive approval"), "{err}");
+    assert!(
+        err.to_string().contains("requires interactive approval"),
+        "{err}"
+    );
 
     eng.set_skip_permissions(true);
     let auth = eng
-        .authorize_tool_call("exec", &json!({"command": "curl https://example.com"}), &asks, &tx)
+        .authorize_tool_call(
+            "exec",
+            &json!({"command": "curl https://example.com"}),
+            &asks,
+            &tx,
+        )
         .await
         .unwrap();
     assert_eq!(auth.sandbox, SandboxPolicy::DangerFullAccess);
@@ -202,7 +207,10 @@ async fn headless_fast_fails_ask_while_skip_permissions_and_sandbox_override_wor
         .authorize_tool_call("exec", &json!({"command": "ls"}), &asks, &tx)
         .await
         .unwrap();
-    assert!(matches!(auth_ws.sandbox, SandboxPolicy::WorkspaceWrite { .. }));
+    assert!(matches!(
+        auth_ws.sandbox,
+        SandboxPolicy::WorkspaceWrite { .. }
+    ));
 
     let denied = eng
         .authorize_tool_call("exec", &json!({"command": "sudo id"}), &asks, &tx)
@@ -234,20 +242,56 @@ async fn auto_mode_approves_routine_dev_ops_while_keeping_safety_guards() {
     let asks = AskBroker::new_headless();
     let (tx, _rx) = mpsc::unbounded_channel();
 
-    // Network exec + workspace rm + .envoy read + webfetch + /tmp write all Allow in Auto
-    let net_auth = eng
-        .authorize_tool_call("exec", &json!({"command": "curl https://example.com"}), &asks, &tx)
-        .await
-        .unwrap();
-    assert!(
-        matches!(net_auth.sandbox, SandboxPolicy::WorkspaceWrite { allow_net: true, .. }),
-        "auto mode allowed net exec should enable allow_net: {:?}",
-        net_auth.sandbox
+    // Network exec Allows in Auto only when a sandbox backend exists.
+    // Destructive commands always Ask. Without a sandbox, other exec asks
+    // like Default. Protected paths always Ask.
+    let isolated = !matches!(
+        envoy_core::sandbox::probe_backend(),
+        envoy_core::sandbox::SandboxBackend::None
     );
-    assert_eq!(
-        eng.evaluate("exec", &json!({"command": "rm -rf build"})).effect,
-        Effect::Allow
-    );
+    if isolated {
+        let net_auth = eng
+            .authorize_tool_call(
+                "exec",
+                &json!({"command": "curl https://example.com"}),
+                &asks,
+                &tx,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                net_auth.sandbox,
+                SandboxPolicy::WorkspaceWrite {
+                    allow_net: true,
+                    ..
+                }
+            ),
+            "auto mode allowed net exec should enable allow_net: {:?}",
+            net_auth.sandbox
+        );
+    } else {
+        let err = eng
+            .authorize_tool_call(
+                "exec",
+                &json!({"command": "curl https://example.com"}),
+                &asks,
+                &tx,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("requires interactive approval"),
+            "{err}"
+        );
+    }
+    for command in ["rm -rf build", "git reset --hard", "kill 1"] {
+        assert_eq!(
+            eng.evaluate("exec", &json!({"command": command})).effect,
+            Effect::Ask,
+            "{command}"
+        );
+    }
     assert_eq!(
         eng.evaluate(
             "exec",
@@ -259,7 +303,7 @@ async fn auto_mode_approves_routine_dev_ops_while_keeping_safety_guards() {
     assert_eq!(
         eng.evaluate("read", &json!({"path": ".envoy/permissions.json"}))
             .effect,
-        Effect::Allow
+        Effect::Ask
     );
     assert_eq!(
         eng.evaluate("webfetch", &json!({"url": "https://example.com"}))
@@ -282,8 +326,11 @@ async fn auto_mode_approves_routine_dev_ops_while_keeping_safety_guards() {
         Effect::Ask
     );
     assert_eq!(
-        eng.evaluate("write", &json!({"path": ".envoy/permissions.json", "content": "{}"}))
-            .effect,
+        eng.evaluate(
+            "write",
+            &json!({"path": ".envoy/permissions.json", "content": "{}"})
+        )
+        .effect,
         Effect::Ask
     );
     assert_eq!(
@@ -292,6 +339,73 @@ async fn auto_mode_approves_routine_dev_ops_while_keeping_safety_guards() {
     );
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn default_allows_in_workspace_exec_only_when_sandboxed() {
+    let root = tmpdir("default-exec");
+    let data = root.join("data");
+    let work = root.join("work");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+    let eng = PermissionEngine::new(
+        data,
+        work,
+        "s-default".into(),
+        "local".into(),
+        PermissionMode::Default,
+    );
+    let isolated = !matches!(
+        envoy_core::sandbox::probe_backend(),
+        envoy_core::sandbox::SandboxBackend::None
+    );
+    let cargo = eng.evaluate("exec", &json!({"command": "cargo test"}));
+    if isolated {
+        assert_eq!(cargo.effect, Effect::Allow, "{cargo:?}");
+    } else {
+        assert_eq!(cargo.effect, Effect::Ask, "{cargo:?}");
+    }
+    assert_eq!(
+        eng.evaluate("exec", &json!({"command": "curl https://example.com"}))
+            .effect,
+        Effect::Ask
+    );
+    assert_eq!(
+        eng.evaluate("exec", &json!({"command": "rm -rf build"}))
+            .effect,
+        Effect::Ask
+    );
+    assert_eq!(
+        eng.evaluate("write", &json!({"path": "src/lib.rs", "content": "x"}))
+            .effect,
+        Effect::Ask
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn remote_target_still_carries_workspace_sandbox_policy() {
+    let policy = sandbox_for(Path::new("/work"), &[], false, false, None);
+    assert!(
+        matches!(
+            policy,
+            SandboxPolicy::WorkspaceWrite {
+                allow_net: false,
+                ..
+            }
+        ),
+        "{policy:?}"
+    );
+    let off = sandbox_for(
+        Path::new("/work"),
+        &[],
+        true,
+        false,
+        Some(SandboxOverride::Off),
+    );
+    assert!(matches!(off, SandboxPolicy::Off));
+    let danger = sandbox_for(Path::new("/work"), &[], false, true, None);
+    assert!(matches!(danger, SandboxPolicy::DangerFullAccess));
 }
 
 #[test]

@@ -15,12 +15,12 @@ pub(crate) fn build_system_prompt(target: &str, cwd: &Path) -> String {
          - Reply in the same language as the user's most recent message. If the user writes Chinese, answer in Chinese; never switch to English just because the code or tool output is English.\n\
          - Be precise and concise. Do the work; never substitute a summary of what you would do for actually doing it.\n\
          - If a request is ambiguous, ask one short question before acting.\n\
-         - If a command is destructive (delete, overwrite, force-push, chmod -R, kill), call `ask` before doing it. Do not ask in prose. Give 2-5 options, mark exactly one `recommended`, and keep the safe option recommended. If nobody answers within the timeout, the recommended option is taken.\n\
+         - If a command is destructive (delete, overwrite, force-push, chmod -R, kill), call `ask` before doing it. Do not ask in prose. Give 2-5 options, mark exactly one `recommended`, and keep the safe option recommended. If nobody answers, the tool fails and you continue without a choice.\n\
          - Prefer `read`/`edit`/`ls`/`glob`/`grep` over shell commands when inspecting or editing files. Relative paths resolve against the working directory. Tool arguments come from the tool schema.\n\
          - Use `exec` with a small wait for long commands, then `job` to follow or cancel. Report exact commands, job ids and exit codes; never invent tool output.\n\
          - Answer in Markdown. Use tables for comparisons, but keep them narrow enough for a terminal.\n\
          - Call `say` with one present-tense sentence when you change phase, start work that will take a while, or the plan changes. Use the user's language, for example `现在在对列表缩进，接着改代码块对齐`. Put `say` in the same response as the next real tool; do not spend a turn on it alone. Do not call it for every file read, and do not restate the request.\n\
-         - Use `ask` when a decision is genuinely ambiguous. Give 2-5 options and mark exactly one `recommended`.",
+         - Use `ask` when a decision is genuinely ambiguous. Give 2-5 options and mark exactly one `recommended`. `recommended` only highlights an option; it does not decide for the user.",
         cwd.display(),
         host_line(target)
     );
@@ -31,11 +31,7 @@ pub(crate) fn build_system_prompt(target: &str, cwd: &Path) -> String {
     prompt
 }
 
-pub(crate) fn build_subagent_system_prompt(
-    target: &str,
-    cwd: &Path,
-    role_prompt: &str,
-) -> String {
+pub(crate) fn build_subagent_system_prompt(target: &str, cwd: &Path, role_prompt: &str) -> String {
     let mut prompt = format!(
         "You are an Envoy subagent executing a focused delegated task.\n\
          Active target machine: {target}\n\
@@ -60,13 +56,32 @@ pub(crate) fn build_subagent_system_prompt(
 
 fn host_line(target: &str) -> String {
     if target.is_empty() || target == "local" {
+        let os = format!("{} {}", std::env::consts::OS, std::env::consts::ARCH);
         format!(
-            "Operating system: {} {}\nLocal sandbox: `exec` mounts the working directory read-write, keeps `~` and other host paths read-only, and isolates `/tmp` per command; put scratch files shared across commands or tools inside the working directory.",
-            std::env::consts::OS,
-            std::env::consts::ARCH
+            "Operating system: {os}\n{}",
+            local_sandbox_line(&envoy_core::sandbox::probe_backend())
         )
     } else {
-        format!("Remote target `{target}`. Do not assume the local operating system.")
+        format!(
+            "Remote target `{target}`. The peer applies its own sandbox. Do not assume the local operating system."
+        )
+    }
+}
+
+/// What the local sandbox can actually enforce. Landlock cannot punch deny
+/// holes under an allowed `/` read, so it must not claim hidden secrets.
+fn local_sandbox_line(backend: &envoy_core::sandbox::SandboxBackend) -> String {
+    match backend {
+        envoy_core::sandbox::SandboxBackend::None => {
+            "Local sandbox: none. Permission checks are the only gate. Do not assume `~/.ssh`, `.env`, or `/tmp` are isolated.".to_string()
+        }
+        envoy_core::sandbox::SandboxBackend::Landlock(_) => {
+            "Local sandbox: Landlock. The working directory and `/tmp` are writable; other paths are read-only. Network is off when the kernel ABI supports it. This does not hide `~/.ssh`, `~/.aws`, or `.env`. `/tmp` is the host temporary directory.".to_string()
+        }
+        envoy_core::sandbox::SandboxBackend::Bwrap(_)
+        | envoy_core::sandbox::SandboxBackend::Seatbelt(_) => {
+            "Local sandbox: `exec` can write the working directory, other paths are read-only, `~/.ssh` and `~/.aws` are hidden, and `.git`, `.envoy`, and `.env` are blocked. Network is off unless a command was approved with network. `$TMPDIR` lasts one command; put scratch shared across commands inside the working directory.".to_string()
+        }
     }
 }
 
@@ -84,7 +99,7 @@ pub(crate) fn environment_note_for_depth(
     depth: u8,
 ) -> Option<String> {
     let mut parts = Vec::new();
-    let skills = crate::skills::discover_skills(data_dir, cwd);
+    let skills = crate::skills::prompt_skills(data_dir, cwd);
     if let Some(catalog) = crate::skills::format_skills_catalog(&skills) {
         parts.push(format!(
             "## Available skills (load full steps on demand with `skill`)\n{catalog}"
@@ -134,9 +149,10 @@ pub(crate) fn take_environment(messages: &mut Vec<ChatMessage>) -> Vec<ChatMessa
         return Vec::new();
     }
     let mut pinned = vec![messages.remove(0)];
-    if messages.first().is_some_and(|msg| {
-        msg.role == ChatRole::Assistant && msg.content == ENV_ACK
-    }) {
+    if messages
+        .first()
+        .is_some_and(|msg| msg.role == ChatRole::Assistant && msg.content == ENV_ACK)
+    {
         pinned.push(messages.remove(0));
     }
     pinned
@@ -186,8 +202,7 @@ fn project_instructions(cwd: &Path) -> Option<String> {
         let label = path.display().to_string();
         let block = format!("### {label}\n{trimmed}\n");
         let used: usize = files.iter().map(|text| text.chars().count()).sum();
-        if used + block.chars().count() > CAP
-        {
+        if used + block.chars().count() > CAP {
             skipped.push(label);
             continue;
         }
@@ -227,8 +242,8 @@ fn instruction_files(cwd: &Path) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::tools::openai_tools_json;
+    use super::*;
 
     fn tmpdir(tag: &str) -> std::path::PathBuf {
         let n = std::time::SystemTime::now()
@@ -247,6 +262,8 @@ mod tests {
         assert!(prompt.contains("same language as the user's most recent message"));
         assert!(prompt.contains("Chinese"));
         assert!(prompt.contains("laptop"));
+        assert!(prompt.contains("peer applies its own sandbox"));
+        assert!(!prompt.contains("isolates `/tmp`"));
         assert!(prompt.contains(&dir.display().to_string()));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -268,9 +285,14 @@ mod tests {
             .find(|tool| tool["function"]["name"] == "say")
             .expect("say");
         let desc = say["function"]["description"].as_str().unwrap();
-        assert!(desc.contains("same response as the next real tool"), "{desc}");
+        assert!(
+            desc.contains("same response as the next real tool"),
+            "{desc}"
+        );
         assert!(prompt.contains("`ask`"));
         assert!(prompt.contains("recommended"));
+        assert!(!prompt.contains("recommended option is taken"));
+        assert!(!prompt.contains("isolates `/tmp`"));
     }
 
     #[test]
@@ -286,6 +308,30 @@ mod tests {
         assert!(prompt.contains("Skipped project instructions"));
         assert!(!prompt.contains(&"x".repeat(100)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn landlock_prompt_does_not_claim_hidden_secrets() {
+        use envoy_core::sandbox::SandboxBackend;
+        let landlock = local_sandbox_line(&SandboxBackend::Landlock(4));
+        assert!(landlock.contains("does not hide"));
+        assert!(landlock.contains("`~/.ssh`"));
+        assert!(landlock.contains("`~/.aws`"));
+        assert!(landlock.contains("`.env`"));
+        assert!(landlock.contains("host temporary directory"));
+        assert!(!landlock.contains("are hidden"));
+
+        let full = local_sandbox_line(&SandboxBackend::Seatbelt(PathBuf::from(
+            "/usr/bin/sandbox-exec",
+        )));
+        assert!(full.contains("are hidden"));
+        assert!(full.contains("`$TMPDIR` lasts one command"));
+        let bwrap = local_sandbox_line(&SandboxBackend::Bwrap(PathBuf::from("bwrap")));
+        assert!(bwrap.contains("are hidden"));
+
+        let none = local_sandbox_line(&SandboxBackend::None);
+        assert!(none.contains("Permission checks are the only gate"));
+        assert!(!none.contains("are hidden"));
     }
 
     #[test]
@@ -331,5 +377,4 @@ mod tests {
         assert!(root_at < crate_at);
         let _ = std::fs::remove_dir_all(&root);
     }
-
 }

@@ -13,6 +13,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
+#[test]
+fn interactive_default_tool_steps_is_100() {
+    assert_eq!(super::r#loop::DEFAULT_TOOL_STEPS, 100);
+}
+
 #[tokio::test]
 async fn overflow_triggers_one_compaction_retry_and_second_failure_errors() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

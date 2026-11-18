@@ -7,7 +7,8 @@
 //! Security boundary:
 //! - Enforces `PermissionEngine` rules (`deny` blocks, `ask` refuses cleanly
 //!   over non-interactive stdio unless allowed by rules/mode).
-//! - Local `exec` defaults to `SandboxPolicy::WorkspaceWrite { allow_net: false }`.
+//! - `exec` defaults to `SandboxPolicy::WorkspaceWrite { allow_net: false }` on
+//!   every target. The peer applies that policy with its own backend.
 
 use super::server_tools::{self, machine_arg, tool_defs, Sink, ToolReply};
 use crate::daemon;
@@ -70,7 +71,11 @@ pub(crate) async fn serve(
         let msg: Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(e) => {
-                reply(&mut out, error(&Value::Null, -32700, &format!("parse error: {e}"))).await?;
+                reply(
+                    &mut out,
+                    error(&Value::Null, -32700, &format!("parse error: {e}")),
+                )
+                .await?;
                 continue;
             }
         };
@@ -175,7 +180,9 @@ async fn call_tool(mcp: &Mcp, params: &Value) -> Result<ToolReply> {
         "exec" | "read" | "write" | "edit" | "ls" | "glob" | "grep" | "job"
     ) {
         return Ok((
-            format!("unknown tool `{name}`; available: exec, read, write, edit, ls, glob, grep, job"),
+            format!(
+                "unknown tool `{name}`; available: exec, read, write, edit, ls, glob, grep, job"
+            ),
             None,
             true,
         ));
@@ -209,17 +216,12 @@ async fn call_tool(mcp: &Mcp, params: &Value) -> Result<ToolReply> {
 
     let machine = machine_arg(args);
     let remote = mcp.remote(&machine).await?;
-    let local = machine == "local" || machine.is_empty();
-    let sandbox = if local {
-        let mut extra_rw = mcp.permissions.loaded_policies().extra_rw;
-        extra_rw.extend(decision.extra_rw);
-        SandboxPolicy::WorkspaceWrite {
-            cwd: mcp.cwd.display().to_string(),
-            extra_rw,
-            allow_net: false,
-        }
-    } else {
-        SandboxPolicy::Off
+    let mut extra_rw = mcp.permissions.loaded_policies().extra_rw;
+    extra_rw.extend(decision.extra_rw);
+    let sandbox = SandboxPolicy::WorkspaceWrite {
+        cwd: mcp.cwd.display().to_string(),
+        extra_rw,
+        allow_net: false,
     };
 
     match name {
@@ -314,7 +316,11 @@ mod tests {
             vec!["exec", "read", "write", "edit", "ls", "glob", "grep", "job"]
         );
         for t in arr {
-            assert!(t["annotations"].is_object(), "missing annotations on {}", t["name"]);
+            assert!(
+                t["annotations"].is_object(),
+                "missing annotations on {}",
+                t["name"]
+            );
         }
     }
 

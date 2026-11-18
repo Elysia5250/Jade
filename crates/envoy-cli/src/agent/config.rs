@@ -37,6 +37,6 @@ pub struct TurnConfig {
     pub hook_state_sink: Option<Arc<Mutex<BTreeMap<String, Value>>>>,
     /// Monotonic turn sequence within the session.
     pub turn_seq: u64,
-    /// Optional per-turn tool-step ceiling (defaults to 25).
+    /// Optional per-turn tool-step ceiling (defaults to 100).
     pub max_steps: Option<usize>,
 }

@@ -1,9 +1,14 @@
 //! Discovery and YAML-frontmatter parsing for `SKILL.md` Agent Skills.
 //!
-//! Search roots (higher precedence later or project-over-user):
-//! - User scope (always loaded): `<data_dir>/skills`, `~/.envoy/skills`, `~/.agents/skills`
-//! - Project scope (ONLY when workspace is trusted):
+//! Search roots (higher precedence later, so project overrides user):
+//! - User scope (always loaded): `<data_dir>/skills`, `~/.envoy/skills`,
+//!   `~/.agents/skills`, `~/.claude/skills`
+//! - Project scope (only when the workspace is trusted):
 //!   `<cwd>/.envoy/skills`, `<cwd>/.agents/skills`, `<cwd>/.claude/skills`
+//!
+//! The system prompt lists only Envoy roots (`<data_dir>/skills`,
+//! `~/.envoy/skills`, and a trusted `<cwd>/.envoy/skills`). The other roots
+//! stay discoverable and loadable by name.
 
 use crate::permissions::is_workspace_trusted;
 use anyhow::{bail, Context, Result};
@@ -90,6 +95,32 @@ pub fn discover_skills(data_dir: &Path, cwd: &Path) -> Vec<SkillSummary> {
     by_name.into_values().collect()
 }
 
+/// Skills that belong in the system prompt. Claude and Agents roots stay
+/// available through [`load_skill`] and `/skill`.
+pub fn prompt_skills(data_dir: &Path, cwd: &Path) -> Vec<SkillSummary> {
+    discover_skills(data_dir, cwd)
+        .into_iter()
+        .filter(|skill| skill_is_injected(data_dir, cwd, skill))
+        .collect()
+}
+
+fn skill_is_injected(data_dir: &Path, cwd: &Path, skill: &SkillSummary) -> bool {
+    let mut roots = vec![data_dir.join("skills")];
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        roots.push(home.join(".envoy").join("skills"));
+    }
+    roots.push(cwd.join(".envoy").join("skills"));
+    roots.into_iter().any(|root| path_under(&root, &skill.dir))
+}
+
+fn path_under(root: &Path, dir: &Path) -> bool {
+    let Some(root) = std::fs::canonicalize(root).ok() else {
+        return false;
+    };
+    let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    dir.starts_with(root)
+}
+
 pub fn format_skills_catalog(skills: &[SkillSummary]) -> Option<String> {
     if skills.is_empty() {
         return None;
@@ -143,11 +174,7 @@ pub fn load_skill(data_dir: &Path, cwd: &Path, name: &str) -> Result<LoadedSkill
     })
 }
 
-fn parse_skill_summary(
-    scope: SkillScope,
-    dir: &Path,
-    skill_file: &Path,
-) -> Option<SkillSummary> {
+fn parse_skill_summary(scope: SkillScope, dir: &Path, skill_file: &Path) -> Option<SkillSummary> {
     let raw = std::fs::read_to_string(skill_file).ok()?;
     let (fm_opt, body) = split_frontmatter(&raw);
     let fallback_name = dir
@@ -338,8 +365,7 @@ fn parse_frontmatter(
 fn unquote(raw: &str) -> String {
     let s = raw.trim();
     if s.len() >= 2
-        && ((s.starts_with('"') && s.ends_with('"'))
-            || (s.starts_with('\'') && s.ends_with('\'')))
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
     {
         s[1..s.len() - 1].to_string()
     } else {

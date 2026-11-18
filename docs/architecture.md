@@ -77,14 +77,14 @@ should import from `agent` directly.
 1. A tool call is normalized (tool, action, resource).
 2. Explicit rule precedence (`Managed Deny > Local Deny > Hard Protected Guard > Managed Ask > Local Ask > Managed Allow > Local Allow > Mode Baseline`) produces `allow`/`ask`/`deny`.
 3. A `deny` short-circuits; an `ask` creates an approval request (`AskBroker`) or fails cleanly on non-interactive MCP stdio.
-4. `envoy-core::sandbox` (`bwrap --unshare-net` offline workspace sandbox by default for local `exec`) enforces filesystem/network limits after approval.
+4. `envoy-core::sandbox` enforces filesystem and network limits after approval. Backends are `bwrap`, then Linux Landlock, then macOS Seatbelt (`sandbox-exec`). With no backend the command is refused. Local and remote agent `exec` default to an offline workspace write. Landlock cannot hide `~/.ssh`, `~/.aws`, or `.env`. Human shell and `envoy run` stay unsandboxed.
 5. The decision and sandbox mode are written to the audit log (`~/.envoy/audit/permissions.jsonl`).
 6. A rejection is returned to the model with actionable context.
 
 ## Where to look
 
 - Protocol: `crates/envoy-proto/src/lib.rs`, `crates/envoy-cli/src/runtime/`
-- Sandbox & search: `crates/envoy-core/src/{sandbox,search}.rs`
+- Sandbox & search: `crates/envoy-core/src/{sandbox.rs,seatbelt.rs,search.rs}`
 - Agent loop & tools: `crates/envoy-cli/src/agent/{loop.rs,tools/}`
 - Compaction: `crates/envoy-cli/src/agent/context/`
 - Permissions: `crates/envoy-cli/src/permissions/`

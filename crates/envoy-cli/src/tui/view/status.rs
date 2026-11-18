@@ -98,10 +98,17 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
         PermissionMode::Plan => theme.accent,
         PermissionMode::Auto => theme.warn,
     };
-    let sandbox_label = if !remote {
-        Some(envoy_core::sandbox::backend_label())
+    let sandbox_label = if remote {
+        "sandbox:peer".to_string()
     } else {
-        None
+        format!("sandbox:{}", envoy_core::sandbox::backend_label())
+    };
+    let sandbox_color = if sandbox_label.ends_with(":none") || sandbox_label.ends_with(":off") {
+        theme.warn
+    } else if sandbox_label.ends_with(":peer") {
+        theme.secondary
+    } else {
+        theme.ok
     };
     let toast = app
         .active_toast()
@@ -129,7 +136,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
                 0
             })
     };
-    let sandbox_w = sandbox_label.map(|s| display_width(s) + 2).unwrap_or(0);
+    let sandbox_w = display_width(&sandbox_label) + 2;
     let mode_w = display_width(mode) + 2 + display_width(perm_badge) + 2 + sandbox_w;
     let cwd_budget = left_budget.saturating_sub(mode_w + suffix_w).max(1);
     let cwd = truncate_width(&app.cwd_label(), cwd_budget);
@@ -165,10 +172,11 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
         Span::styled(perm_badge, Style::default().fg(perm_color)),
         Span::raw("  "),
     ];
-    if let Some(sb) = sandbox_label {
-        left.push(Span::styled(sb, Style::default().fg(theme.dim)));
-        left.push(Span::raw("  "));
-    }
+    left.push(Span::styled(
+        sandbox_label,
+        Style::default().fg(sandbox_color),
+    ));
+    left.push(Span::raw("  "));
     left.push(Span::styled(cwd.clone(), Style::default().fg(theme.text)));
     if let Some((label, err)) = toast {
         left.push(Span::styled(

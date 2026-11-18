@@ -1,13 +1,11 @@
 //! Headless / non-interactive execution mode (`envoy -p ...`) for CI,
 //! scripts, and containerized agent benchmarks (e.g. Terminal-Bench / Harbor).
 
-use crate::agent::{AgentEvent, AskBroker};
+use crate::agent::AskBroker;
 use crate::daemon;
 use crate::permissions::{PermissionMode, SandboxOverride};
-use crate::runtime::{Runtime, SendMode, SeqEvent};
-use crate::session::{
-    latest_session_for_cwd, load_session, save_session, ChatRole, Session,
-};
+use crate::runtime::{Runtime, SendMode};
+use crate::session::{latest_session_for_cwd, load_session, save_session, ChatRole, Session};
 use crate::Ctx;
 use anyhow::{bail, Context, Result};
 use clap::{Args, ValueEnum};
@@ -214,9 +212,7 @@ pub(crate) async fn run_with_writers<WOut: Write, WErr: Write>(
 
     let perm_mode = match args.permission_mode.as_deref() {
         Some(raw) => PermissionMode::parse(raw).with_context(|| {
-            format!(
-                "unknown permission mode `{raw}` (expected: default, accept-edits, plan, auto)"
-            )
+            format!("unknown permission mode `{raw}` (expected: default, accept-edits, plan, auto)")
         })?,
         None if args.dangerously_skip_permissions => PermissionMode::Auto,
         None => PermissionMode::Default,
@@ -340,127 +336,17 @@ pub(crate) async fn run_with_writers<WOut: Write, WErr: Write>(
     result
 }
 
-struct TurnStreamDone {
-    messages: Vec<crate::session::ChatMessage>,
-    input_tokens: u64,
-    output_tokens: u64,
-    context_tokens: u64,
-    tool_calls: usize,
-    accumulated_text: String,
-}
-
-async fn collect_events<WOut: Write, WErr: Write>(
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<SeqEvent>,
-    fmt: OutputFormat,
-    out: &mut WOut,
-    err: &mut WErr,
-) -> std::result::Result<TurnStreamDone, String> {
-    let mut accumulated_text = String::new();
-    let mut tool_calls = 0usize;
-    let mut need_step_sep = false;
-    let mut wrote_text = false;
-    let mut last_char_nl = false;
-    let mut saw_approval_denial = false;
-
-    while let Some(seq_ev) = rx.recv().await {
-        if fmt == OutputFormat::StreamJson {
-            if let Ok(line) = serde_json::to_string(&seq_ev) {
-                let _ = writeln!(out, "{line}");
-                let _ = out.flush();
-            }
-        }
-
-        match seq_ev.event {
-            AgentEvent::AssistantStart { .. } => {
-                if fmt == OutputFormat::Text && wrote_text && need_step_sep {
-                    if !last_char_nl {
-                        let _ = writeln!(out);
-                    }
-                    need_step_sep = false;
-                }
-            }
-            AgentEvent::TextDelta(chunk) => {
-                accumulated_text.push_str(&chunk);
-                if fmt == OutputFormat::Text && !chunk.is_empty() {
-                    let _ = write!(out, "{chunk}");
-                    let _ = out.flush();
-                    wrote_text = true;
-                    last_char_nl = chunk.ends_with('\n');
-                }
-            }
-            AgentEvent::ToolStart {
-                name, subtitle, ..
-            } => {
-                tool_calls += 1;
-                need_step_sep = true;
-                if fmt == OutputFormat::Text {
-                    let _ = writeln!(err, "[tool] {name} {subtitle}");
-                    let _ = err.flush();
-                }
-            }
-            AgentEvent::ToolOutput {
-                err: true, text, ..
-            } => {
-                if !saw_approval_denial && text.contains("requires interactive approval") {
-                    saw_approval_denial = true;
-                    let _ = writeln!(
-                        err,
-                        "[hint] tool approval required in headless mode; re-run with --permission-mode accept-edits / auto or --dangerously-skip-permissions"
-                    );
-                    let _ = err.flush();
-                }
-            }
-            AgentEvent::ToolDone {
-                ok, duration_ms, ..
-            } => {
-                if fmt == OutputFormat::Text && !ok {
-                    let _ = writeln!(err, "[tool] failed ({duration_ms}ms)");
-                    let _ = err.flush();
-                }
-            }
-            AgentEvent::Say { text, .. } => {
-                if fmt == OutputFormat::Text {
-                    let _ = writeln!(err, "[say] {text}");
-                    let _ = err.flush();
-                }
-            }
-            AgentEvent::TurnDone {
-                messages,
-                input_tokens,
-                output_tokens,
-                context_tokens,
-            } => {
-                if fmt == OutputFormat::Text && wrote_text && !last_char_nl {
-                    let _ = writeln!(out);
-                    let _ = out.flush();
-                }
-                return Ok(TurnStreamDone {
-                    messages,
-                    input_tokens,
-                    output_tokens,
-                    context_tokens,
-                    tool_calls,
-                    accumulated_text,
-                });
-            }
-            AgentEvent::TurnError(msg) => {
-                if fmt == OutputFormat::Text && wrote_text && !last_char_nl {
-                    let _ = writeln!(out);
-                    let _ = out.flush();
-                }
-                return Err(msg);
-            }
-            _ => {}
-        }
-    }
-
-    Err("agent event stream closed unexpectedly".into())
-}
+mod output;
+use output::collect_events;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::{now_ms, record_provider_login, Credential, ProviderProtocol, StoredProvider};
+    use crate::agent::AgentEvent;
+    use crate::auth::{
+        now_ms, record_provider_login, Credential, ProviderProtocol, StoredProvider,
+    };
+    use crate::runtime::SeqEvent;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -535,7 +421,9 @@ mod tests {
             .unwrap()
         );
         let sse_final = "data: {\"choices\":[{\"delta\":{\"content\":\"ALL DONE\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":20,\"completion_tokens\":4}}\n\ndata: [DONE]\n\n".to_string();
-        let sse_turn2 = "data: {\"choices\":[{\"delta\":{\"content\":\"CONTINUED\"}}]}\n\ndata: [DONE]\n\n".to_string();
+        let sse_turn2 =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"CONTINUED\"}}]}\n\ndata: [DONE]\n\n"
+                .to_string();
 
         let addr = spawn_mock_sse_server(vec![sse_tool_call, sse_final, sse_turn2]).await;
         setup_provider(&data, addr);
@@ -566,7 +454,10 @@ mod tests {
         assert_eq!(json_out["ok"], true);
         assert_eq!(json_out["result"], "ALL DONE");
         assert_eq!(json_out["tool_calls"], 1);
-        assert!(!daemon::socket_path(&data).exists(), "ephemeral socket cleaned up");
+        assert!(
+            !daemon::socket_path(&data).exists(),
+            "ephemeral socket cleaned up"
+        );
 
         // Verify `-c` continues the saved session cleanly in text mode.
         let mut out2 = Vec::new();
@@ -617,10 +508,7 @@ mod tests {
         let res = run_with_writers(&ctx, false, None, args, &mut out, &mut err).await;
         assert!(res.is_ok(), "{res:?}");
         let stream = String::from_utf8(out).unwrap();
-        assert!(
-            stream.contains("Stopped after 1 tool steps."),
-            "{stream}"
-        );
+        assert!(stream.contains("Stopped after 1 tool steps."), "{stream}");
         assert!(!stream.contains("\"TurnError\""), "{stream}");
 
         let _ = std::fs::remove_dir_all(&root);

@@ -5,6 +5,7 @@
 
 mod client;
 mod hooks;
+mod listen;
 mod monitors;
 mod ops;
 mod protocol;
@@ -15,9 +16,10 @@ mod tests_hooks;
 mod tests_stress;
 
 pub use client::{attach, request, tell};
+pub use listen::serve;
 #[allow(unused_imports)]
 pub use protocol::{AgentReq, AgentResp, SendMode, SeqEvent, SessionInfo};
-pub use server::{serve, Runtime};
+pub use server::Runtime;
 
 use std::path::{Path, PathBuf};
 

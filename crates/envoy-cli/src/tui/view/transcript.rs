@@ -1,10 +1,15 @@
 //! Transcript rendering with clear User/Assistant hierarchy and folded intermediate activity.
-use super::{ensure_trailing_blanks, push_blank_linked};
 use super::transcript_cards::{
-    push_thinking_lines, render_explore_expanded_header, render_explore_group,
-    render_thinking_run, render_tool_header, render_turn_summary,
+    push_thinking_lines, render_explore_expanded_header, render_explore_group, render_thinking_run,
+    render_turn_summary,
 };
+use super::transcript_fold::{
+    first_tool_id, is_folded_filler, is_groupable_tool, is_reasoning_only, is_transparent_notice,
+    is_transparent_separator, settled_activity_folds,
+};
+use super::transcript_tool::render_tool_header;
 use super::welcome::draw_welcome;
+use super::{ensure_trailing_blanks, push_blank_linked};
 use crate::tui::links::{inline_spans_linked, LinkedSpan};
 use crate::tui::*;
 
@@ -41,7 +46,9 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
             let first_id = first_tool_id(&app.session.items[start..end]);
             let expanded = app.expanded_explore_groups.contains(&first_id);
             let selected = app.focus == Focus::Transcript
-                && app.selected_card.is_some_and(|sel| (start..end).contains(&sel));
+                && app
+                    .selected_card
+                    .is_some_and(|sel| (start..end).contains(&sel));
             push_blank_linked(&mut lines);
             if expanded {
                 lines.push(render_turn_summary(
@@ -250,16 +257,18 @@ fn render_single_item(
             // A second user message starts another turn; leave a wider gap.
             ensure_trailing_blanks(lines, 2);
             let bar_style = Style::default()
-                .fg(if is_selected { theme.warn } else { theme.accent })
+                .fg(if is_selected {
+                    theme.warn
+                } else {
+                    theme.accent
+                })
                 .add_modifier(Modifier::BOLD);
             let card_bg = if is_selected {
                 theme.selection
             } else {
                 theme.surface
             };
-            let text_style = Style::default()
-                .fg(theme.text)
-                .add_modifier(Modifier::BOLD);
+            let text_style = Style::default().fg(theme.text).add_modifier(Modifier::BOLD);
             let card_line_bg = Style::default().bg(card_bg);
             let mut top_pad = LinkedLine::from_line(Line::styled("▌ ", bar_style));
             top_pad.line_style = Some(card_line_bg);
@@ -470,11 +479,7 @@ fn render_single_item(
                 )));
                 return;
             }
-            *last_notice = if *is_error {
-                None
-            } else {
-                Some(text.clone())
-            };
+            *last_notice = if *is_error { None } else { Some(text.clone()) };
             push_blank_linked(lines);
             let style = Style::default().fg(if *is_error { theme.bad } else { theme.dim });
             for raw in text.lines() {
@@ -531,142 +536,4 @@ fn render_single_item(
             }
         }
     }
-}
-
-fn is_groupable_tool(item: &TranscriptItem) -> bool {
-    matches!(item, TranscriptItem::Tool { .. })
-}
-
-fn is_reasoning_only(item: &TranscriptItem) -> bool {
-    matches!(
-        item,
-        TranscriptItem::Assistant {
-            text,
-            error: None,
-            ..
-        } if text.trim().is_empty()
-    )
-}
-
-fn is_transparent_notice(item: &TranscriptItem) -> bool {
-    matches!(
-        item,
-        TranscriptItem::Notice {
-            text,
-            is_error: false,
-            ..
-        } if text.starts_with("[monitor #")
-    )
-}
-
-fn first_tool_id(items: &[TranscriptItem]) -> u64 {
-    items
-        .iter()
-        .find_map(|item| match item {
-            TranscriptItem::Tool { id, name, .. } if name != "say" => Some(*id),
-            _ => None,
-        })
-        .unwrap_or(0)
-}
-
-/// A finished turn collapses its tools into one line. The tail stays open
-/// while the agent is still working.
-fn settled_activity_folds(items: &[TranscriptItem], agent_running: bool) -> Vec<(usize, usize)> {
-    let mut folds = Vec::new();
-    let mut body_start = 0usize;
-    for i in 0..=items.len() {
-        let at_user = i < items.len() && matches!(items[i], TranscriptItem::User { .. });
-        if !at_user && i != items.len() {
-            continue;
-        }
-        let body_end = i;
-        let is_tail = i == items.len();
-        if body_end > body_start && !(is_tail && agent_running) {
-            let mut cursor = body_start;
-            while cursor < body_end {
-                if !is_activity_item(&items[cursor]) {
-                    cursor += 1;
-                    continue;
-                }
-                let mut end = cursor + 1;
-                while end < body_end && is_activity_item(&items[end]) {
-                    end += 1;
-                }
-                let slice = &items[cursor..end];
-                let has_tool = slice.iter().any(|item| {
-                    matches!(item, TranscriptItem::Tool { name, .. } if name != "say")
-                });
-                let running = slice.iter().any(|item| {
-                    matches!(
-                        item,
-                        TranscriptItem::Tool {
-                            status: CardStatus::Running,
-                            ..
-                        }
-                    )
-                });
-                // An opened card stays on screen; collapsing it again returns
-                // the one-line turn summary.
-                let opened = slice.iter().any(|item| {
-                    matches!(
-                        item,
-                        TranscriptItem::Tool {
-                            name,
-                            collapsed: false,
-                            ..
-                        } if name != "say"
-                    )
-                });
-                if has_tool && !running && !opened {
-                    folds.push((cursor, end));
-                }
-                cursor = end;
-            }
-        }
-        body_start = i + 1;
-    }
-    folds
-}
-
-fn is_activity_item(item: &TranscriptItem) -> bool {
-    match item {
-        TranscriptItem::Tool { .. } | TranscriptItem::Say { .. } => true,
-        TranscriptItem::Assistant {
-            text,
-            done: true,
-            error: None,
-            ..
-        } if text.trim().is_empty() => true,
-        TranscriptItem::Notice {
-            text,
-            is_error: false,
-            ..
-        } if text.starts_with("[monitor #") => true,
-        _ => false,
-    }
-}
-
-fn is_folded_filler(item: &TranscriptItem) -> bool {
-    is_transparent_separator(item)
-        || matches!(item, TranscriptItem::Tool { name, .. } if name == "say")
-}
-
-fn is_transparent_separator(item: &TranscriptItem) -> bool {
-    matches!(
-        item,
-        TranscriptItem::Assistant {
-            text,
-            reasoning_collapsed: true,
-            done: true,
-            error: None,
-            ..
-        } if text.trim().is_empty()
-    ) || matches!(
-        item,
-        TranscriptItem::Notice {
-            text,
-            is_error: false,
-            ..
-        } if text.starts_with("[monitor #")
-    )
 }
