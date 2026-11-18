@@ -49,6 +49,7 @@ pub fn discover_skills(data_dir: &Path, cwd: &Path) -> Vec<SkillSummary> {
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         roots.push((SkillScope::User, home.join(".envoy").join("skills")));
         roots.push((SkillScope::User, home.join(".agents").join("skills")));
+        roots.push((SkillScope::User, home.join(".claude").join("skills")));
     }
 
     if is_workspace_trusted(data_dir, cwd) {
@@ -113,10 +114,22 @@ pub fn load_skill(data_dir: &Path, cwd: &Path, name: &str) -> Result<LoadedSkill
         bail!("missing skill name");
     }
     let skills = discover_skills(data_dir, cwd);
+    let available: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
     let summary = skills
         .into_iter()
         .find(|s| s.name == target || s.name.eq_ignore_ascii_case(target))
-        .with_context(|| format!("unknown skill `{target}`"))?;
+        .with_context(|| {
+            if available.is_empty() {
+                format!(
+                    "unknown skill `{target}` (no skills installed in ~/.envoy/skills, ~/.agents/skills, ~/.claude/skills, or project skills)"
+                )
+            } else {
+                format!(
+                    "unknown skill `{target}` (available: {})",
+                    available.join(", ")
+                )
+            }
+        })?;
 
     let raw = std::fs::read_to_string(&summary.skill_file)
         .with_context(|| format!("reading {}", summary.skill_file.display()))?;

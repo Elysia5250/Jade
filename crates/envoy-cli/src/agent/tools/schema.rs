@@ -162,7 +162,7 @@ pub(crate) fn openai_tools_json() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "skill",
-                "description": "Load the full instructions and resources for a skill listed in `<available_skills>`.",
+                "description": "Load the full instructions and resources for a skill listed in `<available_skills>`. Only call this for a skill present in `<available_skills>`; if `<available_skills>` is absent, no skills are installed.",
                 "parameters": {
                     "type": "object",
                     "properties": {

@@ -52,7 +52,8 @@ mod tests {
         assert_eq!(untrusted[0].allowed_tools, vec!["read", "grep"]);
         assert_eq!(untrusted[0].metadata.get("author").map(String::as_str), Some("envoy"));
 
-        assert!(load_skill(&data, &cwd, "deploy-helper").is_err());
+        let missing = load_skill(&data, &cwd, "deploy-helper").unwrap_err();
+        assert!(missing.to_string().contains("available: rust-review"));
 
         set_workspace_trusted(&data, &cwd, true).unwrap();
         let trusted = discover_skills(&data, &cwd);
@@ -62,6 +63,11 @@ mod tests {
         assert_eq!(loaded.summary.scope, SkillScope::Project);
         assert!(loaded.body.contains("Always verify dry-run first."));
         assert_eq!(loaded.resources, vec!["scripts/check.sh"]);
+
+        let empty_root = tmpdir("empty");
+        let empty_err = load_skill(&empty_root, &empty_root, "pdf").unwrap_err();
+        assert!(empty_err.to_string().contains("no skills installed"));
+        let _ = std::fs::remove_dir_all(&empty_root);
 
         let catalog = format_skills_catalog(&trusted).unwrap();
         assert!(catalog.contains("<available_skills>"));
