@@ -1,4 +1,4 @@
-//! Prompt editor with clean rounded framing, prompt prefix, and mode indicator.
+//! Prompt editor with spacious breathing room, prompt prefix, and mode indicator.
 use crate::tui::*;
 
 pub(super) fn draw_editor(
@@ -28,10 +28,12 @@ pub(super) fn draw_editor(
             Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
         ),
     };
+    let v_pad = if area.height >= 6 { 1 } else { 0 };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(frame_color))
+        .padding(Padding::new(1, 1, v_pad, v_pad))
         .title_bottom(title.into_right_aligned_line())
         .style(Style::default().bg(theme.panel));
     let inner = block.inner(area);
@@ -43,12 +45,6 @@ pub(super) fn draw_editor(
     let max_rows = inner.height as usize;
     let skip = skip.min(visual_lines.len().saturating_sub(max_rows));
     let end = (skip + max_rows).min(visual_lines.len());
-    let content = Rect {
-        x: inner.x + 1,
-        y: inner.y,
-        width: inner.width.saturating_sub(2),
-        height: inner.height,
-    };
     let prompt_glyph = match app.mode {
         InputMode::Agent => Span::styled(
             "❯ ",
@@ -63,7 +59,7 @@ pub(super) fn draw_editor(
                 .add_modifier(Modifier::BOLD),
         ),
     };
-    let text_budget = content.width.saturating_sub(2) as usize;
+    let text_budget = inner.width.saturating_sub(2) as usize;
 
     let lines: Vec<Line> = if app.input.is_empty() {
         let placeholder = match app.mode {
@@ -94,5 +90,5 @@ pub(super) fn draw_editor(
             })
             .collect()
     };
-    frame.render_widget(Paragraph::new(lines), content);
+    frame.render_widget(Paragraph::new(lines), inner);
 }

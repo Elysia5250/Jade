@@ -13,9 +13,11 @@
 //!   Device Flow), and custom OpenAI/Anthropic-compatible endpoints.
 
 mod commands;
+mod decrypt;
 mod diff;
 mod highlight;
 mod links;
+mod markdown;
 mod mouse;
 mod state;
 mod text;
@@ -24,6 +26,8 @@ mod types;
 mod view;
 
 pub(crate) use commands::{SlashCommand, SLASH_COMMANDS};
+pub(crate) use decrypt::*;
+pub(crate) use markdown::*;
 pub(crate) use text::*;
 pub(crate) use theme::{Theme, THEMES};
 pub(crate) use types::*;
@@ -74,7 +78,7 @@ pub(crate) use ratatui::layout::{Constraint, Direction, Layout, Rect};
 pub(crate) use ratatui::style::{Modifier, Style};
 pub(crate) use ratatui::text::{Line, Span};
 pub(crate) use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph,
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph,
 };
 pub(crate) use ratatui::{Frame, Terminal};
 pub(crate) use std::collections::{HashMap, HashSet, VecDeque};
@@ -272,7 +276,12 @@ pub async fn run(
         let _ = execute!(stdout(), BeginSynchronizedUpdate);
         tui.terminal.draw(|frame| view::draw(frame, app_ref))?;
         let _ = execute!(stdout(), EndSynchronizedUpdate);
-        tokio::time::sleep(Duration::from_millis(33)).await;
+        let frame_ms = if app.agent_running || !app.jobs.is_empty() {
+            25
+        } else {
+            33
+        };
+        tokio::time::sleep(Duration::from_millis(frame_ms)).await;
     }
 }
 
@@ -652,3 +661,5 @@ mod tests;
 mod tests_inspector;
 #[cfg(test)]
 mod tests_ux;
+#[cfg(test)]
+mod tests_ux_fold;

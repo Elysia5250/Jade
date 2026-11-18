@@ -170,13 +170,29 @@ impl App {
                         }
                     }
                 }
-                HitTarget::ToggleReasoning(id) => {
-                    if let Some(TranscriptItem::Assistant {
-                        reasoning_collapsed,
-                        ..
-                    }) = self.session.items.iter_mut().find(|i| i.id() == id)
-                    {
-                        *reasoning_collapsed = !*reasoning_collapsed;
+                HitTarget::ToggleReasoning(ids) => {
+                    let any_collapsed = self.session.items.iter().any(|item| {
+                        matches!(
+                            item,
+                            TranscriptItem::Assistant {
+                                id,
+                                reasoning_collapsed: true,
+                                ..
+                            } if ids.contains(id)
+                        )
+                    });
+                    let next_collapsed = !any_collapsed;
+                    for item in &mut self.session.items {
+                        if let TranscriptItem::Assistant {
+                            id,
+                            reasoning_collapsed,
+                            ..
+                        } = item
+                        {
+                            if ids.contains(id) {
+                                *reasoning_collapsed = next_collapsed;
+                            }
+                        }
                     }
                 }
                 HitTarget::OpenToolOutput(id) => {

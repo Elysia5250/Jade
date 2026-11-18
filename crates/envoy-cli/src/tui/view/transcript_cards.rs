@@ -3,12 +3,6 @@ use crate::tui::links::{normalize_display_path, LinkedSpan};
 use crate::tui::*;
 use std::path::Path;
 
-const SPIN: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-pub(super) fn spinner() -> &'static str {
-    SPIN[((now_ms() / 90) as usize) % SPIN.len()]
-}
-
 pub(super) fn activity_sentence(
     items: &[TranscriptItem],
     changes: &[crate::session::FileChange],
@@ -83,7 +77,11 @@ pub(super) fn activity_sentence(
         ));
     }
     if other > 0 {
-        parts.push(format!("{} more", other));
+        if parts.is_empty() {
+            parts.push(count_words(other, "tool", "tools"));
+        } else {
+            parts.push(format!("{} more", other));
+        }
     }
     let mut text = if parts.is_empty() {
         "Worked".to_string()
@@ -139,19 +137,36 @@ pub(super) fn render_turn_summary(
     }
     let sentence = activity_sentence(items, changes);
     let glyph = if expanded { "v" } else { ">" };
-    let mut spans = vec![
-        LinkedSpan {
-            span: Span::styled(format!("  {glyph} "), Style::default().fg(theme.dim)),
+    let glyph_color = if sentence.ends_with("(failed)") {
+        theme.bad
+    } else {
+        theme.accent
+    };
+    let mut spans = vec![LinkedSpan {
+        span: Span::styled(format!("  {glyph} "), Style::default().fg(glyph_color)),
+        target: Some(HitTarget::ToggleToolGroup(ids.clone())),
+    }];
+    let budget = width.saturating_sub(16);
+    if let Some((head, diff_tail)) = sentence.rsplit_once(" +") {
+        let diff_part = format!(" +{diff_tail}");
+        let head_shown = truncate_width(head, budget.saturating_sub(display_width(&diff_part)));
+        spans.push(LinkedSpan {
+            span: Span::styled(head_shown, Style::default().fg(theme.dim)),
             target: Some(HitTarget::ToggleToolGroup(ids.clone())),
-        },
-        LinkedSpan {
+        });
+        spans.push(LinkedSpan {
+            span: Span::styled(diff_part, Style::default().fg(theme.ok)),
+            target: Some(HitTarget::ToggleToolGroup(ids.clone())),
+        });
+    } else {
+        spans.push(LinkedSpan {
             span: Span::styled(
-                truncate_width(&sentence, width.saturating_sub(16)),
+                truncate_width(&sentence, budget),
                 Style::default().fg(theme.dim),
             ),
             target: Some(HitTarget::ToggleToolGroup(ids.clone())),
-        },
-    ];
+        });
+    }
     if expanded {
         spans.push(LinkedSpan {
             span: Span::raw("  "),
@@ -215,45 +230,65 @@ pub(super) fn render_explore_group(
         total_dur += duration_ms.unwrap_or_else(|| now_ms().saturating_sub(*started_ms));
     }
 
-    let summary = activity_sentence(group, &[]);
-    let elapsed = if min_start == u64::MAX {
-        fmt_duration(0)
+    let elapsed = fmt_duration(if min_start == u64::MAX {
+        0
     } else if any_running {
-        fmt_duration(now_ms().saturating_sub(min_start))
+        now_ms().saturating_sub(min_start)
     } else {
-        fmt_duration(total_dur)
-    };
-
-    let (glyph, glyph_fg) = if any_running {
-        (spinner(), theme.accent)
-    } else if any_err {
-        ("✗", theme.bad)
+        total_dur
+    });
+    let mut line = if any_running {
+        let phrase = running_group_phrase(group);
+        let salt = ids.first().copied().unwrap_or(1);
+        let target = Some(HitTarget::ToggleToolGroup(ids));
+        let mut spans = vec![LinkedSpan {
+            span: Span::raw("  "),
+            target: target.clone(),
+        }];
+        spans.extend(decrypt_spans(
+            phrase,
+            0,
+            now_ms().saturating_sub(min_start),
+            salt,
+            theme,
+            target.clone(),
+        ));
+        let suffix_budget = width.saturating_sub(phrase.len() + 6).max(8);
+        let tail = if latest_title.is_empty() {
+            format!("  {elapsed}")
+        } else {
+            format!(
+                " - {}  {elapsed}",
+                truncate_width(latest_title, suffix_budget.saturating_sub(elapsed.len() + 5))
+            )
+        };
+        spans.push(LinkedSpan {
+            span: Span::styled(truncate_width(&tail, suffix_budget), Style::default().fg(theme.dim)),
+            target,
+        });
+        LinkedLine::from_linked(spans)
     } else {
-        (">", theme.dim)
+        let (glyph, glyph_fg) = if any_err {
+            ("✗", theme.bad)
+        } else {
+            (">", theme.dim)
+        };
+        let summary = activity_sentence(group, &[]);
+        let text = format!("{summary}  {elapsed}");
+        LinkedLine::from_linked(vec![
+            LinkedSpan {
+                span: Span::styled(format!("  {glyph} "), Style::default().fg(glyph_fg)),
+                target: Some(HitTarget::ToggleToolGroup(ids.clone())),
+            },
+            LinkedSpan {
+                span: Span::styled(
+                    truncate_width(&text, width.saturating_sub(5)),
+                    Style::default().fg(theme.dim),
+                ),
+                target: Some(HitTarget::ToggleToolGroup(ids)),
+            },
+        ])
     };
-
-    let text = if any_running {
-        format!(
-            "Working - {}  {elapsed}",
-            truncate_width(latest_title, width.saturating_sub(18).max(8))
-        )
-    } else {
-        format!("{summary}  {elapsed}")
-    };
-
-    let mut line = LinkedLine::from_linked(vec![
-        LinkedSpan {
-            span: Span::styled(format!("  {glyph} "), Style::default().fg(glyph_fg)),
-            target: Some(HitTarget::ToggleToolGroup(ids.clone())),
-        },
-        LinkedSpan {
-            span: Span::styled(
-                truncate_width(&text, width.saturating_sub(5)),
-                Style::default().fg(theme.dim),
-            ),
-            target: Some(HitTarget::ToggleToolGroup(ids)),
-        },
-    ]);
     if is_selected {
         line.line_style = Some(Style::default().bg(theme.selection));
     }
@@ -296,6 +331,115 @@ pub(super) fn render_explore_expanded_header(
     ])
 }
 
+pub(super) fn push_thinking_lines(
+    lines: &mut Vec<LinkedLine>,
+    ids: Vec<u64>,
+    bodies: &[&str],
+    any_running: bool,
+    all_collapsed: bool,
+    width: usize,
+    theme: &Theme,
+) {
+    if all_collapsed {
+        let target = Some(HitTarget::ToggleReasoning(ids.clone()));
+        let mut spans = vec![LinkedSpan {
+            span: Span::raw("  "),
+            target: target.clone(),
+        }];
+        if any_running {
+            let salt = ids.first().copied().unwrap_or(1);
+            spans.extend(decrypt_spans("Thinking", 0, now_ms(), salt, theme, target));
+        } else {
+            spans.push(LinkedSpan {
+                span: Span::styled("> Thinking", Style::default().fg(theme.dim)),
+                target,
+            });
+        }
+        lines.push(LinkedLine::from_linked(spans));
+        return;
+    }
+    let target = Some(HitTarget::ToggleReasoning(ids.clone()));
+    let mut header = vec![LinkedSpan {
+        span: Span::styled("  v ", Style::default().fg(theme.dim)),
+        target: target.clone(),
+    }];
+    if any_running {
+        let salt = ids.first().copied().unwrap_or(1);
+        header.extend(decrypt_spans("Thinking", 0, now_ms(), salt, theme, target));
+    } else {
+        header.push(LinkedSpan {
+            span: Span::styled("Thinking", Style::default().fg(theme.dim)),
+            target,
+        });
+    }
+    lines.push(LinkedLine::from_linked(header));
+    for (idx, body) in bodies.iter().enumerate() {
+        if idx > 0 {
+            super::push_blank_linked(lines);
+        }
+        for rline in body.lines() {
+            for w in wrap_text(rline, width.saturating_sub(4)) {
+                lines.push(LinkedLine::from_line(ratatui::text::Line::from(vec![
+                    Span::styled("    ", Style::default().fg(theme.border)),
+                    Span::styled(w, Style::default().fg(theme.dim)),
+                ])));
+            }
+        }
+    }
+}
+
+pub(super) fn render_thinking_run(
+    slice: &[TranscriptItem],
+    width: usize,
+    theme: &Theme,
+    lines: &mut Vec<LinkedLine>,
+) -> bool {
+    let mut ids = Vec::new();
+    let mut bodies = Vec::new();
+    let mut any_running = false;
+    let mut all_collapsed = true;
+    for item in slice {
+        let TranscriptItem::Assistant {
+            id,
+            reasoning,
+            reasoning_collapsed,
+            done,
+            ..
+        } = item
+        else {
+            continue;
+        };
+        if !*done {
+            any_running = true;
+        }
+        if !reasoning.is_empty() {
+            ids.push(*id);
+            bodies.push(reasoning.as_str());
+            if !*reasoning_collapsed {
+                all_collapsed = false;
+            }
+        }
+    }
+    if bodies.is_empty() {
+        if !any_running {
+            return false;
+        }
+        super::push_blank_linked(lines);
+        let mut spans = vec![LinkedSpan {
+            span: Span::raw("  "),
+            target: None,
+        }];
+        spans.extend(decrypt_spans("Thinking", 0, now_ms(), 1, theme, None));
+        lines.push(LinkedLine::from_linked(spans));
+        super::push_blank_linked(lines);
+        return true;
+    }
+    super::push_blank_linked(lines);
+    push_thinking_lines(lines, ids, &bodies, any_running, all_collapsed, width, theme);
+    super::push_blank_linked(lines);
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_tool_header(
     app: &App,
@@ -314,13 +458,6 @@ pub(super) fn render_tool_header(
     theme: &Theme,
     is_selected: bool,
 ) -> LinkedLine {
-    let (glyph, glyph_style) = match status {
-        CardStatus::Queued => ("o", Style::default().fg(theme.warn)),
-        CardStatus::Running => (spinner(), Style::default().fg(theme.accent)),
-        CardStatus::Done => ("✓", Style::default().fg(theme.ok)),
-        CardStatus::Error => ("✗", Style::default().fg(theme.bad)),
-    };
-
     let elapsed = duration_ms.unwrap_or_else(|| now_ms().saturating_sub(started_ms));
     let mut meta_parts = vec![fmt_duration(elapsed)];
     if let Some(code) = exit_code.filter(|c| *c != 0) {
@@ -337,10 +474,24 @@ pub(super) fn render_tool_header(
         _ => None,
     };
 
-    let mut spans = vec![LinkedSpan {
-        span: Span::styled(format!("  {glyph} "), glyph_style),
-        target: Some(HitTarget::ToggleToolCard(id)),
-    }];
+    let mut spans = match status {
+        CardStatus::Running => vec![LinkedSpan {
+            span: Span::raw("  "),
+            target: Some(HitTarget::ToggleToolCard(id)),
+        }],
+        _ => {
+            let (glyph, glyph_style) = match status {
+                CardStatus::Queued => ("o", Style::default().fg(theme.warn)),
+                CardStatus::Done => ("✓", Style::default().fg(theme.ok)),
+                CardStatus::Error => ("✗", Style::default().fg(theme.bad)),
+                CardStatus::Running => unreachable!(),
+            };
+            vec![LinkedSpan {
+                span: Span::styled(format!("  {glyph} "), glyph_style),
+                target: Some(HitTarget::ToggleToolCard(id)),
+            }]
+        }
+    };
 
     if let Some((done_verb, run_verb, raw_path)) = file_verb {
         let rel = normalize_display_path(&app.session.cwd, Path::new(raw_path.trim()));
@@ -368,13 +519,28 @@ pub(super) fn render_tool_header(
             )
             .max(10);
 
-        spans.push(LinkedSpan {
-            span: Span::styled(
-                format!("{verb} "),
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-            ),
-            target: Some(HitTarget::ToggleToolCard(id)),
-        });
+        if status == CardStatus::Running {
+            spans.extend(decrypt_spans(
+                verb,
+                0,
+                elapsed,
+                id,
+                theme,
+                Some(HitTarget::ToggleToolCard(id)),
+            ));
+            spans.push(LinkedSpan {
+                span: Span::raw(" "),
+                target: Some(HitTarget::ToggleToolCard(id)),
+            });
+        } else {
+            spans.push(LinkedSpan {
+                span: Span::styled(
+                    format!("{verb} "),
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                ),
+                target: Some(HitTarget::ToggleToolCard(id)),
+            });
+        }
         spans.push(LinkedSpan {
             span: Span::styled(
                 truncate_width(&rel, budget),
@@ -428,15 +594,36 @@ pub(super) fn render_tool_header(
         let out_pill_w = if has_out { 7 } else { 0 };
         let info_pill_w = if !collapsed { 15 } else { 0 };
         let meta = format!("  {}", meta_parts.join(" - "));
-        let reserved = 4 + display_width(&meta) + out_pill_w + info_pill_w;
+        let run_phrase = (status == CardStatus::Running).then(|| running_tool_phrase(name));
+        let phrase_w = run_phrase.map(|p| display_width(p) + 2).unwrap_or(0);
+        let reserved = 4 + phrase_w + display_width(&meta) + out_pill_w + info_pill_w;
         let title_budget = width.saturating_sub(reserved).max(10);
-        let main_label = if !live_tail.is_empty() {
-            format!("{title}{live_tail}")
-        } else if !subtitle.is_empty() && title_budget > 24 {
-            format!("{title}  {subtitle}")
+        let raw_title = if run_phrase.is_some() {
+            title.strip_prefix("$ ").unwrap_or(title)
         } else {
-            title.to_string()
+            title
         };
+        let main_label = if !live_tail.is_empty() {
+            format!("{raw_title}{live_tail}")
+        } else if !subtitle.is_empty() && title_budget > 24 {
+            format!("{raw_title}  {subtitle}")
+        } else {
+            raw_title.to_string()
+        };
+        if let Some(phrase) = run_phrase {
+            spans.extend(decrypt_spans(
+                phrase,
+                0,
+                elapsed,
+                id,
+                theme,
+                Some(HitTarget::ToggleToolCard(id)),
+            ));
+            spans.push(LinkedSpan {
+                span: Span::raw("  "),
+                target: Some(HitTarget::ToggleToolCard(id)),
+            });
+        }
         spans.push(LinkedSpan {
             span: Span::styled(
                 truncate_width(&main_label, title_budget),
@@ -498,77 +685,4 @@ pub(super) fn render_tool_header(
         ll.line_style = Some(Style::default().bg(theme.selection));
     }
     ll
-}
-
-pub(super) fn draw_welcome(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let w = area.width as usize;
-    let mut rows = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "  Envoy  ",
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                truncate_width(&app.cwd_label(), w.saturating_sub(12)),
-                Style::default().fg(theme.text),
-            ),
-        ]),
-    ];
-
-    if let Some((prov, model)) = resolve_active_provider(&app.data_dir) {
-        let budget =
-            crate::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
-        rows.push(Line::from(vec![
-            Span::styled("  model  ", Style::default().fg(theme.dim)),
-            Span::styled(
-                format!(
-                    "{}  ({} - compact {})",
-                    model.model_id,
-                    budget.tier,
-                    fmt_tokens(budget.compact_at)
-                ),
-                Style::default().fg(theme.secondary),
-            ),
-        ]));
-    } else {
-        rows.push(Line::from(vec![
-            Span::styled("  auth   ", Style::default().fg(theme.dim)),
-            Span::styled("sign in with /login", Style::default().fg(theme.warn)),
-        ]));
-    }
-
-    let mcp = crate::mcp::config::load_mcp_configs(&app.data_dir, &app.session.cwd);
-    let skills = crate::skills::discover_skills(&app.data_dir, &app.session.cwd);
-    rows.push(Line::from(vec![
-        Span::styled("  tools  ", Style::default().fg(theme.dim)),
-        Span::styled(
-            format!(
-                "{} mcp - {} skills - perm:{}",
-                mcp.servers.len(),
-                skills.len(),
-                app.perm_mode.label()
-            ),
-            Style::default().fg(theme.text),
-        ),
-    ]));
-    rows.push(Line::from(""));
-    rows.push(Line::styled(
-        truncate_width(
-            "  Click any underlined file link to review in the right Inspector - Drag divider to resize",
-            w,
-        ),
-        Style::default().fg(theme.dim),
-    ));
-    rows.push(Line::styled(
-        truncate_width(
-            "  Shift+Tab permissions - Ctrl+B panel - Ctrl+O expand - / commands",
-            w,
-        ),
-        Style::default().fg(theme.dim),
-    ));
-
-    frame.render_widget(Paragraph::new(rows), area);
 }

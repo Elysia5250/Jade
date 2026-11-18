@@ -29,7 +29,17 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
             theme.accent
         };
         if app.agent_running {
-            right_spans.push(Span::styled("* ", Style::default().fg(theme.accent)));
+            right_spans.extend(decrypt_line_spans(
+                "working",
+                0,
+                now_ms(),
+                0x5354_4154,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(theme.dim),
+            ));
+            right_spans.push(Span::raw("  "));
         }
         right_spans.push(Span::styled(
             model.model_id.clone(),

@@ -1,9 +1,10 @@
 //! Transcript rendering with clear User/Assistant hierarchy and folded intermediate activity.
 use super::{ensure_trailing_blanks, push_blank_linked};
 use super::transcript_cards::{
-    draw_welcome, render_explore_expanded_header, render_explore_group, render_tool_header,
-    render_turn_summary, spinner,
+    push_thinking_lines, render_explore_expanded_header, render_explore_group,
+    render_thinking_run, render_tool_header, render_turn_summary,
 };
+use super::welcome::draw_welcome;
 use crate::tui::links::{inline_spans_linked, LinkedSpan};
 use crate::tui::*;
 
@@ -41,6 +42,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
             let expanded = app.expanded_explore_groups.contains(&first_id);
             let selected = app.focus == Focus::Transcript
                 && app.selected_card.is_some_and(|sel| (start..end).contains(&sel));
+            push_blank_linked(&mut lines);
             if expanded {
                 lines.push(render_turn_summary(
                     &app.session.items[start..end],
@@ -76,6 +78,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
                     false,
                 ));
             }
+            push_blank_linked(&mut lines);
             idx = end;
             last_notice = None;
             continue;
@@ -100,7 +103,23 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
 
         let is_selected = app.focus == Focus::Transcript && app.selected_card == Some(idx);
 
-        // Group consecutive collapsed explore/internal activity calls across empty thoughts.
+        // Merge consecutive reasoning-only Assistant turns into a single Thinking toggle.
+        if is_reasoning_only(item) {
+            let mut end = idx + 1;
+            while end < items_len
+                && (is_reasoning_only(&app.session.items[end])
+                    || is_transparent_notice(&app.session.items[end]))
+            {
+                end += 1;
+            }
+            if render_thinking_run(&app.session.items[idx..end], width, theme, &mut lines) {
+                last_notice = None;
+            }
+            idx = end;
+            continue;
+        }
+
+        // Group consecutive collapsed explore/command/non-edit calls across empty thoughts.
         if is_groupable_tool(item) {
             let start = idx;
             let mut end = idx + 1;
@@ -140,6 +159,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
 
             if tool_count >= 2 && all_collapsed {
                 last_notice = None;
+                push_blank_linked(&mut lines);
                 if !app.expanded_explore_groups.contains(&first_id) {
                     lines.push(render_explore_group(
                         &app.session.items[start..end],
@@ -172,11 +192,16 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
                         );
                     }
                 }
+                push_blank_linked(&mut lines);
                 idx = end;
                 continue;
             }
         }
 
+        let is_tool = matches!(item, TranscriptItem::Tool { .. });
+        if is_tool {
+            push_blank_linked(&mut lines);
+        }
         render_single_item(
             app,
             idx,
@@ -186,6 +211,9 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
             &mut lines,
             &mut last_notice,
         );
+        if is_tool {
+            push_blank_linked(&mut lines);
+        }
         idx += 1;
     }
 
@@ -227,16 +255,28 @@ fn render_single_item(
             let text_style = Style::default()
                 .fg(theme.text)
                 .add_modifier(Modifier::BOLD);
-            for raw_line in text.lines() {
+            let card_line_bg = Style::default().bg(card_bg);
+            let mut top_pad = LinkedLine::from_line(Line::styled("▌ ", bar_style));
+            top_pad.line_style = Some(card_line_bg);
+            lines.push(top_pad);
+            let raw_lines: Vec<&str> = if text.is_empty() {
+                vec![""]
+            } else {
+                text.lines().collect()
+            };
+            for raw_line in raw_lines {
                 for wrapped in wrap_text(raw_line, width.saturating_sub(3)) {
                     let mut ll = LinkedLine::from_line(Line::from(vec![
                         Span::styled("▌ ", bar_style),
                         Span::styled(wrapped, text_style),
                     ]));
-                    ll.line_style = Some(Style::default().bg(card_bg));
+                    ll.line_style = Some(card_line_bg);
                     lines.push(ll);
                 }
             }
+            let mut bot_pad = LinkedLine::from_line(Line::styled("▌ ", bar_style));
+            bot_pad.line_style = Some(card_line_bg);
+            lines.push(bot_pad);
             push_blank_linked(lines);
         }
         TranscriptItem::Assistant {
@@ -252,57 +292,31 @@ fn render_single_item(
                 return;
             }
             *last_notice = None;
-            let thought_only = text.trim().is_empty() && *done && error.is_none();
-            if !thought_only {
-                push_blank_linked(lines);
-            }
+            push_blank_linked(lines);
 
             if !reasoning.is_empty() {
-                if *reasoning_collapsed {
-                    let tail = reasoning
-                        .lines()
-                        .rev()
-                        .map(str::trim)
-                        .find(|l| !l.is_empty())
-                        .unwrap_or("");
-                    let label = if !*done && !tail.is_empty() {
-                        format!(
-                            "  {} Thinking - {}",
-                            spinner(),
-                            truncate_width(tail, width.saturating_sub(18))
-                        )
-                    } else if !*done {
-                        format!("  {} Thinking.", spinner())
-                    } else {
-                        "  > Thought".to_string()
-                    };
-                    lines.push(LinkedLine::from_linked(vec![LinkedSpan {
-                        span: Span::styled(label, Style::default().fg(theme.dim)),
-                        target: Some(HitTarget::ToggleReasoning(*id)),
-                    }]));
-                } else {
-                    lines.push(LinkedLine::from_linked(vec![LinkedSpan {
-                        span: Span::styled("  v Thinking", Style::default().fg(theme.dim)),
-                        target: Some(HitTarget::ToggleReasoning(*id)),
-                    }]));
-                    for rline in reasoning.lines() {
-                        for w in wrap_text(rline, width.saturating_sub(4)) {
-                            lines.push(LinkedLine::from_line(Line::from(vec![
-                                Span::styled("    ", Style::default().fg(theme.border)),
-                                Span::styled(w, Style::default().fg(theme.dim)),
-                            ])));
-                        }
-                    }
-                }
+                push_thinking_lines(
+                    lines,
+                    vec![*id],
+                    &[reasoning.as_str()],
+                    !*done,
+                    *reasoning_collapsed,
+                    width,
+                    theme,
+                );
+                push_blank_linked(lines);
             }
 
             let trimmed = text.trim_start_matches('\n');
             if trimmed.trim().is_empty() {
                 if !*done && reasoning.is_empty() {
-                    lines.push(LinkedLine::from_line(Line::styled(
-                        format!("  {} Thinking.", spinner()),
-                        Style::default().fg(theme.dim),
-                    )));
+                    let mut spans = vec![LinkedSpan {
+                        span: Span::raw("  "),
+                        target: None,
+                    }];
+                    spans.extend(decrypt_spans("Thinking", 0, now_ms(), *id, theme, None));
+                    lines.push(LinkedLine::from_linked(spans));
+                    push_blank_linked(lines);
                 }
             } else {
                 let body_w = width.saturating_sub(1).max(10);
@@ -379,9 +393,7 @@ fn render_single_item(
                     )));
                 }
             }
-            if !thought_only {
-                push_blank_linked(lines);
-            }
+            push_blank_linked(lines);
         }
         TranscriptItem::Tool {
             id,
@@ -500,6 +512,7 @@ fn render_single_item(
                 .find(|l| !l.is_empty())
                 .unwrap_or("");
             if !first.is_empty() {
+                push_blank_linked(lines);
                 let single = if text.lines().count() > 1 {
                     format!("{}…", truncate_width(first, width.saturating_sub(5)))
                 } else {
@@ -509,6 +522,7 @@ fn render_single_item(
                     Span::styled("  · ", Style::default().fg(theme.accent)),
                     Span::styled(single, style),
                 ])));
+                push_blank_linked(lines);
             }
         }
     }
@@ -517,7 +531,7 @@ fn render_single_item(
 fn is_groupable_tool(item: &TranscriptItem) -> bool {
     matches!(
         item,
-        TranscriptItem::Tool { name, status, .. }
+        TranscriptItem::Tool { name, .. }
             if matches!(
                 name.as_str(),
                 "read"
@@ -530,7 +544,33 @@ fn is_groupable_tool(item: &TranscriptItem) -> bool {
                     | "say"
                     | "exec"
                     | "shell"
-            ) && *status != CardStatus::Error
+                    | "skill"
+                    | "webfetch"
+                    | "delegate"
+                    | "ask"
+            )
+    )
+}
+
+fn is_reasoning_only(item: &TranscriptItem) -> bool {
+    matches!(
+        item,
+        TranscriptItem::Assistant {
+            text,
+            error: None,
+            ..
+        } if text.trim().is_empty()
+    )
+}
+
+fn is_transparent_notice(item: &TranscriptItem) -> bool {
+    matches!(
+        item,
+        TranscriptItem::Notice {
+            text,
+            is_error: false,
+            ..
+        } if text.starts_with("[monitor #")
     )
 }
 

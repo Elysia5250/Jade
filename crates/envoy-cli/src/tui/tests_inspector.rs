@@ -232,8 +232,8 @@ fn cursor_style_collapsed_explore_group_and_reasoning_expand_on_click() {
     let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
     let collapsed_text = render_text(&mut terminal, &mut app);
     assert!(
-        collapsed_text.contains("> Thought"),
-        "expected collapsed thought line:\n{collapsed_text}"
+        collapsed_text.contains("> Thinking"),
+        "expected collapsed thinking line:\n{collapsed_text}"
     );
     assert!(
         collapsed_text.contains("> Explored 3 files"),

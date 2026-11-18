@@ -90,12 +90,13 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
         );
     }
 
-    let column = centered_column(main_area, 108);
+    let column = centered_column(main_area, 96);
     let editor_inner_width = column.width.saturating_sub(8).max(10) as usize;
     let (visual_lines, cursor_row, cursor_col) =
         layout_editor_text(&app.input, app.input_cursor, editor_inner_width);
     let inner_rows = visual_lines.len().clamp(2, 8) as u16;
-    let editor_height = inner_rows + 2;
+    let v_pad: u16 = if main_area.height >= 16 { 1 } else { 0 };
+    let editor_height = inner_rows + 2 + v_pad * 2;
     let max_rows = inner_rows as usize;
     let editor_skip = if cursor_row >= max_rows {
         (cursor_row + 1 - max_rows).min(visual_lines.len().saturating_sub(max_rows))
@@ -164,9 +165,9 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
         let visible_row = cursor_row
             .saturating_sub(editor_skip)
             .min(max_rows.saturating_sub(1));
-        let y = editor_area.y + 1 + visible_row as u16;
+        let y = editor_area.y + 1 + v_pad + visible_row as u16;
         if x < editor_area.x + editor_area.width.saturating_sub(2)
-            && y < editor_area.y + editor_area.height.saturating_sub(1)
+            && y < editor_area.y + editor_area.height.saturating_sub(1 + v_pad)
         {
             frame.set_cursor_position((x, y));
         }

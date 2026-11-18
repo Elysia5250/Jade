@@ -108,3 +108,76 @@ pub(super) fn draw_workspace_picker(frame: &mut Frame, app: &mut App, theme: &Th
     }
     frame.render_widget(Paragraph::new(lines), inner);
 }
+
+pub(super) fn draw_welcome(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    let w = area.width as usize;
+    let mut rows = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "  Envoy  ",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                truncate_width(&app.cwd_label(), w.saturating_sub(12)),
+                Style::default().fg(theme.text),
+            ),
+        ]),
+    ];
+
+    if let Some((prov, model)) = resolve_active_provider(&app.data_dir) {
+        let budget =
+            crate::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
+        rows.push(Line::from(vec![
+            Span::styled("  model  ", Style::default().fg(theme.dim)),
+            Span::styled(
+                format!(
+                    "{}  ({} - compact {})",
+                    model.model_id,
+                    budget.tier,
+                    fmt_tokens(budget.compact_at)
+                ),
+                Style::default().fg(theme.secondary),
+            ),
+        ]));
+    } else {
+        rows.push(Line::from(vec![
+            Span::styled("  auth   ", Style::default().fg(theme.dim)),
+            Span::styled("sign in with /login", Style::default().fg(theme.warn)),
+        ]));
+    }
+
+    let mcp = crate::mcp::config::load_mcp_configs(&app.data_dir, &app.session.cwd);
+    let skills = crate::skills::discover_skills(&app.data_dir, &app.session.cwd);
+    rows.push(Line::from(vec![
+        Span::styled("  tools  ", Style::default().fg(theme.dim)),
+        Span::styled(
+            format!(
+                "{} mcp - {} skills - perm:{}",
+                mcp.servers.len(),
+                skills.len(),
+                app.perm_mode.label()
+            ),
+            Style::default().fg(theme.text),
+        ),
+    ]));
+    rows.push(Line::from(""));
+    rows.push(Line::styled(
+        truncate_width(
+            "  Click any underlined file link to review in the right Inspector - Drag divider to resize",
+            w,
+        ),
+        Style::default().fg(theme.dim),
+    ));
+    rows.push(Line::styled(
+        truncate_width(
+            "  Shift+Tab permissions - Ctrl+B panel - Ctrl+O expand - / commands",
+            w,
+        ),
+        Style::default().fg(theme.dim),
+    ));
+
+    frame.render_widget(Paragraph::new(rows), area);
+}

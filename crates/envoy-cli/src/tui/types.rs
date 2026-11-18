@@ -47,7 +47,7 @@ pub(crate) enum HitTarget {
     SelectChangedFile(usize),
     ToggleToolCard(u64),
     ToggleToolGroup(Vec<u64>),
-    ToggleReasoning(u64),
+    ToggleReasoning(Vec<u64>),
     OpenToolOutput(u64),
     OpenToolInspect(u64),
     OpenJobOutput(JobId),
