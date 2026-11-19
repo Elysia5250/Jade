@@ -17,10 +17,11 @@ pub use catalog::{
 };
 pub use fetch::fetch_provider_models;
 pub use prune::bound_tool_output;
+#[cfg(test)]
+pub(crate) use mask::mask_old_observations;
 pub use summary::{assemble_compacted_messages, split_head_tail, summarize_messages};
 pub use tokens::{
     context_used, estimate_turn_raw_tokens, estimate_turn_tokens, tools_overhead, TokenCalibration,
-    BUILTIN_TOOLS_TOKENS_ESTIMATE,
 };
 
 use crate::agent::events::AgentEvent;
@@ -188,25 +189,32 @@ async fn prepare_context_body(
 
     let mask_report = mask::mask_old_observations(messages, plan.tail_keep_tokens, calibration);
     let after_mask = estimate_turn_tokens(system, messages, tools_overhead, calibration);
+    let mask_freed = mask_report.messages_pruned > 0 && after_mask < before_tokens;
 
-    if !force && after_mask <= plan.compact_at {
-        if mask_report.messages_pruned > 0 {
-            return Ok(Some(CompactionOutcome {
-                messages: messages.clone(),
+    if after_mask <= plan.compact_at {
+        if mask_freed {
+            return Ok(Some(mask_outcome(
+                messages,
+                mask_report.messages_pruned,
                 before_tokens,
-                after_tokens: after_mask,
-                summary: format!(
-                    "Masked {} older tool outputs (~{} -> ~{} tokens).",
-                    mask_report.messages_pruned, before_tokens, after_mask
-                ),
-                pruned_only: true,
-            }));
+                after_mask,
+            )));
         }
-        return Ok(None);
+        if !force {
+            return Ok(None);
+        }
     }
 
     let (head, tail) = split_head_tail(messages, plan.tail_keep_tokens, force, calibration);
     if head.is_empty() {
+        if mask_freed {
+            return Ok(Some(mask_outcome(
+                messages,
+                mask_report.messages_pruned,
+                before_tokens,
+                after_mask,
+            )));
+        }
         return Ok(None);
     }
 
@@ -276,6 +284,29 @@ async fn prepare_context_body(
     }))
 }
 
+fn mask_outcome(
+    messages: &[ChatMessage],
+    pruned: usize,
+    before_tokens: u64,
+    after_tokens: u64,
+) -> CompactionOutcome {
+    CompactionOutcome {
+        messages: messages.to_vec(),
+        before_tokens,
+        after_tokens,
+        summary: format!(
+            "Masked {pruned} older tool outputs (~{before_tokens} -> ~{after_tokens} tokens)."
+        ),
+        pruned_only: true,
+    }
+}
+
+/// While a turn sits between the prune and compact thresholds, mask once.
+/// Later steps in that band must not rewrite the cached prefix.
+pub(crate) fn skip_inplace_mask(latched: bool, before_tokens: u64, plan: &BudgetPlan) -> bool {
+    latched && before_tokens > plan.prune_at && before_tokens <= plan.compact_at
+}
+
 /// Generate a full-session handoff summary for `/handoff` (Context Reset).
 #[allow(clippy::too_many_arguments)]
 pub async fn generate_handoff(
@@ -291,7 +322,7 @@ pub async fn generate_handoff(
     let before_tokens = estimate_turn_tokens(
         system,
         messages,
-        BUILTIN_TOOLS_TOKENS_ESTIMATE,
+        tools_overhead(&[]),
         TokenCalibration::default(),
     );
     let summary = summarize_messages(
@@ -307,8 +338,9 @@ pub async fn generate_handoff(
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
-        }],
-        BUILTIN_TOOLS_TOKENS_ESTIMATE,
+        
+            reasoning_blocks: Vec::new(),}],
+        tools_overhead(&[]),
         TokenCalibration::default(),
     );
     let title = derive_handoff_title(messages, focus);

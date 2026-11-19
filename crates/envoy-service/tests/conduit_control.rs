@@ -129,7 +129,7 @@ async fn dials_and_runs_a_job_through_the_control_socket() {
             let ws = WsByteStream::new(upgrade(stream, &headers).await);
             let server = server.clone();
             tokio::spawn(async move {
-                let _ = server.serve_stream("local", ws).await;
+                let _ = server.serve_stream(envoy_service::Caller::Local, ws).await;
             });
         }
     });

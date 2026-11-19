@@ -5,6 +5,7 @@
 //! the real boundary.
 
 pub mod audit;
+mod match_rule;
 pub mod paths;
 mod prompt;
 pub mod rules;
@@ -106,6 +107,22 @@ impl PermissionEngine {
         *self.mode.lock().unwrap() = mode;
     }
 
+    /// Fresh engine rooted at `cwd` / `target`, keeping this session's mode,
+    /// saved allows, and sandbox override. The next turn picks it up.
+    pub fn rebind_workspace(&self, cwd: PathBuf, target: String) -> Arc<Self> {
+        let next = Self::new(
+            self.data_dir.clone(),
+            cwd,
+            self.session_id.clone(),
+            target,
+            self.mode(),
+        );
+        *next.session_allows.lock().unwrap() = self.session_allows.lock().unwrap().clone();
+        next.set_skip_permissions(self.skip_permissions());
+        next.set_sandbox_override(self.sandbox_override());
+        next
+    }
+
     pub fn set_skip_permissions(&self, skip: bool) {
         *self.skip_permissions.lock().unwrap() = skip;
     }
@@ -161,14 +178,24 @@ impl PermissionEngine {
     }
 
     pub fn evaluate(&self, tool: &str, args: &Value) -> Decision {
+        self.evaluate_with_mcp(tool, args, None)
+    }
+
+    pub fn evaluate_with_mcp(
+        &self,
+        tool: &str,
+        args: &Value,
+        mcp_identity: Option<(&str, &str)>,
+    ) -> Decision {
         let policies = self.loaded_policies();
-        rules::evaluate_tool_call(
+        rules::evaluate_tool_call_with_mcp(
             &self.data_dir,
             &self.cwd,
             self.mode(),
             &policies,
             tool,
             args,
+            mcp_identity,
         )
     }
 
@@ -179,16 +206,34 @@ impl PermissionEngine {
         asks: &Arc<AskBroker>,
         tx: &mpsc::UnboundedSender<AgentEvent>,
     ) -> Result<ToolAuth> {
+        self.authorize_tool_call_with_mcp(tool, args, None, asks, tx)
+            .await
+    }
+
+    pub async fn authorize_tool_call_with_mcp(
+        &self,
+        tool: &str,
+        args: &Value,
+        mcp_identity: Option<(&str, &str)>,
+        asks: &Arc<AskBroker>,
+        tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) -> Result<ToolAuth> {
         let policies = self.loaded_policies();
         let mode = self.mode();
-        let decision =
-            rules::evaluate_tool_call(&self.data_dir, &self.cwd, mode, &policies, tool, args);
+        let read_only_mode = mode == PermissionMode::Plan;
+        let decision = rules::evaluate_tool_call_with_mcp(
+            &self.data_dir,
+            &self.cwd,
+            mode,
+            &policies,
+            tool,
+            args,
+            mcp_identity,
+        );
         let detail = summarize_call(tool, args);
 
         let skip_perms = self.skip_permissions() && mode != PermissionMode::Plan;
         let sandbox_ovr = self.sandbox_override();
-        let mut extra_rw = policies.extra_rw.clone();
-        extra_rw.extend(decision.extra_rw.iter().cloned());
 
         match decision.effect {
             Effect::Deny => {
@@ -210,11 +255,14 @@ impl PermissionEngine {
                 bail!("permission denied: {}", decision.reason);
             }
             Effect::Allow => {
+                // Only policy-configured extra_rw applies on automatic Allow;
+                // unapproved args cannot expand writable sandbox roots.
                 let sandbox = sandbox_for(
                     &self.cwd,
-                    &extra_rw,
+                    &policies.extra_rw,
                     decision.needs_net,
                     skip_perms,
+                    read_only_mode,
                     sandbox_ovr,
                 );
                 audit::record_decision(
@@ -235,7 +283,10 @@ impl PermissionEngine {
                 Ok(ToolAuth { sandbox })
             }
             Effect::Ask if skip_perms => {
-                let sandbox = sandbox_for(&self.cwd, &extra_rw, true, true, sandbox_ovr);
+                let mut extra_rw = policies.extra_rw.clone();
+                extra_rw.extend(decision.extra_rw.iter().cloned());
+                let sandbox =
+                    sandbox_for(&self.cwd, &extra_rw, true, true, read_only_mode, sandbox_ovr);
                 audit::record_decision(
                     &self.data_dir,
                     audit::PermissionAuditEntry {
@@ -298,10 +349,13 @@ impl PermissionEngine {
                     }
                 };
 
-                let (allow_net, full_host, resolution) = match choice {
-                    ApprovalChoice::OnceOffline => (false, false, "user_once_offline"),
-                    ApprovalChoice::OnceWithNet => (true, false, "user_once_net"),
-                    ApprovalChoice::OnceOutsideSandbox => (true, true, "user_once_unsandboxed"),
+                let (allow_net, full_host, include_extra_rw, resolution) = match choice {
+                    ApprovalChoice::OnceOffline => (false, false, false, "user_once_offline"),
+                    ApprovalChoice::OnceWithNet => (true, false, false, "user_once_net"),
+                    ApprovalChoice::OnceExpanded => (false, false, true, "user_once_expanded"),
+                    ApprovalChoice::OnceOutsideSandbox => {
+                        (true, true, true, "user_once_unsandboxed")
+                    }
                     ApprovalChoice::Session => {
                         if let Some(pat) = &decision.suggested_rule {
                             self.session_allows.lock().unwrap().push(PermissionRule {
@@ -310,7 +364,12 @@ impl PermissionEngine {
                                 pattern: pat.clone(),
                             });
                         }
-                        (decision.needs_net, false, "user_session")
+                        (
+                            decision.needs_net,
+                            false,
+                            decision.outside_workspace,
+                            "user_session",
+                        )
                     }
                     ApprovalChoice::Project => {
                         if let Some(pat) = &decision.suggested_rule {
@@ -321,7 +380,12 @@ impl PermissionEngine {
                                 pat,
                             );
                         }
-                        (decision.needs_net, false, "user_project")
+                        (
+                            decision.needs_net,
+                            false,
+                            decision.outside_workspace,
+                            "user_project",
+                        )
                     }
                     ApprovalChoice::Deny => {
                         audit::record_decision(
@@ -343,10 +407,21 @@ impl PermissionEngine {
                     }
                 };
 
+                let mut extra_rw = policies.extra_rw.clone();
+                if include_extra_rw {
+                    extra_rw.extend(decision.extra_rw.iter().cloned());
+                }
                 let sandbox = if full_host {
                     SandboxPolicy::DangerFullAccess
                 } else {
-                    sandbox_for(&self.cwd, &extra_rw, allow_net, false, sandbox_ovr)
+                    sandbox_for(
+                        &self.cwd,
+                        &extra_rw,
+                        allow_net,
+                        false,
+                        read_only_mode,
+                        sandbox_ovr,
+                    )
                 };
                 audit::record_decision(
                     &self.data_dir,
@@ -374,6 +449,7 @@ fn sandbox_for(
     extra_rw: &[String],
     allow_net: bool,
     skip_perms: bool,
+    read_only_mode: bool,
     override_policy: Option<SandboxOverride>,
 ) -> SandboxPolicy {
     match override_policy {
@@ -381,12 +457,24 @@ fn sandbox_for(
         Some(SandboxOverride::DangerFullAccess) => SandboxPolicy::DangerFullAccess,
         Some(SandboxOverride::ReadOnly) => SandboxPolicy::ReadOnly {
             cwd: cwd.display().to_string(),
-            allow_net,
+            allow_net: if read_only_mode { false } else { allow_net },
         },
-        Some(SandboxOverride::WorkspaceWrite) => SandboxPolicy::WorkspaceWrite {
+        Some(SandboxOverride::WorkspaceWrite) => {
+            if read_only_mode {
+                return SandboxPolicy::ReadOnly {
+                    cwd: cwd.display().to_string(),
+                    allow_net: false,
+                };
+            }
+            SandboxPolicy::WorkspaceWrite {
+                cwd: cwd.display().to_string(),
+                extra_rw: extra_rw.to_vec(),
+                allow_net,
+            }
+        }
+        None if read_only_mode => SandboxPolicy::ReadOnly {
             cwd: cwd.display().to_string(),
-            extra_rw: extra_rw.to_vec(),
-            allow_net,
+            allow_net: false,
         },
         None if skip_perms => SandboxPolicy::DangerFullAccess,
         None => SandboxPolicy::WorkspaceWrite {
@@ -418,3 +506,5 @@ fn sandbox_label(s: &SandboxPolicy) -> &'static str {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_security;

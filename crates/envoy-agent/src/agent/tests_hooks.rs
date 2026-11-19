@@ -32,6 +32,7 @@ async fn start_test_daemon(data_dir: &Path) -> tokio::sync::oneshot::Sender<()> 
     let _ = envoy_core::AgentConfigStore::open(data_dir.to_path_buf()).unwrap();
     let socket = crate::daemon::socket_path(data_dir);
     let listener = UnixListener::bind(&socket).unwrap();
+    crate::daemon::park_agent_sock(data_dir);
     let server = envoy_service::AgentServer::open_store(data_dir.to_path_buf()).unwrap();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
@@ -209,7 +210,8 @@ async fn loop_hooks_pipeline_permission_recheck_and_stop_reentry() {
             tool_calls: vec![],
             tool_call_id: None,
             tool_name: None,
-        }],
+        
+            reasoning_blocks: Vec::new(),}],
         asks: AskBroker::new(),
         steer: Arc::new(Mutex::new(vec![])),
         permissions: PermissionEngine::new(
@@ -225,6 +227,7 @@ async fn loop_hooks_pipeline_permission_recheck_and_stop_reentry() {
         hook_state_sink: None,
         turn_seq: 1,
         max_steps: None,
+        usage: None,
     };
 
     let opts = LoopOptions {
@@ -385,7 +388,8 @@ async fn subagent_start_block_fallback_stop_and_ordered_state_merge() {
 
     let mut parent_state = BTreeMap::new();
     parent_state.insert("keep".into(), json!(true));
-    let (out, all_ok, next_state) = execute_delegate(&host, "call_d", tasks, parent_state, &tx)
+    let (out, all_ok, next_state, _, _) =
+        execute_delegate(&host, "call_d", tasks, parent_state, &tx)
         .await
         .unwrap();
 

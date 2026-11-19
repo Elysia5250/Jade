@@ -89,7 +89,8 @@ async fn overflow_triggers_one_compaction_retry_and_second_failure_errors() {
             }],
             tool_call_id: None,
             tool_name: None,
-        },
+        
+            reasoning_blocks: Vec::new(),},
         ChatMessage {
             role: ChatRole::User,
             content: "latest request".into(),
@@ -97,7 +98,8 @@ async fn overflow_triggers_one_compaction_retry_and_second_failure_errors() {
             tool_calls: vec![],
             tool_call_id: None,
             tool_name: None,
-        },
+        
+            reasoning_blocks: Vec::new(),},
     ];
     let cfg = TurnConfig {
         data_dir: dir.clone(),
@@ -126,6 +128,7 @@ async fn overflow_triggers_one_compaction_retry_and_second_failure_errors() {
         hook_state_sink: None,
         turn_seq: 0,
         max_steps: None,
+        usage: None,
     };
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut prov = provider;

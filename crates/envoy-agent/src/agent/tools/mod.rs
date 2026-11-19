@@ -25,7 +25,7 @@ mod shell;
 mod skill;
 mod subagent;
 pub mod todo;
-mod web;
+pub(crate) mod web;
 
 pub(crate) use ask::ask_tool;
 use fs::{edit_tool, ls_tool, read_tool, write_tool};
@@ -49,6 +49,8 @@ pub(crate) struct ToolExecOutcome {
     pub(crate) text: String,
     pub(crate) ok: bool,
     pub(crate) updated_hook_state: Option<BTreeMap<String, Value>>,
+    pub(crate) child_input_tokens: u64,
+    pub(crate) child_output_tokens: u64,
 }
 
 fn resolve_path(cwd: &Path, raw: &str) -> String {
@@ -155,19 +157,21 @@ pub(crate) async fn run_prepared_tool_call(
 
     let start = Instant::now();
     let mut updated_hook_state = None;
+    let mut child_input_tokens = 0u64;
+    let mut child_output_tokens = 0u64;
     let res = if let Some(blocked) = &prepared.blocked_error {
         Err(anyhow!("{blocked}"))
     } else if !tool_filter.allows(&tc.name) {
         Err(anyhow!("tool `{}` is not enabled for this agent", tc.name))
-    } else if tc.name == "ask" {
-        ask_tool(asks, tx, args).await.map(|s| (s, None))
     } else {
+        let mcp_id = mcp.and_then(|m| m.tool_identity(&tc.name));
         match permissions
-            .authorize_tool_call(&tc.name, args, asks, tx)
+            .authorize_tool_call_with_mcp(&tc.name, args, mcp_id, asks, tx)
             .await
         {
             Err(e) => Err(e),
             Ok(auth) => match tc.name.as_str() {
+                "ask" => ask_tool(asks, tx, args).await.map(|s| (s, None)),
                 "exec" => exec_tool(remote, target, cwd, &tc.id, args, auth.sandbox, tx).await,
                 "read" => read_tool(remote, target, cwd, args)
                     .await
@@ -217,11 +221,15 @@ pub(crate) async fn run_prepared_tool_call(
                 "grep" => grep_tool(remote, target, cwd, args)
                     .await
                     .map(|s| (s, None)),
-                "webfetch" => webfetch_tool(args).await.map(|s| (s, None)),
+                "webfetch" => webfetch_tool(args, permissions, asks, tx)
+                    .await
+                    .map(|s| (s, None)),
                 "todo" => todo_tool(permissions.data_dir(), permissions.session_id(), args)
                     .map(|s| (s, None)),
                 "skill" => skill_tool(permissions.data_dir(), cwd, args).map(|s| (s, None)),
-                "job" => job_tool(remote, target, args).await.map(|s| (s, None)),
+                "job" => job_tool(remote, target, cwd, args)
+                    .await
+                    .map(|s| (s, None)),
                 "delegate" => {
                     match delegate_tool(
                         subagent_host,
@@ -232,8 +240,10 @@ pub(crate) async fn run_prepared_tool_call(
                     )
                     .await
                     {
-                        Ok((msg, exit_code, next_state)) => {
+                        Ok((msg, exit_code, next_state, child_in, child_out)) => {
                             updated_hook_state = Some(next_state);
+                            child_input_tokens = child_in;
+                            child_output_tokens = child_out;
                             Ok((msg, exit_code))
                         }
                         Err(e) => Err(e),
@@ -286,6 +296,8 @@ pub(crate) async fn run_prepared_tool_call(
                 text: truncate_tool_output(&text),
                 ok,
                 updated_hook_state,
+                child_input_tokens,
+                child_output_tokens,
             }
         }
         Err(e) => {
@@ -305,6 +317,8 @@ pub(crate) async fn run_prepared_tool_call(
                 text: format!("error: {msg}"),
                 ok: false,
                 updated_hook_state,
+                child_input_tokens,
+                child_output_tokens,
             }
         }
     }

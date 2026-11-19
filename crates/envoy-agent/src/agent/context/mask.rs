@@ -210,6 +210,7 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: None,
             tool_name: None,
+            reasoning_blocks: Vec::new(),
         }
     }
 
@@ -225,6 +226,7 @@ mod tests {
             }],
             tool_call_id: None,
             tool_name: None,
+            reasoning_blocks: Vec::new(),
         }
     }
 
@@ -236,6 +238,7 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: Some(id.into()),
             tool_name: Some(name.into()),
+            reasoning_blocks: Vec::new(),
         }
     }
 

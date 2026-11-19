@@ -27,6 +27,7 @@ async fn start_test_daemon(data_dir: &Path) -> tokio::sync::oneshot::Sender<()> 
     let _ = envoy_core::AgentConfigStore::open(data_dir.to_path_buf()).unwrap();
     let socket = crate::daemon::socket_path(data_dir);
     let listener = UnixListener::bind(&socket).unwrap();
+    crate::daemon::park_agent_sock(data_dir);
     let server = envoy_service::AgentServer::open_store(data_dir.to_path_buf()).unwrap();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
@@ -178,6 +179,7 @@ async fn session_start_and_user_prompt_submit_thread_hook_context_and_block() {
             hook_state_sink: Some(Arc::clone(&st.hook_state)),
             turn_seq,
             max_steps: None,
+            usage: None,
         }
     };
 

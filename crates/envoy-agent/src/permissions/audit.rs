@@ -27,16 +27,12 @@ pub fn record_decision(data_dir: &Path, mut entry: PermissionAuditEntry<'_>) {
     entry.detail = redact_secrets(&entry.detail);
     let path = audit_log_path(data_dir);
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = envoy_core::fs::ensure_private_dir(parent);
     }
     let Ok(line) = serde_json::to_string(&entry) else {
         return;
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
+    if let Ok(mut f) = envoy_core::fs::open_append_private(&path) {
         let _ = writeln!(f, "{line}");
     }
 }
@@ -50,6 +46,7 @@ pub fn now_ms() -> u64 {
 
 pub fn redact_secrets(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len().min(512));
+    let mut prev_was_bearer = false;
     for (idx, word) in raw.split_whitespace().enumerate() {
         if idx > 0 {
             out.push(' ');
@@ -58,7 +55,20 @@ pub fn redact_secrets(raw: &str) -> String {
             out.push('…');
             break;
         }
-        if is_secret_token(word) {
+        if prev_was_bearer {
+            prev_was_bearer = false;
+            let trailing_quote = word.chars().last().filter(|c| *c == '\'' || *c == '"');
+            out.push_str("[REDACTED]");
+            if let Some(q) = trailing_quote {
+                out.push(q);
+            }
+            continue;
+        }
+        let bare = word.trim_matches(|c| c == '"' || c == '\'');
+        if bare.eq_ignore_ascii_case("bearer") {
+            prev_was_bearer = true;
+            out.push_str(word);
+        } else if is_secret_token(word) {
             out.push_str("[REDACTED]");
         } else if let Some((k, v)) = word.split_once('=') {
             let kl = k.to_ascii_lowercase();
@@ -83,9 +93,13 @@ pub fn redact_secrets(raw: &str) -> String {
 fn is_secret_token(s: &str) -> bool {
     let s = s.trim_matches(|c| c == '"' || c == '\'');
     s.starts_with("sk-")
+        || s.starts_with("sk_live_")
         || s.starts_with("ghp_")
         || s.starts_with("gho_")
-        || s.starts_with("Bearer ")
+        || s.starts_with("ghs_")
+        || s.starts_with("xoxb-")
+        || s.starts_with("xoxp-")
+        || s.starts_with("AIza")
         || (s.len() > 28 && s.starts_with("AKIA"))
 }
 
@@ -94,11 +108,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn redacts_tokens_and_env_assignments() {
-        let out = redact_secrets("curl -H sk-secret123456 API_TOKEN=abc123 https://example.com");
-        assert!(!out.contains("sk-secret123456"));
-        assert!(!out.contains("abc123"));
-        assert!(out.contains("[REDACTED]"));
-        assert!(out.contains("https://example.com"));
+    fn redacts_tokens_bearer_and_env_assignments() {
+        let out = redact_secrets(
+            "curl -H 'Authorization: Bearer eyJhbGciOiSecret' -H sk-secret123456 API_TOKEN=abc123 https://example.com",
+        );
+        assert!(!out.contains("eyJhbGciOiSecret"), "{out}");
+        assert!(!out.contains("sk-secret123456"), "{out}");
+        assert!(!out.contains("abc123"), "{out}");
+        assert!(out.contains("Bearer [REDACTED]'"), "{out}");
+        assert!(out.contains("https://example.com"), "{out}");
     }
 }

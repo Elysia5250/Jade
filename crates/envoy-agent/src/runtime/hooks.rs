@@ -2,7 +2,7 @@
 //! `PostRewind`, and bounded `SessionEnd` on close/daemon shutdown.
 
 use super::ops::record_turn_checkpoint;
-use super::server::{Live, Runtime};
+use super::server::{Live, LivePhase, Runtime};
 use crate::agent::context::{
     generate_handoff, prepare_context, resolve_budget, tools_overhead, PreCompactHook,
     TokenCalibration,
@@ -30,29 +30,31 @@ impl Runtime {
         target: String,
         history: Vec<ChatMessage>,
     ) -> Arc<Mutex<Live>> {
-        let live = self.ensure(id.clone(), cwd, target, history);
-        let start_args = {
-            let mut state = live.lock().unwrap();
-            if state.session_started {
-                None
-            } else {
-                state.session_started = true;
-                let snap = state.hook_state.lock().unwrap().clone();
-                Some((
-                    state.hooks.clone(),
-                    state.cwd.clone(),
-                    state.target.clone(),
-                    state.permissions.mode().label().to_string(),
-                    snap,
-                ))
-            }
+        let (live, run_hooks) =
+            self.ensure_in(id.clone(), cwd, target, history, LivePhase::Initializing);
+        // Cancellation during SessionStart must not leave the phase stuck.
+        let _init = run_hooks.then(|| InitGuard::new(Arc::clone(&live)));
+        let start_args = if run_hooks {
+            let state = live.lock().unwrap();
+            let snap = state.hook_state.lock().unwrap().clone();
+            Some((
+                state.hooks.clone(),
+                state.cwd.clone(),
+                state.target.clone(),
+                state.permissions.mode().label().to_string(),
+                snap,
+            ))
+        } else {
+            None
         };
 
         if let Some((engine, cwd, target, perm_mode, snap)) = start_args {
             let mut ctx =
                 HookContext::new(id, cwd, target, perm_mode, HookEvent::SessionStart, snap);
             ctx.can_block = false;
-            let out = engine.dispatch(ctx).await;
+            // Stay under the client attach budget (5s) so SessionStart cannot
+            // outlive the first framed response.
+            let out = engine.dispatch_bounded(ctx, Some(4_000)).await;
 
             let mut state = live.lock().unwrap();
             *state.hook_state.lock().unwrap() = out.state;
@@ -76,6 +78,9 @@ impl Runtime {
                         duration_ms,
                     },
                 );
+            }
+            if state.phase == LivePhase::Initializing {
+                state.release();
             }
         }
         live
@@ -162,6 +167,8 @@ impl Runtime {
             record_turn_checkpoint(&live, Some(&final_prompt));
             {
                 let mut state = live.lock().unwrap();
+                crate::session::strip_prior_turn_reasoning(&mut state.messages);
+                crate::session::strip_prior_turn_reasoning(&mut cfg.history);
                 let msg = ChatMessage {
                     role: ChatRole::User,
                     content: model_content.clone(),
@@ -169,7 +176,8 @@ impl Runtime {
                     tool_calls: Vec::new(),
                     tool_call_id: None,
                     tool_name: None,
-                };
+                
+                    reasoning_blocks: Vec::new(),};
                 state.messages.push(msg.clone());
                 cfg.history.push(msg);
                 self.publish(
@@ -266,6 +274,26 @@ impl Runtime {
                 Some(remaining.min(SHUTDOWN_HOOK_TIMEOUT_MS)),
             )
             .await;
+        }
+    }
+}
+
+struct InitGuard {
+    live: Arc<Mutex<Live>>,
+}
+
+impl InitGuard {
+    fn new(live: Arc<Mutex<Live>>) -> Self {
+        Self { live }
+    }
+}
+
+impl Drop for InitGuard {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.live.lock() {
+            if state.phase == LivePhase::Initializing {
+                state.release();
+            }
         }
     }
 }
@@ -368,7 +396,7 @@ pub(crate) async fn run_manual_context_op(
         messages,
         TokenCalibration::default(),
         &plan,
-        tools_overhead(0),
+        tools_overhead(&[]),
         true,
         focus,
         None,

@@ -65,7 +65,14 @@ pub struct CheckpointStore {
 
 impl CheckpointStore {
     pub fn load(data_dir: PathBuf, session_id: String) -> Self {
-        let path = store_path(&data_dir, &session_id);
+        let Ok(path) = store_path(&data_dir, &session_id) else {
+            return Self {
+                data_dir,
+                session_id,
+                next_id: 1,
+                checkpoints: Vec::new(),
+            };
+        };
         let persisted: PersistedCheckpoints = std::fs::read_to_string(&path)
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
@@ -92,6 +99,18 @@ impl CheckpointStore {
         messages: Vec<ChatMessage>,
         remaining_user_turns: usize,
     ) -> u64 {
+        let id = self.insert_turn(prompt, messages, remaining_user_turns);
+        let _ = self.save();
+        id
+    }
+
+    /// In-memory insert. Callers that hold `Live`'s lock persist with [`Self::queued_write`].
+    pub(crate) fn insert_turn(
+        &mut self,
+        prompt: &str,
+        messages: Vec<ChatMessage>,
+        remaining_user_turns: usize,
+    ) -> u64 {
         let id = self.next_id.max(1);
         self.next_id = id + 1;
         let cp = Checkpoint {
@@ -107,7 +126,6 @@ impl CheckpointStore {
             let excess = self.checkpoints.len() - MAX_CHECKPOINTS_PER_SESSION;
             self.checkpoints.drain(..excess);
         }
-        let _ = self.save();
         id
     }
 
@@ -119,15 +137,32 @@ impl CheckpointStore {
         before: String,
         restorable_before: bool,
     ) {
+        if self.note_file_change(checkpoint_id, path, existed_before, before, restorable_before) {
+            let _ = self.save();
+        }
+    }
+
+    /// Records the first baseline for `path` unless it lives under a scratch worktree.
+    pub(crate) fn note_file_change(
+        &mut self,
+        checkpoint_id: u64,
+        path: String,
+        existed_before: bool,
+        before: String,
+        restorable_before: bool,
+    ) -> bool {
+        if path_has_worktree_component(&path) {
+            return false;
+        }
         let Some(cp) = self.checkpoints.iter_mut().find(|c| c.id == checkpoint_id) else {
-            return;
+            return false;
         };
         cp.file_baselines.entry(path).or_insert(FileBaseline {
             existed: existed_before,
             content: before,
             restorable: restorable_before || !existed_before,
         });
-        let _ = self.save();
+        true
     }
 
     pub fn list_summaries(&self) -> Vec<CheckpointSummary> {
@@ -161,25 +196,38 @@ impl CheckpointStore {
     }
 
     pub fn commit_rewind(&mut self, idx: usize) -> Checkpoint {
-        let target = self.checkpoints[idx].clone();
-        self.checkpoints.truncate(idx);
+        let target = self.take_rewind(idx);
         let _ = self.save();
         target
     }
 
+    pub(crate) fn take_rewind(&mut self, idx: usize) -> Checkpoint {
+        let target = self.checkpoints[idx].clone();
+        self.checkpoints.truncate(idx);
+        target
+    }
+
     fn save(&self) -> Result<()> {
-        let dir = checkpoints_dir(&self.data_dir);
-        std::fs::create_dir_all(&dir)?;
-        let tmp_dir = self.data_dir.join("tmp");
-        std::fs::create_dir_all(&tmp_dir)?;
+        let (path, data) = self.queued_write()?;
+        Self::write_queued(&path, &data)
+    }
+
+    /// JSON payload for a caller that drops the session lock before the disk write.
+    pub(crate) fn queued_write(&self) -> Result<(PathBuf, Vec<u8>)> {
+        let path = store_path(&self.data_dir, &self.session_id)?;
         let payload = PersistedCheckpoints {
             next_id: self.next_id,
             checkpoints: self.checkpoints.clone(),
         };
-        let data = serde_json::to_string(&payload)?;
-        let tmp = tmp_dir.join(format!("cp-{}.json.tmp", self.session_id));
-        std::fs::write(&tmp, data)?;
-        std::fs::rename(&tmp, store_path(&self.data_dir, &self.session_id))?;
+        let data = serde_json::to_vec(&payload)?;
+        Ok((path, data))
+    }
+
+    pub(crate) fn write_queued(path: &Path, data: &[u8]) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            envoy_core::fs::ensure_private_dir(parent)?;
+        }
+        envoy_core::fs::write_atomic_sync(path, data, 0o600)?;
         Ok(())
     }
 }
@@ -203,11 +251,7 @@ pub async fn apply_file_baselines(
         }
         if base.existed {
             if local {
-                let p = Path::new(path);
-                if let Some(parent) = p.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                match std::fs::write(p, base.content.as_bytes()) {
+                match restore_local_file(Path::new(path), base.content.as_bytes()) {
                     Ok(()) => restored_files.push(path.clone()),
                     Err(e) => skipped_files.push(format!("{path} ({e})")),
                 }
@@ -284,18 +328,54 @@ fn checkpoints_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("checkpoints")
 }
 
-fn store_path(data_dir: &Path, session_id: &str) -> PathBuf {
-    let safe_id: String = session_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    checkpoints_dir(data_dir).join(format!("{safe_id}.json"))
+fn store_path(data_dir: &Path, session_id: &str) -> Result<PathBuf> {
+    crate::session::checked_session_id(session_id)?;
+    Ok(checkpoints_dir(data_dir).join(format!("{session_id}.json")))
+}
+
+fn path_has_worktree_component(path: &str) -> bool {
+    Path::new(path).components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::Normal(name)
+                if name.to_string_lossy().ends_with(".worktrees")
+        )
+    })
+}
+
+/// Writes `content` via a sibling temp file. Symlinks are refused so a rewind
+/// cannot replace a link target outside the workspace. An existing file keeps
+/// its permission bits.
+fn restore_local_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "refusing to write through a symlink",
+            ));
+        }
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let tmp = path.with_file_name(format!(".{file_name}.envoy-restore"));
+    std::fs::write(&tmp, content)?;
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if meta.file_type().is_file() {
+            let _ = std::fs::set_permissions(&tmp, meta.permissions());
+        }
+    }
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
 }
 
 fn compact_label(prompt: &str) -> String {
@@ -353,7 +433,8 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: None,
             tool_name: None,
-        }];
+        
+            reasoning_blocks: Vec::new(),}];
         let c2 = store.begin_turn("second prompt", msg1, 1);
         store.record_file_change(c2, "/w/a.txt".into(), true, "v2".into(), true);
         store.record_file_change(c2, "/w/new.txt".into(), false, String::new(), true);
@@ -425,6 +506,45 @@ mod tests {
         assert_eq!(skipped.len(), 1);
         assert_eq!(std::fs::read_to_string(&existing).unwrap(), "original");
         assert!(!created.exists());
+
+        let link = dir.join("link.txt");
+        std::os::unix::fs::symlink(&existing, &link).unwrap();
+        let mut linked = BTreeMap::new();
+        linked.insert(
+            link.display().to_string(),
+            FileBaseline {
+                existed: true,
+                content: "pwned".into(),
+                restorable: true,
+            },
+        );
+        let (_, _, skipped) = apply_file_baselines(&remote, "local", &linked).await;
+        assert_eq!(std::fs::read_to_string(&existing).unwrap(), "original");
+        assert!(skipped.iter().any(|line| line.contains("symlink")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn worktree_paths_and_unsafe_ids_never_hit_the_checkpoint_file() {
+        let dir = tmpdir("guard");
+        let mut store = CheckpointStore::load(dir.clone(), "s1".into());
+        let id = store.begin_turn("t", vec![], 0);
+        store.record_file_change(
+            id,
+            "/repo/.worktrees/wt/file.txt".into(),
+            true,
+            "scratch".into(),
+            true,
+        );
+        let (_idx, net) = store.plan_rewind(Some(id)).unwrap();
+        assert!(net.is_empty());
+
+        let escaped = CheckpointStore::load(dir.clone(), "../escape".into());
+        assert!(escaped.list_summaries().is_empty());
+        assert!(escaped.queued_write().is_err());
+        assert!(!dir.join("checkpoints").join("_.json").exists());
+        assert!(!dir.join("escape.json").exists());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

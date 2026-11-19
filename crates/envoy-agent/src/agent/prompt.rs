@@ -4,6 +4,67 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const ENV_PREFIX: &str = "<environment>\n";
 pub(crate) const ENV_ACK: &str = "Continuing with this environment.";
+pub(crate) const ENV_UPDATE_PREFIX: &str = "<environment_update>\n";
+pub(crate) const PRE_MODEL_PREFIX: &str = "<pre_model_context>\n";
+
+/// Skills, memory, and the agent catalog captured once per turn.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EnvDiskSnapshot {
+    skills: Option<String>,
+    memory: Option<String>,
+    agents: Option<String>,
+}
+
+impl EnvDiskSnapshot {
+    pub(crate) fn capture(data_dir: &Path, cwd: &Path, depth: u8) -> Self {
+        let skills = crate::skills::prompt_skills(data_dir, cwd);
+        let skills = crate::skills::format_skills_catalog(&skills).map(|catalog| {
+            format!("## Available skills (load full steps on demand with `skill`)\n{catalog}")
+        });
+        if depth != 0 {
+            return Self {
+                skills,
+                memory: None,
+                agents: None,
+            };
+        }
+        let memory = crate::memory::prompt_block(data_dir);
+        let found = super::subagent::discover_agents(data_dir, cwd);
+        let agents = super::subagent::format_agents_catalog(&found).map(|catalog| {
+            let rule = super::delegate_pref::instruction(data_dir);
+            format!("## Available subagents (invoke with `delegate`)\n{rule}\n{catalog}")
+        });
+        Self {
+            skills,
+            memory,
+            agents,
+        }
+    }
+
+    pub(crate) fn note(&self, data_dir: &Path, session_id: &str, depth: u8) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(skills) = &self.skills {
+            parts.push(skills.clone());
+        }
+        if depth == 0 {
+            if let Some(memory) = &self.memory {
+                parts.push(memory.clone());
+            }
+            if let Some(agents) = &self.agents {
+                parts.push(agents.clone());
+            }
+            if let Some(todos) = super::tools::todo::format_active_todos_xml(data_dir, session_id)
+            {
+                parts.push(format!("## Active session checklist\n{todos}"));
+            }
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n\n"))
+        }
+    }
+}
 
 pub(crate) fn build_system_prompt(target: &str, cwd: &Path) -> String {
     let mut prompt = format!(
@@ -76,7 +137,7 @@ fn local_sandbox_line(backend: &envoy_core::sandbox::SandboxBackend) -> String {
             "Local sandbox: none. Permission checks are the only gate. Do not assume `~/.ssh`, `.env`, or `/tmp` are isolated.".to_string()
         }
         envoy_core::sandbox::SandboxBackend::Landlock(_) => {
-            "Local sandbox: Landlock. The working directory and `/tmp` are writable; other paths are read-only. Network is off when the kernel ABI supports it. This does not hide `~/.ssh`, `~/.aws`, or `.env`. `/tmp` is the host temporary directory.".to_string()
+            "Local sandbox: Landlock. The working directory and a private `$TMPDIR` are writable; system paths are read-only and `$HOME` secrets (`~/.ssh`, `~/.aws`, `~/.envoy`) are unreachable. Network is off when the kernel ABI supports it. Inside a writable working directory, Landlock does not hide `.env` or block `.git`. `$TMPDIR` lasts one command; put scratch shared across commands inside the working directory.".to_string()
         }
         envoy_core::sandbox::SandboxBackend::Bwrap(_)
         | envoy_core::sandbox::SandboxBackend::Seatbelt(_) => {
@@ -99,39 +160,52 @@ pub(crate) fn environment_note_for_depth(
     session_id: &str,
     depth: u8,
 ) -> Option<String> {
-    let mut parts = Vec::new();
-    let skills = crate::skills::prompt_skills(data_dir, cwd);
-    if let Some(catalog) = crate::skills::format_skills_catalog(&skills) {
-        parts.push(format!(
-            "## Available skills (load full steps on demand with `skill`)\n{catalog}"
-        ));
+    EnvDiskSnapshot::capture(data_dir, cwd, depth).note(data_dir, session_id, depth)
+}
+
+struct VolatileTail {
+    environment_update: Option<String>,
+    pre_model: Option<String>,
+}
+
+fn is_env_update(msg: &ChatMessage) -> bool {
+    msg.role == ChatRole::User && msg.content.starts_with(ENV_UPDATE_PREFIX)
+}
+
+fn is_pre_model(msg: &ChatMessage) -> bool {
+    msg.role == ChatRole::User && msg.content.starts_with(PRE_MODEL_PREFIX)
+}
+
+fn take_volatile_tail(messages: &mut Vec<ChatMessage>) -> VolatileTail {
+    let mut tail = VolatileTail {
+        environment_update: None,
+        pre_model: None,
+    };
+    while let Some(last) = messages.last() {
+        if is_env_update(last) {
+            tail.environment_update = Some(messages.pop().expect("tail").content);
+        } else if is_pre_model(last) {
+            tail.pre_model = Some(messages.pop().expect("tail").content);
+        } else {
+            break;
+        }
     }
-    if depth == 0 {
-        if let Some(memory) = crate::memory::prompt_block(data_dir) {
-            parts.push(memory);
-        }
-        let agents = super::subagent::discover_agents(data_dir, cwd);
-        if let Some(catalog) = super::subagent::format_agents_catalog(&agents) {
-            let rule = super::delegate_pref::instruction(data_dir);
-            parts.push(format!(
-                "## Available subagents (invoke with `delegate`)\n{rule}\n{catalog}"
-            ));
-        }
-        if let Some(todos) = super::tools::todo::format_active_todos_xml(data_dir, session_id) {
-            parts.push(format!("## Active session checklist\n{todos}"));
-        }
+    tail
+}
+
+fn push_volatile_tail(messages: &mut Vec<ChatMessage>, tail: VolatileTail) {
+    if let Some(content) = tail.environment_update {
+        messages.push(env_message(content));
     }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("\n\n"))
+    if let Some(content) = tail.pre_model {
+        messages.push(env_message(content));
     }
 }
 
 pub(crate) fn sync_environment(messages: &mut Vec<ChatMessage>, note: Option<&str>) {
+    let mut tail = take_volatile_tail(messages);
     let Some(note) = note.filter(|text| !text.trim().is_empty()) else {
-        let pinned = take_environment(messages);
-        let _ = pinned;
+        push_volatile_tail(messages, tail);
         return;
     };
     let content = format!("{ENV_PREFIX}{note}\n</environment>");
@@ -139,11 +213,28 @@ pub(crate) fn sync_environment(messages: &mut Vec<ChatMessage>, note: Option<&st
         .first()
         .is_some_and(|msg| msg.content.starts_with(ENV_PREFIX))
     {
-        messages[0].content = content;
+        if messages[0].content == content {
+            tail.environment_update = None;
+        } else {
+            tail.environment_update = Some(format!(
+                "{ENV_UPDATE_PREFIX}{note}\n</environment_update>"
+            ));
+        }
+        push_volatile_tail(messages, tail);
         return;
     }
+    push_volatile_tail(messages, tail);
     messages.insert(0, ack_message());
     messages.insert(0, env_message(content));
+}
+
+/// Pre-model hook text rides the tail. It never rewrites the system prefix.
+pub(crate) fn sync_pre_model_tail(messages: &mut Vec<ChatMessage>, extra: Option<&str>) {
+    let mut tail = take_volatile_tail(messages);
+    tail.pre_model = extra
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| format!("{PRE_MODEL_PREFIX}{text}\n</pre_model_context>"));
+    push_volatile_tail(messages, tail);
 }
 
 pub(crate) fn take_environment(messages: &mut Vec<ChatMessage>) -> Vec<ChatMessage> {
@@ -177,6 +268,7 @@ fn env_message(content: String) -> ChatMessage {
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: None,
+        reasoning_blocks: Vec::new(),
     }
 }
 
@@ -188,6 +280,7 @@ fn ack_message() -> ChatMessage {
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: None,
+        reasoning_blocks: Vec::new(),
     }
 }
 
@@ -319,11 +412,11 @@ mod tests {
     fn landlock_prompt_does_not_claim_hidden_secrets() {
         use envoy_core::sandbox::SandboxBackend;
         let landlock = local_sandbox_line(&SandboxBackend::Landlock(4));
-        assert!(landlock.contains("does not hide"));
+        assert!(landlock.contains("does not hide `.env`"));
         assert!(landlock.contains("`~/.ssh`"));
         assert!(landlock.contains("`~/.aws`"));
-        assert!(landlock.contains("`.env`"));
-        assert!(landlock.contains("host temporary directory"));
+        assert!(landlock.contains("`~/.envoy`"));
+        assert!(landlock.contains("`$TMPDIR` lasts one command"));
         assert!(!landlock.contains("are hidden"));
 
         let full = local_sandbox_line(&SandboxBackend::Seatbelt(PathBuf::from(

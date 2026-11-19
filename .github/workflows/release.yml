@@ -44,8 +44,11 @@ jobs:
             exit 1
           fi
 
+      - name: Test
+        run: cargo test --workspace --locked
+
       - name: Build
-        run: cargo build --release -p envoy-cli
+        run: cargo build --release --locked -p envoy-cli
 
       - name: Package
         shell: bash
@@ -54,6 +57,9 @@ jobs:
           name="envoy-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir -p "stage/$name"
           cp target/release/envoy "stage/$name/envoy"
+          if [ -f LICENSE ]; then
+            cp LICENSE "stage/$name/LICENSE"
+          fi
           tar -C stage -czf "$name.tar.gz" "$name"
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"

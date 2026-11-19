@@ -35,6 +35,8 @@ pub(crate) struct PendingTree {
     pub path: PathBuf,
     pub branch: String,
     pub message: String,
+    /// Only a successful child report is committed and merged.
+    pub ok: bool,
 }
 
 #[derive(Debug)]
@@ -48,6 +50,22 @@ pub(crate) struct TreeSettlement {
 
 pub(crate) fn repo_ready(cwd: &Path) -> bool {
     main_root(cwd).is_ok() && branch_of(cwd).is_ok()
+}
+
+/// A real git checkout that is dirty or detached must not host parallel writers.
+/// A directory that is not a repository returns `None` so the batch can run in place.
+pub(crate) fn isolation_refusal(cwd: &Path) -> Option<String> {
+    if main_root(cwd).is_err() {
+        return None;
+    }
+    if branch_of(cwd).is_err() {
+        return Some("refusing parallel writers on a detached HEAD".into());
+    }
+    match dirty(cwd) {
+        Ok(true) => Some("refusing parallel writers on a dirty worktree".into()),
+        Ok(false) => None,
+        Err(error) => Some(error),
+    }
 }
 
 pub(crate) fn create_branch_tree(cwd: &Path, index: usize) -> Result<Created, String> {
@@ -99,7 +117,15 @@ pub(crate) fn merge_into(cwd: &Path, branch: &str) -> Result<MergeInto, String> 
 
 pub(crate) fn remove_tree_at(path: &Path) -> Result<(), String> {
     let main = main_root(path)?;
-    git_text(&main, &["worktree", "remove", &path.display().to_string()])?;
+    git_text(
+        &main,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            &path.display().to_string(),
+        ],
+    )?;
     Ok(())
 }
 
@@ -107,68 +133,95 @@ pub(crate) fn settle_trees(session: &Path, trees: &[PendingTree]) -> Vec<TreeSet
     let mut merge_at = Vec::new();
     let mut out = Vec::with_capacity(trees.len());
     for (ordinal, tree) in trees.iter().enumerate() {
+        if !tree.ok {
+            out.push(abandon(tree, "task failed"));
+            continue;
+        }
         match commit_all(&tree.path, &tree.message) {
-            Ok(CommitAll::Clean) => out.push(settled(tree, remove_clean(&tree.path), false)),
+            Ok(CommitAll::Clean) => out.push(finish_clean(session, tree)),
             Ok(CommitAll::Committed) => merge_at.push(ordinal),
-            Ok(CommitAll::Failed(error)) => {
-                out.push(settled(tree, format!("commit failed: {error}"), true));
-            }
-            Err(error) => out.push(settled(tree, format!("commit failed: {error}"), true)),
+            Ok(CommitAll::Failed(error)) => out.push(abandon(tree, &format!("commit failed: {error}"))),
+            Err(error) => out.push(abandon(tree, &format!("commit failed: {error}"))),
         }
     }
     let mut stop: Option<String> = None;
     for ordinal in merge_at {
         let tree = &trees[ordinal];
         if let Some(reason) = &stop {
-            out.push(settled(
-                tree,
-                format!("not merged ({reason}); left at {}", tree.path.display()),
-                true,
-            ));
+            out.push(abandon(tree, &format!("not merged ({reason})")));
             continue;
         }
         match merge_into(session, &tree.branch) {
-            Ok(MergeInto::Merged) => out.push(settled(
-                tree,
-                format!(
-                    "merged {} into the current branch; worktree {}",
-                    tree.branch,
-                    tree.path.display()
-                ),
-                false,
-            )),
+            Ok(MergeInto::Merged) => out.push(finish_merged(session, tree)),
             Ok(MergeInto::Conflict(message)) => {
+                abort_merge(session);
                 stop = Some(format!("merge conflict on {}", tree.branch));
-                out.push(settled(tree, format!("merge conflict: {message}"), true));
+                out.push(abandon(tree, &format!("merge conflict: {message}")));
             }
             Ok(MergeInto::Failed(message)) => {
                 stop = Some(format!("merge failed on {}", tree.branch));
-                out.push(settled(tree, format!("merge failed: {message}"), true));
+                out.push(abandon(tree, &format!("merge failed: {message}")));
             }
             Err(message) => {
                 stop = Some(format!("merge failed on {}", tree.branch));
-                out.push(settled(tree, format!("merge failed: {message}"), true));
+                out.push(abandon(tree, &format!("merge failed: {message}")));
             }
         }
     }
     out
 }
 
-fn remove_clean(path: &Path) -> String {
-    match remove_tree_at(path) {
-        Ok(()) => "no changes; worktree removed".into(),
-        Err(error) => format!("no changes; left in place: {error}"),
-    }
+fn abort_merge(cwd: &Path) {
+    let _ = git(cwd, &["merge", "--abort"]);
 }
 
-fn settled(tree: &PendingTree, detail: String, failed: bool) -> TreeSettlement {
-    let removed = detail.starts_with("no changes; worktree removed");
+fn delete_branch(repo: &Path, branch: &str) -> Result<(), String> {
+    let main = main_root(repo).unwrap_or_else(|_| repo.to_path_buf());
+    git_text(&main, &["branch", "-D", branch])?;
+    Ok(())
+}
+
+fn abandon(tree: &PendingTree, why: &str) -> TreeSettlement {
+    let (removed, extra) = match remove_tree_at(&tree.path) {
+        Ok(()) => (
+            true,
+            format!("worktree removed; branch {} kept", tree.branch),
+        ),
+        Err(error) => (
+            false,
+            format!("left at {}: {error}", tree.path.display()),
+        ),
+    };
     TreeSettlement {
         index: tree.index,
         path: tree.path.clone(),
-        detail,
+        detail: format!("{why}; {extra}"),
         removed,
-        failed,
+        failed: true,
+    }
+}
+
+fn finish_clean(session: &Path, tree: &PendingTree) -> TreeSettlement {
+    let removed = remove_tree_at(&tree.path).is_ok();
+    let _ = delete_branch(session, &tree.branch);
+    TreeSettlement {
+        index: tree.index,
+        path: tree.path.clone(),
+        detail: "no changes; worktree removed".into(),
+        removed,
+        failed: false,
+    }
+}
+
+fn finish_merged(session: &Path, tree: &PendingTree) -> TreeSettlement {
+    let removed = remove_tree_at(&tree.path).is_ok();
+    let _ = delete_branch(session, &tree.branch);
+    TreeSettlement {
+        index: tree.index,
+        path: tree.path.clone(),
+        detail: format!("merged {} into the current branch", tree.branch),
+        removed,
+        failed: false,
     }
 }
 
@@ -291,12 +344,14 @@ mod tests {
                     path: left.path.clone(),
                     branch: left.branch.clone(),
                     message: "subagent: left".into(),
+                    ok: true,
                 },
                 PendingTree {
                     index: 2,
                     path: right.path.clone(),
                     branch: right.branch,
                     message: "subagent: right".into(),
+                    ok: true,
                 },
             ],
         );
@@ -309,7 +364,8 @@ mod tests {
             std::fs::read_to_string(root.join("right.txt")).unwrap(),
             "R\n"
         );
-        assert!(left.path.is_dir());
+        assert!(!left.path.exists());
+        assert!(!right.path.exists());
         cleanup(&root);
     }
 
@@ -340,22 +396,77 @@ mod tests {
             "{settled:?}"
         );
         let note = std::fs::read_to_string(root.join("note.txt")).unwrap();
-        assert!(note.contains("<<<<<<<"), "{note}");
-        assert!(git(&root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+        assert_eq!(note, "one\n");
+        assert!(!git(&root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"])
             .unwrap()
             .status
             .success());
+        assert!(
+            git_text(&root, &["status", "--porcelain"])
+                .unwrap()
+                .is_empty()
+        );
         assert!(!root.join("other.txt").exists());
-        assert!(third.path.is_dir());
+        assert!(!third.path.exists());
+        cleanup(&root);
+    }
+
+    #[test]
+    fn only_the_successful_tree_is_merged() {
+        let root = init_repo();
+        let ok_tree = create_branch_tree(&root, 1).unwrap();
+        let bad = create_branch_tree(&root, 2).unwrap();
+        std::fs::write(ok_tree.path.join("ok.txt"), "yes\n").unwrap();
+        std::fs::write(bad.path.join("bad.txt"), "no\n").unwrap();
+        let settled = settle_trees(
+            &root,
+            &[
+                pending_ok(1, &ok_tree, "subagent: ok", true),
+                pending_ok(2, &bad, "subagent: bad", false),
+            ],
+        );
+        let good = settled.iter().find(|item| item.index == 1).unwrap();
+        let failed = settled.iter().find(|item| item.index == 2).unwrap();
+        assert!(!good.failed && good.removed, "{settled:?}");
+        assert!(failed.failed && failed.removed, "{settled:?}");
+        assert_eq!(std::fs::read_to_string(root.join("ok.txt")).unwrap(), "yes\n");
+        assert!(!root.join("bad.txt").exists());
+        assert!(!ok_tree.path.exists());
+        assert!(!bad.path.exists());
+        assert!(!super::branch_exists(&root, &ok_tree.branch).unwrap());
+        assert!(super::branch_exists(&root, &bad.branch).unwrap());
+        cleanup(&root);
+    }
+
+    #[test]
+    fn dirty_and_detached_roots_refuse_parallel_writers() {
+        let root = init_repo();
+        assert!(isolation_refusal(&root).is_none());
+        std::fs::write(root.join("note.txt"), "dirty\n").unwrap();
+        let reason = isolation_refusal(&root).unwrap();
+        assert!(reason.contains("dirty"), "{reason}");
+        git_ok(&root, &["checkout", "--", "note.txt"]);
+        git_ok(&root, &["checkout", "--detach"]);
+        let reason = isolation_refusal(&root).unwrap();
+        assert!(reason.contains("detached"), "{reason}");
+        let missing = std::env::temp_dir().join(format!("envoy-not-a-repo-{}", std::process::id()));
+        std::fs::create_dir_all(&missing).unwrap();
+        assert!(isolation_refusal(&missing).is_none());
+        let _ = std::fs::remove_dir_all(&missing);
         cleanup(&root);
     }
 
     fn pending(index: usize, created: &Created, message: &str) -> PendingTree {
+        pending_ok(index, created, message, true)
+    }
+
+    fn pending_ok(index: usize, created: &Created, message: &str, ok: bool) -> PendingTree {
         PendingTree {
             index,
             path: created.path.clone(),
             branch: created.branch.clone(),
             message: message.into(),
+            ok,
         }
     }
 }

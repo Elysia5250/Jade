@@ -102,7 +102,7 @@ impl EphemeralServer {
         if daemon::is_running(data_dir).await {
             return Ok(None);
         }
-        std::fs::create_dir_all(data_dir)?;
+        envoy_core::fs::ensure_private_dir(data_dir)?;
 
         let mut b = [0u8; 4];
         let _ = getrandom::fill(&mut b);
@@ -120,16 +120,12 @@ impl EphemeralServer {
             b[2],
             b[3]
         ));
-        std::fs::create_dir_all(&dir)?;
+        envoy_core::fs::ensure_private_dir(&dir)?;
 
         let socket = dir.join("envoy.sock");
         let listener = tokio::net::UnixListener::bind(&socket)
             .with_context(|| format!("binding {}", socket.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
-        }
+        envoy_core::fs::set_mode_strict(&socket, 0o600)?;
 
         let host = std::sync::Arc::new(envoy_service::StoreHost::open(data_dir.to_path_buf())?);
         let server = AgentServer::new(dir.clone(), host);
@@ -245,7 +241,7 @@ pub(crate) async fn run_with_writers<WOut: Write, WErr: Write>(
     };
 
     let started = Instant::now();
-    let runtime = Runtime::new(ctx.data_dir.clone());
+    let runtime = Runtime::with_conduit(ctx.data_dir.clone(), ctx.conduit.clone());
     let live = runtime
         .ensure_with_hooks(
             session.id.clone(),
@@ -304,28 +300,39 @@ pub(crate) async fn run_with_writers<WOut: Write, WErr: Write>(
                     tool_calls: done.tool_calls,
                     duration_ms: started.elapsed().as_millis() as u64,
                 };
-                writeln!(out, "{}", serde_json::to_string_pretty(&report)?)?;
-                let _ = out.flush();
+                write_report(out, &report)
+            } else {
+                Ok(())
             }
-            Ok(())
         }
         Err(turn_err) => {
-            if args.output_format == OutputFormat::Json {
+            let (messages, usage) = live.lock().unwrap().snapshot_progress();
+            if !messages.is_empty() {
+                session.messages = messages;
+            }
+            session.input_tokens = session.input_tokens.max(usage.input_tokens);
+            session.output_tokens = session.output_tokens.max(usage.output_tokens);
+            session.prompt_tokens = session.prompt_tokens.max(usage.context_tokens);
+            session.touch();
+            let _ = save_session(&ctx.data_dir, &session);
+
+            let written = if args.output_format == OutputFormat::Json {
                 let report = JsonReport {
                     session_id: session.id.clone(),
                     ok: false,
                     result: String::new(),
-                    error: Some(turn_err.clone()),
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    context_tokens: 0,
-                    tool_calls: 0,
+                    error: Some(turn_err.message.clone()),
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    context_tokens: usage.context_tokens,
+                    tool_calls: turn_err.tool_calls,
                     duration_ms: started.elapsed().as_millis() as u64,
                 };
-                writeln!(out, "{}", serde_json::to_string_pretty(&report)?)?;
-                let _ = out.flush();
-            }
-            Err(anyhow::anyhow!("{turn_err}"))
+                write_report(out, &report)
+            } else {
+                Ok(())
+            };
+            written.and(Err(anyhow::anyhow!("{}", turn_err.message)))
         }
     };
 
@@ -334,6 +341,12 @@ pub(crate) async fn run_with_writers<WOut: Write, WErr: Write>(
         srv.shutdown().await;
     }
     result
+}
+
+fn write_report(out: &mut impl Write, report: &JsonReport) -> Result<()> {
+    writeln!(out, "{}", serde_json::to_string_pretty(report)?)?;
+    out.flush()?;
+    Ok(())
 }
 
 mod output;
@@ -535,6 +548,9 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 1,
                 context_tokens: 1,
+                cache_read_tokens: 0,
+                cache_create_tokens: 0,
+                calibration_factor: 1.0,
             },
         })
         .unwrap();

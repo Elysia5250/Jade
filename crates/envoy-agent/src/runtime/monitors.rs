@@ -24,6 +24,8 @@ const MAX_MATCHED_LINES_PER_FIRE: usize = 50;
 struct MonitorEntry {
     info: MonitorInfo,
     target: String,
+    data_dir: PathBuf,
+    local_socket: Option<PathBuf>,
     cancel_tx: watch::Sender<bool>,
     task: Option<JoinHandle<()>>,
 }
@@ -34,6 +36,25 @@ impl Drop for MonitorEntry {
         if let Some(handle) = self.task.take() {
             handle.abort();
         }
+        if !self.info.owns_job {
+            return;
+        }
+        let target = self.target.clone();
+        let job_id = self.info.job_id;
+        let data_dir = self.data_dir.clone();
+        let local_socket = self.local_socket.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            let dialer: Box<dyn AgentDialer> =
+                match (local_socket, target == "local" || target.is_empty()) {
+                    (Some(sock), true) => Box::new(UnixDialer::new(sock)),
+                    _ => dialer_for(&data_dir, &target, None),
+                };
+            let remote: Remote<Box<dyn AgentDialer>> = Remote::new(dialer);
+            let _ = remote.cancel(&target, job_id).await;
+        });
     }
 }
 
@@ -73,6 +94,23 @@ impl MonitorHub {
     pub(crate) fn active_list(&self) -> Vec<MonitorInfo> {
         let g = self.inner.lock().unwrap();
         snapshot_locked(&g)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_active_for_test(&self, info: MonitorInfo) {
+        let (cancel_tx, _rx) = watch::channel(false);
+        let id = info.id;
+        self.inner.lock().unwrap().monitors.insert(
+            id,
+            MonitorEntry {
+                info,
+                target: "local".into(),
+                data_dir: self.data_dir.clone(),
+                local_socket: None,
+                cancel_tx,
+                task: None,
+            },
+        );
     }
 
     fn record_trigger(&self, id: u64) -> Option<(MonitorInfo, bool, Vec<MonitorInfo>)> {
@@ -150,6 +188,8 @@ impl MonitorBroker for MonitorHub {
                 MonitorEntry {
                     info: info.clone(),
                     target: spec.target.clone(),
+                    data_dir: self.data_dir.clone(),
+                    local_socket: self.local_socket.lock().unwrap().clone(),
                     cancel_tx,
                     task: None,
                 },

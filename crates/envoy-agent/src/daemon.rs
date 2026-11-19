@@ -85,13 +85,17 @@ pub fn launchd_plist(exe: &Path, data_dir: &Path) -> String {
     )
 }
 
+fn systemd_quote(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 pub fn systemd_unit(exe: &Path, data_dir: &Path) -> String {
     format!(
         "[Unit]\nDescription=Envoy agent daemon\nAfter=network-online.target\n\n\
          [Service]\nExecStart={} --data-dir {} serve\nRestart=on-failure\nRestartSec=5\n\n\
          [Install]\nWantedBy=default.target\n",
-        exe.display(),
-        data_dir.display()
+        systemd_quote(&exe.display().to_string()),
+        systemd_quote(&data_dir.display().to_string())
     )
 }
 
@@ -236,22 +240,104 @@ impl InstanceLock {
     }
 }
 
+async fn agent_sock_ready(data_dir: &Path) -> bool {
+    tokio::net::UnixStream::connect(crate::runtime::socket_path(data_dir))
+        .await
+        .is_ok()
+}
+
 /// Connect to the daemon, starting it detached if it is not up yet.
+///
+/// `is_running` only checks the job socket. This also waits until `agent.sock`
+/// accepts a connection, which is what the console attaches to.
 pub async fn ensure(data_dir: &Path) -> Result<()> {
     if is_running(data_dir).await {
-        return Ok(());
+        wait_for_agent_sock(data_dir).await?;
+        return probe_agent_protocol(data_dir).await;
     }
     spawn(data_dir)?;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(50)).await;
-        if is_running(data_dir).await {
-            return Ok(());
+        if is_running(data_dir).await && agent_sock_ready(data_dir).await {
+            return probe_agent_protocol(data_dir).await;
         }
     }
     bail!(
         "the envoy daemon did not come up; see {}",
         log_path(data_dir).display()
     )
+}
+
+/// Confirm `agent.sock` speaks this binary's protocol. A mismatch returns a
+/// hint to stop the old daemon. This never signals the running process.
+async fn probe_agent_protocol(data_dir: &Path) -> Result<()> {
+    let mut stream = tokio::net::UnixStream::connect(crate::runtime::socket_path(data_dir))
+        .await
+        .context("connecting to agent.sock for the version handshake")?;
+    let result = tokio::time::timeout(Duration::from_secs(5), handshake_probe(&mut stream)).await;
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) => Err(annotate_handshake(err)),
+        Err(_) => bail!(
+            "agent.sock did not finish the version handshake within 5s. Stop the old daemon with `envoy daemon stop` and start this binary again"
+        ),
+    }
+}
+
+async fn handshake_probe(stream: &mut tokio::net::UnixStream) -> Result<()> {
+    use crate::runtime::hello::{
+        protocol_mismatch_message, read_hello, write_hello, AGENT_PROTOCOL_VERSION,
+    };
+    write_hello(stream, 0).await?;
+    let hello = read_hello(stream).await?;
+    if hello.protocol_version != AGENT_PROTOCOL_VERSION {
+        bail!(
+            "{}",
+            protocol_mismatch_message(hello.protocol_version, AGENT_PROTOCOL_VERSION)
+        );
+    }
+    Ok(())
+}
+
+fn annotate_handshake(err: anyhow::Error) -> anyhow::Error {
+    if err.to_string().contains("envoy daemon stop") {
+        return err;
+    }
+    anyhow::anyhow!(
+        "{err:#}. Stop the old daemon with `envoy daemon stop` and start this binary again"
+    )
+}
+
+async fn wait_for_agent_sock(data_dir: &Path) -> Result<()> {
+    for _ in 0..100 {
+        if agent_sock_ready(data_dir).await {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    bail!(
+        "envoy is listening but agent.sock is not ready; see {}",
+        log_path(data_dir).display()
+    )
+}
+
+/// In-process job servers bind `envoy.sock` without `envoy serve`. `ensure`
+/// also requires `agent.sock` to accept, so those tests park an idle listener.
+#[cfg(test)]
+pub(crate) fn park_agent_sock(data_dir: &Path) {
+    let path = crate::runtime::socket_path(data_dir);
+    let _ = std::fs::remove_file(&path);
+    let listener = tokio::net::UnixListener::bind(&path)
+        .unwrap_or_else(|err| panic!("binding {}: {err}", path.display()));
+    tokio::spawn(async move {
+        use crate::runtime::hello::{read_hello, write_hello};
+        while let Ok((mut stream, _)) = listener.accept().await {
+            if read_hello(&mut stream).await.is_err() {
+                continue;
+            }
+            let _ = write_hello(&mut stream, 0).await;
+        }
+    });
 }
 
 /// Spawn `envoy serve` detached from this process (own session, output to a
@@ -278,11 +364,23 @@ pub fn spawn(data_dir: &Path) -> Result<()> {
     unsafe {
         use std::os::unix::process::CommandExt;
         cmd.pre_exec(|| {
-            libc::setsid();
+            // Double-fork: the intermediate exits so the daemon is reparented
+            // and this process can wait without leaving a zombie.
+            let pid = libc::fork();
+            if pid < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if pid > 0 {
+                libc::_exit(0);
+            }
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
             Ok(())
         });
     }
-    cmd.spawn().context("spawning the envoy daemon")?;
+    let mut child = cmd.spawn().context("spawning the envoy daemon")?;
+    let _ = child.wait();
     Ok(())
 }
 
@@ -292,6 +390,9 @@ pub fn stop(data_dir: &Path) -> Result<bool> {
     let Some(pid) = text.trim().parse::<i32>().ok() else {
         return Ok(false);
     };
+    if pid <= 0 || pid == std::process::id() as i32 {
+        return Ok(false);
+    }
     #[cfg(unix)]
     unsafe {
         if libc::kill(pid, libc::SIGTERM) != 0 {
@@ -318,10 +419,21 @@ pub async fn run_server(
             _ = &mut shutdown => break,
             accepted = listener.accept() => match accepted {
                 Ok((stream, _)) => {
+                    #[cfg(unix)]
+                    {
+                        let same_user = stream
+                            .peer_cred()
+                            .map(|cred| cred.uid() == unsafe { libc::geteuid() })
+                            .unwrap_or(false);
+                        if !same_user {
+                            tracing::warn!("rejected local socket connection from another uid");
+                            continue;
+                        }
+                    }
                     let server = server.clone();
                     tokio::spawn(async move {
                         if let Err(e) = server
-                            .serve_stream(envoy_proto::LOCAL_CALLER, stream)
+                            .serve_stream(envoy_core::Caller::Local, stream)
                             .await
                         {
                             tracing::debug!(error = %e, "client stream ended");
@@ -356,7 +468,9 @@ mod tests {
 
         let unit = systemd_unit(exe, dir);
         assert!(
-            unit.contains("ExecStart=/Users/u/.local/bin/envoy --data-dir /Users/u/.envoy serve")
+            unit.contains(
+                "ExecStart=\"/Users/u/.local/bin/envoy\" --data-dir \"/Users/u/.envoy\" serve"
+            )
         );
         assert!(unit.contains("Restart=on-failure"));
     }
@@ -460,6 +574,16 @@ mod tests {
         let _ = stop_tx.send(());
         task.await.unwrap();
         assert!(!socket.exists(), "the socket was not cleaned up");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stop_refuses_non_positive_and_self_pids() {
+        let dir = tmpdir();
+        for bad in ["0", "-1", "-42", &std::process::id().to_string()] {
+            std::fs::write(pid_path(&dir), bad).unwrap();
+            assert!(!stop(&dir).unwrap(), "must refuse pid {bad}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

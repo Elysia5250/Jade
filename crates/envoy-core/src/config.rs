@@ -32,10 +32,35 @@ pub struct AgentConfigStore {
     pub config: AgentConfig,
 }
 
+/// Authenticated origin of a service request.
+///
+/// Only same-user local Unix socket connections (verified via `SO_PEERCRED`)
+/// or in-process callers construct [`Caller::Local`]; remote Conduit handoffs
+/// must always use [`Caller::Remote`] so a peer named `"local"` cannot bypass
+/// [`gate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Caller {
+    Local,
+    Remote(String),
+}
+
+impl Caller {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Local => envoy_proto::LOCAL_CALLER,
+            Self::Remote(id) => id.as_str(),
+        }
+    }
+
+    pub fn is_local(&self) -> bool {
+        matches!(self, Self::Local)
+    }
+}
+
 impl AgentConfigStore {
     pub fn open(root: PathBuf) -> Result<Self> {
-        std::fs::create_dir_all(&root)?;
-        std::fs::create_dir_all(root.join("tmp"))?;
+        crate::fs::ensure_private_dir(&root)?;
+        crate::fs::ensure_private_dir(&root.join("tmp"))?;
         let path = root.join("agent.json");
         let config = if path.exists() {
             let raw = std::fs::read_to_string(&path)?;
@@ -53,15 +78,16 @@ impl AgentConfigStore {
         if path.exists() {
             let raw = std::fs::read_to_string(&path)?;
             self.config = serde_json::from_str(&raw)?;
+        } else {
+            self.config = AgentConfig::default();
         }
         Ok(())
     }
 
     pub fn save(&self) -> Result<()> {
         let data = serde_json::to_string_pretty(&self.config)?;
-        let tmp = self.root.join("tmp").join("agent.json.tmp");
-        std::fs::write(&tmp, data)?;
-        std::fs::rename(&tmp, self.root.join("agent.json")).with_context(|| "write agent.json")?;
+        crate::fs::write_atomic_sync(&self.root.join("agent.json"), data.as_bytes(), 0o600)
+            .with_context(|| "write agent.json")?;
         Ok(())
     }
 
@@ -98,22 +124,24 @@ fn home_dir() -> Option<PathBuf> {
 
 /// Why a call is refused, or `None` when it may run.
 ///
-/// Same-user local connections ([`envoy_proto::LOCAL_CALLER`]) bypass the gate:
+/// Same-user local connections ([`Caller::Local`]) bypass the gate:
 /// `enabled` and the allowlist govern *remote* callers, and a local shell can
 /// run the same commands anyway.
-pub fn gate(cfg: &AgentConfig, caller: &str) -> Option<String> {
-    if caller == envoy_proto::LOCAL_CALLER {
-        return None;
-    }
-    if !cfg.enabled {
-        return Some("agent disabled on this device (envoy enable)".into());
-    }
-    if cfg.allow.iter().any(|d| d == caller) {
-        None
-    } else {
-        Some(format!(
-            "caller {caller} is not allowlisted here (envoy allow {caller})"
-        ))
+pub fn gate(cfg: &AgentConfig, caller: &Caller) -> Option<String> {
+    match caller {
+        Caller::Local => None,
+        Caller::Remote(id) => {
+            if !cfg.enabled {
+                return Some("agent disabled on this device (envoy enable)".into());
+            }
+            if cfg.allow.iter().any(|d| d == id) {
+                None
+            } else {
+                Some(format!(
+                    "caller {id} is not allowlisted here (envoy allow {id})"
+                ))
+            }
+        }
     }
 }
 
@@ -131,16 +159,37 @@ mod tests {
 
     #[test]
     fn gate_refuses_until_enabled_and_allowlisted() {
-        assert!(gate(&cfg(false, &["dev-a"]), "dev-a").is_some());
-        let denied = gate(&cfg(true, &["dev-a"]), "dev-b").unwrap();
+        assert!(gate(&cfg(false, &["dev-a"]), &Caller::Remote("dev-a".into())).is_some());
+        let denied = gate(&cfg(true, &["dev-a"]), &Caller::Remote("dev-b".into())).unwrap();
         assert!(denied.contains("not allowlisted"), "{denied}");
-        assert!(gate(&cfg(true, &["dev-a"]), "dev-a").is_none());
+        assert!(gate(&cfg(true, &["dev-a"]), &Caller::Remote("dev-a".into())).is_none());
     }
 
     #[test]
-    fn local_callers_bypass_the_remote_gate() {
-        assert!(gate(&cfg(false, &[]), envoy_proto::LOCAL_CALLER).is_none());
-        assert!(gate(&cfg(true, &[]), envoy_proto::LOCAL_CALLER).is_none());
+    fn local_callers_bypass_but_remote_named_local_cannot() {
+        assert!(gate(&cfg(false, &[]), &Caller::Local).is_none());
+        assert!(gate(&cfg(true, &[]), &Caller::Local).is_none());
+        assert!(gate(&cfg(false, &["local"]), &Caller::Remote("local".into())).is_some());
+        assert!(gate(&cfg(true, &[]), &Caller::Remote("local".into())).is_some());
+    }
+
+    #[test]
+    fn reload_resets_to_disabled_when_agent_json_is_removed() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("agent-reload-{n}"));
+        let mut store = AgentConfigStore::open(dir.clone()).unwrap();
+        store.set_enabled(true).unwrap();
+        store.allow("peer-1".into()).unwrap();
+        assert!(store.config.enabled);
+
+        std::fs::remove_file(dir.join("agent.json")).unwrap();
+        store.reload().unwrap();
+        assert!(!store.config.enabled);
+        assert!(store.config.allow.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

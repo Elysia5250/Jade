@@ -7,6 +7,7 @@
 
 pub mod client;
 pub mod conduit;
+mod policy;
 pub mod remote;
 pub mod server;
 pub mod transport;
@@ -18,6 +19,7 @@ pub use conduit::{
     default_control_socket, spawn_accept_pool, ConduitClient, ConduitDialer, Device, DevicesReply,
     Status, WsByteStream, DEFAULT_POOL,
 };
+pub use envoy_core::Caller;
 pub use envoy_proto::{
     GrepHit, Hello, Job, JobId, JobResult, JobState, LogRecord, SandboxPolicy, SubmitRequest,
     TaskSpec,

@@ -10,7 +10,7 @@ use crate::auth::{Credential, ModelRef, ProviderProtocol, StoredProvider};
 use crate::hooks::HookEngine;
 use crate::permissions::{PermissionEngine, PermissionMode};
 use crate::session::{ChatMessage, ChatRole};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -49,10 +49,63 @@ fn proc_fd_count() -> usize {
         .unwrap_or(0)
 }
 
+/// Inodes of non-listening TCP sockets for `port`. `/proc/self/fd` is process-wide,
+/// so the abort check counts these sockets instead of every fd other tests open.
+fn live_socket_inodes(port: u16) -> HashSet<String> {
+    let mut inodes = HashSet::new();
+    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for line in text.lines().skip(1) {
+            let mut cols = line.split_whitespace();
+            let Some(local) = cols.nth(1) else { continue };
+            let Some(remote) = cols.next() else { continue };
+            let Some(state) = cols.next() else { continue };
+            let local_port = local
+                .rsplit_once(':')
+                .and_then(|(_, hex)| u16::from_str_radix(hex, 16).ok());
+            let remote_port = remote
+                .rsplit_once(':')
+                .and_then(|(_, hex)| u16::from_str_radix(hex, 16).ok());
+            if local_port != Some(port) && remote_port != Some(port) {
+                continue;
+            }
+            if state.eq_ignore_ascii_case("0A") {
+                continue;
+            }
+            // tx/rx, timer, retransmits, uid, timeout, then inode.
+            let Some(inode) = cols.nth(5) else { continue };
+            inodes.insert(inode.to_string());
+        }
+    }
+    inodes
+}
+
+fn open_fds_for_inodes(inodes: &HashSet<String>) -> usize {
+    let Ok(entries) = std::fs::read_dir("/proc/self/fd") else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| {
+            let Ok(target) = std::fs::read_link(entry.path()) else {
+                return false;
+            };
+            let text = target.to_string_lossy();
+            let Some(rest) = text.strip_prefix("socket:[") else {
+                return false;
+            };
+            inodes.contains(rest.trim_end_matches(']'))
+        })
+        .count()
+}
+
 async fn start_test_daemon(data_dir: &Path) -> tokio::sync::oneshot::Sender<()> {
     let _ = envoy_core::AgentConfigStore::open(data_dir.to_path_buf()).unwrap();
     let socket = crate::daemon::socket_path(data_dir);
     let listener = UnixListener::bind(&socket).unwrap();
+    crate::daemon::park_agent_sock(data_dir);
     let server = envoy_service::AgentServer::open_store(data_dir.to_path_buf()).unwrap();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
@@ -178,7 +231,8 @@ async fn stress_250_step_loop_with_compaction_and_fd_rss_profile() {
             tool_calls: vec![],
             tool_call_id: None,
             tool_name: None,
-        }],
+        
+            reasoning_blocks: Vec::new(),}],
         asks: AskBroker::new_headless(),
         steer: Arc::new(Mutex::new(vec![])),
         permissions: PermissionEngine::new(
@@ -194,6 +248,7 @@ async fn stress_250_step_loop_with_compaction_and_fd_rss_profile() {
         hook_state_sink: None,
         turn_seq: 1,
         max_steps: Some(250),
+        usage: None,
     };
 
     let opts = LoopOptions {
@@ -342,7 +397,7 @@ async fn stress_8way_parallel_subagents_and_midflight_abort() {
 
     let (tx, _rx) = mpsc::unbounded_channel();
     let t0 = Instant::now();
-    let (report, all_ok, _state) =
+    let (report, all_ok, _state, _, _) =
         execute_delegate(&host, "call-1", tasks.clone(), BTreeMap::new(), &tx)
             .await
             .unwrap();
@@ -354,20 +409,26 @@ async fn stress_8way_parallel_subagents_and_midflight_abort() {
 
     // Now test mid-flight abort of an 8-way stalled batch.
     stall.store(1, Ordering::SeqCst);
-    let fd_before = proc_fd_count();
     let stalled_fut = execute_delegate(&host, "call-2", tasks, BTreeMap::new(), &tx);
     let res = tokio::time::timeout(Duration::from_millis(120), stalled_fut).await;
     assert!(res.is_err(), "stalled 8-way batch should time out cleanly");
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    let fd_after = proc_fd_count();
-    assert!(
-        fd_after <= fd_before + 4,
-        "FD leak after subagent abort: {fd_before}->{fd_after}"
+    let port = addr.port();
+    let mut lingering = usize::MAX;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        lingering = open_fds_for_inodes(&live_socket_inodes(port));
+        if lingering == 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        lingering, 0,
+        "stalled provider sockets stayed open after abort on port {port}"
     );
 
     let _ = stop_daemon.send(());
     let _ = std::fs::remove_dir_all(&dir);
     eprintln!(
-        "[stress_sub8] 8-way fan-out={batch_elapsed:?} fds_after_abort={fd_before}->{fd_after}"
+        "[stress_sub8] 8-way fan-out={batch_elapsed:?} provider_sockets_after_abort={lingering}"
     );
 }

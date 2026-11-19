@@ -48,7 +48,25 @@ pub async fn run_job(
         };
     }
 
-    let prepared = match sandbox::prepare_command(&spec.argv, &spec.cwd, &spec.sandbox) {
+    if !matches!(
+        spec.sandbox,
+        SandboxPolicy::Off | SandboxPolicy::DangerFullAccess
+    ) {
+        for (k, v) in &spec.env {
+            if sandbox::is_dangerous_env_var(k) || v.contains('\0') {
+                return JobResult::FailedToSpawn {
+                    error: format!("refusing dangerous env var `{k}` under sandbox"),
+                };
+            }
+        }
+    }
+
+    let prepared = match sandbox::prepare_command_with_env(
+        &spec.argv,
+        &spec.cwd,
+        &spec.sandbox,
+        &spec.env,
+    ) {
         Ok(p) => p,
         Err(e) => {
             return JobResult::FailedToSpawn {
@@ -72,8 +90,18 @@ pub async fn run_job(
     for (k, v) in base_env() {
         cmd.env(k, v);
     }
-    for (k, v) in &spec.env {
-        cmd.env(k, v);
+    if prepared.landlock.is_some() {
+        if let Some(ref scratch) = prepared.scratch_dir {
+            let s = scratch.display().to_string();
+            cmd.env("TMPDIR", &s);
+            cmd.env("TMP", &s);
+            cmd.env("TEMP", &s);
+        }
+    }
+    if prepared.apply_env_in_child {
+        for (k, v) in &spec.env {
+            cmd.env(k, v);
+        }
     }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -106,6 +134,7 @@ pub async fn run_job(
     let mut guard = KillOnDrop { pid, armed: true };
 
     let (out_tx, mut out_rx) = mpsc::channel::<(u8, Vec<u8>)>(64);
+    let mut readers = Vec::new();
     for (fd, pipe) in [
         (
             0u8,
@@ -124,7 +153,7 @@ pub async fn run_job(
     ] {
         let Some(mut pipe) = pipe else { continue };
         let out_tx = out_tx.clone();
-        tokio::spawn(async move {
+        readers.push(tokio::spawn(async move {
             let mut buf = vec![0u8; AGENT_CHUNK];
             loop {
                 match pipe.read(&mut buf).await {
@@ -136,7 +165,7 @@ pub async fn run_job(
                     }
                 }
             }
-        });
+        }));
     }
     drop(out_tx);
 
@@ -147,27 +176,33 @@ pub async fn run_job(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_s);
     let mut timed_out = false;
 
+    // Cancel and the deadline outrank output. A biased poll that prefers
+    // `out_rx` lets `yes` starve both the timeout and an explicit cancel.
     let status = loop {
         tokio::select! {
-            // Output first so a chatty child never starves exit detection.
             biased;
-            Some((fd, data)) = out_rx.recv() => log.record(fd, &data),
-            st = child.wait() => break Some(st),
             _ = cancel.notified() => break None,
             _ = tokio::time::sleep_until(deadline) => {
                 timed_out = true;
                 break None;
             }
+            st = child.wait() => break Some(st),
+            Some((fd, data)) = out_rx.recv() => {
+                log.record(fd, &data);
+                if tokio::time::Instant::now() >= deadline {
+                    timed_out = true;
+                    break None;
+                }
+            }
         }
     };
 
     // Normal exit: drain whatever the pipes still hold before reporting.
+    // One deadline for the whole drain — a grandchild that inherited the
+    // pipe and writes slowly must not reset the timer forever.
     if let Some(status) = status {
-        while let Ok(Some((fd, data))) =
-            tokio::time::timeout(Duration::from_millis(200), out_rx.recv()).await
-        {
-            log.record(fd, &data);
-        }
+        drain_output(&mut out_rx, &mut log).await;
+        stop_readers(readers);
         guard.armed = false;
         debug!(
             pid,
@@ -195,15 +230,32 @@ pub async fn run_job(
     guard.kill();
     guard.armed = false;
     let _ = child.wait().await;
-    while let Ok(Some((fd, data))) =
-        tokio::time::timeout(Duration::from_millis(100), out_rx.recv()).await
-    {
-        log.record(fd, &data);
-    }
+    drain_output(&mut out_rx, &mut log).await;
+    stop_readers(readers);
     if timed_out {
         JobResult::TimedOut
     } else {
         JobResult::Killed
+    }
+}
+
+/// How long a finished (or killed) job may spend flushing pipe bytes.
+const DRAIN_BUDGET: Duration = Duration::from_millis(200);
+
+/// Read leftover pipe bytes until `DRAIN_BUDGET` elapses or the channel closes.
+///
+/// The deadline is fixed outside the loop. A per-message timeout never ends
+/// while a grandchild writes faster than that timeout.
+async fn drain_output(out_rx: &mut mpsc::Receiver<(u8, Vec<u8>)>, log: &mut LogWriter) {
+    let deadline = tokio::time::Instant::now() + DRAIN_BUDGET;
+    while let Ok(Some((fd, data))) = tokio::time::timeout_at(deadline, out_rx.recv()).await {
+        log.record(fd, &data);
+    }
+}
+
+fn stop_readers(readers: Vec<tokio::task::JoinHandle<()>>) {
+    for reader in readers {
+        reader.abort();
     }
 }
 
@@ -409,7 +461,7 @@ mod tests {
 
     #[tokio::test]
     async fn sandbox_allows_cwd_write_while_protecting_git_env_and_outside_paths() {
-        if matches!(sandbox::probe_backend(), sandbox::SandboxBackend::None) {
+        if !sandbox::capabilities().enforces_workspace_boundary() {
             return;
         }
         let work = tmpdir("sb-work");
@@ -462,5 +514,54 @@ mod tests {
         let _ = std::fs::remove_dir_all(&work);
         let _ = std::fs::remove_dir_all(&outside);
         let _ = std::fs::remove_dir_all(&log_dir);
+    }
+
+    #[tokio::test]
+    async fn sandbox_rejects_dangerous_env_vars() {
+        let dir = tmpdir("danger-env");
+        let log = LogWriter::create(dir.join("1.log"), Arc::new(Notify::new())).unwrap();
+        let res = run_job(
+            ExecSpec {
+                argv: vec!["sh".into(), "-c".into(), "echo hi".into()],
+                cwd: dir.display().to_string(),
+                env: vec![("LD_PRELOAD".into(), "/tmp/evil.so".into())],
+                timeout_s: 5,
+                sandbox: SandboxPolicy::WorkspaceWrite {
+                    cwd: dir.display().to_string(),
+                    extra_rw: Vec::new(),
+                    allow_net: false,
+                },
+            },
+            log,
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(Notify::new()),
+        )
+        .await;
+        assert!(
+            matches!(res, JobResult::FailedToSpawn { ref error } if error.contains("LD_PRELOAD")),
+            "{res:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn chatty_output_cannot_starve_the_timeout() {
+        let dir = tmpdir("yes");
+        let log = LogWriter::create(dir.join("1.log"), Arc::new(Notify::new())).unwrap();
+        let started = Instant::now();
+        let result = run_job(
+            spec(vec!["sh", "-c", "while true; do echo x; done"], 1),
+            log,
+            Arc::new(AtomicU32::new(0)),
+            Arc::new(Notify::new()),
+        )
+        .await;
+        let elapsed = started.elapsed();
+        assert_eq!(result, JobResult::TimedOut);
+        assert!(
+            elapsed <= Duration::from_millis(2500),
+            "timeout starved by output: {elapsed:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

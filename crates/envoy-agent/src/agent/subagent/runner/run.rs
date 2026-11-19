@@ -2,7 +2,7 @@
 
 use super::super::catalog::SubagentSpec;
 use super::{compact_preview, emit_line, PreparedTask, SubagentHost, SubagentTaskReport};
-use crate::agent::config::TurnConfig;
+use crate::agent::config::{TurnConfig, TurnUsage};
 use crate::agent::events::AgentEvent;
 use crate::agent::prompt::build_subagent_system_prompt;
 use crate::agent::r#loop::{execute_loop, LoopOptions, LoopOutcome};
@@ -58,7 +58,7 @@ pub(super) async fn run_single_subagent(
     let child_perm =
         host.permissions
             .fork_for_subagent(perm_mode, !spec.is_readonly(), host.cwd.clone());
-    let cfg = TurnConfig {
+    let mut cfg = TurnConfig {
         data_dir: host.data_dir.clone(),
         conduit: host.conduit.clone(),
         local_socket: host.local_socket.clone(),
@@ -73,7 +73,8 @@ pub(super) async fn run_single_subagent(
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
-        }],
+        
+            reasoning_blocks: Vec::new(),}],
         asks: Arc::clone(&host.asks),
         steer: Arc::new(Mutex::new(Vec::new())),
         permissions: child_perm,
@@ -83,7 +84,10 @@ pub(super) async fn run_single_subagent(
         hook_state_sink: None,
         turn_seq: host.turn_seq,
         max_steps: None,
+        usage: None,
     };
+    let usage = Arc::new(Mutex::new(TurnUsage::default()));
+    cfg.usage = Some(Arc::clone(&usage));
 
     let system = build_subagent_system_prompt(&host.target, &host.cwd, &spec.system_prompt);
     let opts = LoopOptions {
@@ -175,6 +179,7 @@ pub(super) async fn run_single_subagent(
                 format!("{prefix} error: {msg}"),
                 true,
             );
+            let (input_tokens, output_tokens) = charged(&usage);
             let next_state =
                 run_subagent_stop_fallback(host, spec, &msg, child_hook_state, parent_tx).await;
             (
@@ -185,9 +190,9 @@ pub(super) async fn run_single_subagent(
                     model: model_label,
                     ok: false,
                     duration_ms,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    summary: format!("error: {msg}"),
+                    input_tokens,
+                    output_tokens,
+                    summary: format!("error: {msg}{}", mcp_shutdown_note(spec)),
                 },
                 next_state,
             )
@@ -200,6 +205,7 @@ pub(super) async fn run_single_subagent(
                 format!("{prefix} error: {msg}"),
                 true,
             );
+            let (input_tokens, output_tokens) = charged(&usage);
             let next_state =
                 run_subagent_stop_fallback(host, spec, &msg, child_hook_state, parent_tx).await;
             (
@@ -210,13 +216,28 @@ pub(super) async fn run_single_subagent(
                     model: model_label,
                     ok: false,
                     duration_ms,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    summary: format!("error: {msg}"),
+                    input_tokens,
+                    output_tokens,
+                    summary: format!("error: {msg}{}", mcp_shutdown_note(spec)),
                 },
                 next_state,
             )
         }
+    }
+}
+
+/// `McpManager` has no close or shutdown method. A timed-out or failed child
+/// cannot drain its client; the note records that the close was skipped.
+fn charged(slot: &Arc<Mutex<TurnUsage>>) -> (u64, u64) {
+    let usage = slot.lock().unwrap();
+    (usage.input_tokens, usage.output_tokens)
+}
+
+fn mcp_shutdown_note(spec: &SubagentSpec) -> &'static str {
+    if spec.is_readonly() {
+        ""
+    } else {
+        "\nMCP manager has no close method; graceful MCP shutdown was skipped"
     }
 }
 

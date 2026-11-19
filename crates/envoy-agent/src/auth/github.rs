@@ -1,6 +1,7 @@
 //! GitHub Copilot device login and the Copilot session token exchange.
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use super::pkce::form_encode;
@@ -106,11 +107,65 @@ pub async fn poll_github_copilot_device(
     }
 }
 
+struct CopilotSessionCache {
+    gh_token: String,
+    token: String,
+    base: String,
+    expires_at_ms: u64,
+}
+
+static COPILOT_SESSION: Mutex<Option<CopilotSessionCache>> = Mutex::new(None);
+
+fn cache_lock() -> std::sync::MutexGuard<'static, Option<CopilotSessionCache>> {
+    COPILOT_SESSION.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+/// Refresh a minute early so an in-flight turn does not use an expired bearer.
+fn cached_copilot(gh_token: &str, now: u64) -> Option<(String, String)> {
+    let guard = cache_lock();
+    let hit = guard.as_ref()?;
+    if hit.gh_token != gh_token {
+        return None;
+    }
+    if now.saturating_add(60_000) >= hit.expires_at_ms {
+        return None;
+    }
+    Some((hit.token.clone(), hit.base.clone()))
+}
+
+fn store_copilot(gh_token: &str, token: String, base: String, expires_at_ms: u64) {
+    *cache_lock() = Some(CopilotSessionCache {
+        gh_token: gh_token.to_string(),
+        token,
+        base,
+        expires_at_ms,
+    });
+}
+
+fn expires_number(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+}
+
+fn copilot_expires_at_ms(val: &serde_json::Value, now: u64) -> u64 {
+    match val.get("expires_at").and_then(expires_number) {
+        Some(n) if n >= 1_000_000_000_000 => n,
+        Some(n) if n >= 1_000_000_000 => n.saturating_mul(1000),
+        _ => now.saturating_add(10 * 60 * 1000),
+    }
+}
+
 /// Exchange GitHub OAuth token for a Copilot session bearer token and API base URL.
+/// Successful exchanges are cached until `expires_at` minus 60 seconds.
 pub async fn copilot_session_token(
     http: &reqwest::Client,
     gh_token: &str,
 ) -> Result<(String, String)> {
+    let now = now_ms();
+    if let Some(hit) = cached_copilot(gh_token, now) {
+        return Ok(hit);
+    }
     let resp = http
         .get("https://api.github.com/copilot_internal/v2/token")
         .header("Authorization", format!("token {gh_token}"))
@@ -134,5 +189,45 @@ pub async fn copilot_session_token(
         .unwrap_or("https://api.githubcopilot.com")
         .trim_end_matches('/')
         .to_string();
+    store_copilot(
+        gh_token,
+        token.clone(),
+        base.clone(),
+        copilot_expires_at_ms(&val, now),
+    );
     Ok((token, base))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copilot_cache_refreshes_sixty_seconds_early() {
+        let now = 1_700_000_000_000;
+        store_copilot(
+            "gh-cache-test",
+            "session".into(),
+            "https://api.githubcopilot.com".into(),
+            now + 120_000,
+        );
+        let hit = cached_copilot("gh-cache-test", now).unwrap();
+        assert_eq!(hit.0, "session");
+        assert!(cached_copilot("gh-cache-test", now + 70_000).is_none());
+        assert!(cached_copilot("other-token", now).is_none());
+    }
+
+    #[test]
+    fn copilot_expiry_accepts_unix_seconds_and_millis() {
+        let now = 1_700_000_000_000u64;
+        let seconds = serde_json::json!({"expires_at": 1_700_000_120u64});
+        assert_eq!(
+            copilot_expires_at_ms(&seconds, now),
+            1_700_000_120_000
+        );
+        let text = serde_json::json!({"expires_at": "1700000120000"});
+        assert_eq!(copilot_expires_at_ms(&text, now), 1_700_000_120_000);
+        let missing = serde_json::json!({});
+        assert_eq!(copilot_expires_at_ms(&missing, now), now + 600_000);
+    }
 }

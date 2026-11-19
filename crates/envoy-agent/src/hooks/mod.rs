@@ -6,6 +6,8 @@
 pub mod config;
 pub mod exec;
 #[cfg(test)]
+mod tests_security;
+#[cfg(test)]
 mod tests_stress;
 pub mod types;
 
@@ -62,8 +64,12 @@ impl HookEngine {
     }
 
     pub fn load_rules(&self) -> Vec<HookRule> {
+        self.load_rules_checked().rules
+    }
+
+    fn load_rules_checked(&self) -> config::LoadedHooks {
         let trusted = is_workspace_trusted(&self.data_dir, &self.cwd);
-        config::load_hooks(
+        config::load_hooks_checked(
             &self.data_dir,
             &self.cwd,
             trusted,
@@ -82,8 +88,32 @@ impl HookEngine {
         mut ctx: HookContext,
         total_budget_ms: Option<u64>,
     ) -> HookContext {
-        let all_rules = self.load_rules();
-        let matching: Vec<HookRule> = all_rules
+        let loaded = self.load_rules_checked();
+        if let Some(err) = loaded.managed_error {
+            let reason = format!("managed hooks load failed (fail-closed): {err}");
+            if ctx.can_block {
+                ctx.decision = HookDecision::Block {
+                    reason: reason.clone(),
+                    by: "managed:load_error".into(),
+                    scope: HookScope::Managed,
+                };
+            }
+            ctx.trace.push(HookStepTrace {
+                id: "managed:load_error".into(),
+                scope: HookScope::Managed,
+                priority: i32::MIN,
+                decl_index: 0,
+                status: HookStepStatus::Errored,
+                exit_code: None,
+                duration_ms: 0,
+                reason,
+                mutated_keys: Vec::new(),
+            });
+            record_hook_audit(&self.data_dir, &ctx, 0);
+            return ctx;
+        }
+        let matching: Vec<HookRule> = loaded
+            .rules
             .into_iter()
             .filter(|r| config::matches_rule(r, &ctx))
             .collect();
@@ -145,8 +175,17 @@ impl HookEngine {
 fn record_hook_audit(data_dir: &Path, ctx: &HookContext, duration_ms: u64) {
     let path = data_dir.join("agent").join("hook_audit.jsonl");
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = envoy_core::fs::ensure_private_dir(parent);
     }
+    let trace: Vec<HookStepTrace> = ctx
+        .trace
+        .iter()
+        .cloned()
+        .map(|mut step| {
+            step.reason = redact_secrets(&step.reason);
+            step
+        })
+        .collect();
     let entry = HookAuditEntry {
         ts_ms: now_ms(),
         session_id: &ctx.session_id,
@@ -156,22 +195,17 @@ fn record_hook_audit(data_dir: &Path, ctx: &HookContext, duration_ms: u64) {
         event: ctx.event.label(),
         decision: ctx.decision.label(),
         reason: redact_secrets(ctx.decision.reason().unwrap_or("")),
-        hooks_ran: ctx
-            .trace
+        hooks_ran: trace
             .iter()
             .filter(|t| t.status != HookStepStatus::Skipped)
             .count(),
         duration_ms,
-        trace: &ctx.trace,
+        trace: &trace,
     };
     if let Ok(line) = serde_json::to_string(&entry) {
         let mut buf = line.into_bytes();
         buf.push(b'\n');
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-        {
+        if let Ok(mut f) = envoy_core::fs::open_append_private(&path) {
             let _ = f.write_all(&buf);
         }
     }
@@ -219,12 +253,12 @@ pub async fn confirm_hook_ask(
         AskOption {
             label: "Allow once".into(),
             description: Some("Proceed despite hook check".into()),
-            recommended: true,
+            recommended: false,
         },
         AskOption {
             label: "Deny".into(),
             description: Some("Block this action".into()),
-            recommended: false,
+            recommended: true,
         },
     ];
     let _ = tx.send(AgentEvent::Ask {
@@ -234,7 +268,7 @@ pub async fn confirm_hook_ask(
             stage.label()
         ),
         options,
-        recommended: 0,
+        recommended: 1,
         timeout_ms: 120_000,
     });
     let res = match tokio::time::timeout(Duration::from_secs(120), resp_rx).await {
@@ -465,6 +499,41 @@ mod tests {
         assert_eq!(out2.decision, HookDecision::Continue);
         assert_eq!(out2.state.get("linted"), Some(&json!(true)));
         assert_eq!(out2.additional_context, vec!["lint ok".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn record_hook_audit_redacts_trace_reasons() {
+        let dir = tmpdir("audit-redact");
+        let mut ctx = HookContext::new(
+            "s1",
+            dir.clone(),
+            "local",
+            "default",
+            HookEvent::PreToolUse,
+            BTreeMap::new(),
+        );
+        ctx.decision = HookDecision::Block {
+            reason: "blocked with Bearer supersecret123".into(),
+            by: "h1".into(),
+            scope: HookScope::User,
+        };
+        ctx.trace.push(HookStepTrace {
+            id: "h1".into(),
+            scope: HookScope::User,
+            priority: 1,
+            decl_index: 0,
+            status: HookStepStatus::Blocked,
+            exit_code: Some(0),
+            duration_ms: 5,
+            reason: "API_TOKEN=tok999 and sk-secretval".into(),
+            mutated_keys: Vec::new(),
+        });
+        record_hook_audit(&dir, &ctx, 5);
+        let raw = std::fs::read_to_string(dir.join("agent/hook_audit.jsonl")).unwrap();
+        assert!(!raw.contains("supersecret123"), "{raw}");
+        assert!(!raw.contains("tok999"), "{raw}");
+        assert!(!raw.contains("sk-secretval"), "{raw}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

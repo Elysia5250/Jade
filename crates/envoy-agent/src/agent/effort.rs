@@ -15,7 +15,7 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-const DEFAULT_LEVEL: &str = "low";
+const DEFAULT_LEVEL: &str = "medium";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Pref {
@@ -146,13 +146,20 @@ pub fn apply(
     }
 }
 
+/// One legal field. Named efforts use `reasoning_effort`. The thinking toggle
+/// is only the off switch, and only when no effort name is being sent.
 fn apply_chat(body: &mut Value, spec: &ReasoningSpec, effort: Option<&str>) {
-    if let Some(level) = effort {
-        body["reasoning_effort"] = json!(level);
-        if spec.toggle && level != "none" {
-            body["thinking"] = json!({ "type": "enabled" });
+    if let Some(level) = effort.filter(|level| *level != "none") {
+        if spec.efforts.iter().any(|have| have == level) {
+            body["reasoning_effort"] = json!(level);
+            return;
         }
-        return;
+    }
+    if let Some("none") = effort {
+        if spec.efforts.iter().any(|level| level == "none") && !spec.toggle {
+            body["reasoning_effort"] = json!("none");
+            return;
+        }
     }
     if spec.toggle {
         body["thinking"] = json!({ "type": "disabled" });
@@ -183,7 +190,7 @@ mod tests {
     #[test]
     fn a_level_is_sent_only_when_that_model_lists_it() {
         let dir = tmpdir();
-        assert_eq!(load(&dir), "low");
+        assert_eq!(load(&dir), "medium");
         store_spec(
             &dir,
             "openai",
@@ -251,7 +258,7 @@ mod tests {
             &dir,
         );
         assert_eq!(chat["reasoning_effort"], "max");
-        assert_eq!(chat["thinking"]["type"], "enabled");
+        assert!(chat.get("thinking").is_none());
         set(&dir, "off").unwrap();
         let mut disabled = json!({});
         apply(

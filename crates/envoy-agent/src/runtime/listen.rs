@@ -1,14 +1,17 @@
-//! Console socket: one request, then an optional event stream.
+//! Console socket: hello, one request, then an optional event stream.
 
-use super::protocol::{AgentReq, AgentResp, SeqEvent};
-use super::server::{Live, Runtime};
-use crate::agent::AgentEvent;
+use super::hello::{
+    protocol_mismatch_message, read_hello, write_hello, AGENT_PROTOCOL_VERSION,
+};
+use super::protocol::{AgentReq, AgentResp};
+use super::server::Runtime;
+use super::snapshot::stream_session;
 use anyhow::{bail, Result};
 use envoy_proto::codec::{read_framed, write_framed};
-use std::sync::{Arc, Mutex};
+use envoy_proto::VersionMismatch;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc;
 use tracing::debug;
 
 /// Serve the console control socket until cancelled.
@@ -21,6 +24,17 @@ pub async fn serve(runtime: Arc<Runtime>, listener: tokio::net::UnixListener) {
                 continue;
             }
         };
+        #[cfg(unix)]
+        {
+            let same_user = stream
+                .peer_cred()
+                .map(|cred| cred.uid() == unsafe { libc::geteuid() })
+                .unwrap_or(false);
+            if !same_user {
+                tracing::warn!("rejected agent socket connection from another uid");
+                continue;
+            }
+        }
         let runtime = Arc::clone(&runtime);
         tokio::spawn(async move {
             if let Err(e) = handle(stream, runtime).await {
@@ -35,13 +49,90 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut rd, mut wr) = tokio::io::split(stream);
-    let req: AgentReq =
-        match tokio::time::timeout(Duration::from_secs(5), read_framed(&mut rd)).await {
-            Ok(Ok(req)) => req,
-            Ok(Err(e)) => bail!("reading agent request: {e}"),
-            Err(_) => bail!("no agent request within 5s"),
-        };
+    let client_hello = match tokio::time::timeout(Duration::from_secs(5), read_hello(&mut rd)).await
+    {
+        Ok(Ok(hello)) => hello,
+        Ok(Err(err)) => {
+            if err.downcast_ref::<VersionMismatch>().is_some() {
+                let _ = write_framed(
+                    &mut wr,
+                    &AgentResp::Error(format!(
+                        "{err:#}. Stop the old daemon with `envoy daemon stop` and start this binary again"
+                    )),
+                )
+                .await;
+                return Ok(());
+            }
+            bail!("reading agent hello: {err:#}");
+        }
+        Err(_) => bail!("no agent hello within 5s"),
+    };
+    write_hello(&mut wr, runtime.incarnation_id()).await?;
+    if client_hello.protocol_version != AGENT_PROTOCOL_VERSION {
+        write_framed(
+            &mut wr,
+            &AgentResp::Error(protocol_mismatch_message(
+                client_hello.protocol_version,
+                AGENT_PROTOCOL_VERSION,
+            )),
+        )
+        .await?;
+        return Ok(());
+    }
+    let req: AgentReq = match tokio::time::timeout(Duration::from_secs(5), read_framed(&mut rd)).await
+    {
+        Ok(Ok(req)) => req,
+        Ok(Err(err)) => bail!("reading agent request: {err:#}"),
+        Err(_) => bail!("no agent request within 5s"),
+    };
+    let reset = client_hello.incarnation_id != 0
+        && client_hello.incarnation_id != runtime.incarnation_id();
+    dispatch(&runtime, req, reset, &mut wr).await
+}
 
+async fn dispatch<W>(runtime: &Arc<Runtime>, req: AgentReq, reset: bool, wr: &mut W) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    if session_req(&req) {
+        return dispatch_session(runtime, req, reset, wr).await;
+    }
+    if queue_req(&req) {
+        return dispatch_queue(runtime, req, wr).await;
+    }
+    dispatch_edit(runtime, req, wr).await
+}
+
+fn session_req(req: &AgentReq) -> bool {
+    matches!(
+        req,
+        AgentReq::Ensure { .. }
+            | AgentReq::Resume { .. }
+            | AgentReq::CloseSession { .. }
+            | AgentReq::Attach { .. }
+    )
+}
+
+fn queue_req(req: &AgentReq) -> bool {
+    matches!(
+        req,
+        AgentReq::Send { .. }
+            | AgentReq::Interrupt { .. }
+            | AgentReq::Answer { .. }
+            | AgentReq::Recall { .. }
+            | AgentReq::SetPermissionMode { .. }
+    )
+}
+
+async fn dispatch_session<W>(
+    runtime: &Arc<Runtime>,
+    req: AgentReq,
+    reset: bool,
+    wr: &mut W,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     match req {
         AgentReq::Ensure {
             id,
@@ -50,7 +141,7 @@ where
             history,
         } => {
             runtime.ensure_with_hooks(id, cwd, target, history).await;
-            write_framed(&mut wr, &AgentResp::Ack).await?;
+            ack(wr).await?;
         }
         AgentReq::Resume {
             id,
@@ -62,109 +153,128 @@ where
             let live = runtime
                 .ensure_with_hooks(id.clone(), cwd, target, history)
                 .await;
-            stream_session(live, id, from, &mut wr).await?;
+            stream_session(runtime, live, id, from, reset, wr).await?;
         }
         AgentReq::CloseSession { id } => match runtime.close_session(&id).await {
-            Ok(_) => write_framed(&mut wr, &AgentResp::Ack).await?,
-            Err(e) => write_framed(&mut wr, &AgentResp::Error(format!("{e:#}"))).await?,
+            Ok(_) => ack(wr).await?,
+            Err(err) => fail(wr, format!("{err:#}")).await?,
         },
-        AgentReq::Send { id, text, mode } => {
-            runtime.send(&id, text, mode);
-            write_framed(&mut wr, &AgentResp::Ack).await?;
-        }
-        AgentReq::Interrupt { id } => {
-            runtime.interrupt(&id);
-            write_framed(&mut wr, &AgentResp::Ack).await?;
-        }
-        AgentReq::Answer { id, ask_id, label } => {
-            runtime.answer(&id, ask_id, label);
-            write_framed(&mut wr, &AgentResp::Ack).await?;
-        }
-        AgentReq::Recall { id } => {
-            write_framed(&mut wr, &AgentResp::Recalled(runtime.recall(&id))).await?;
-        }
-        AgentReq::Compact { id, focus } => match runtime.start_compact(&id, focus, false) {
-            Ok(()) => write_framed(&mut wr, &AgentResp::Ack).await?,
-            Err(e) => write_framed(&mut wr, &AgentResp::Error(format!("{e:#}"))).await?,
-        },
-        AgentReq::Handoff { id, focus } => match runtime.start_compact(&id, focus, true) {
-            Ok(()) => write_framed(&mut wr, &AgentResp::Ack).await?,
-            Err(e) => write_framed(&mut wr, &AgentResp::Error(format!("{e:#}"))).await?,
-        },
-        AgentReq::SetPermissionMode { id, mode } => {
-            runtime.set_permission_mode(&id, mode);
-            write_framed(&mut wr, &AgentResp::Ack).await?;
-        }
-        AgentReq::StopMonitor { id, monitor_id } => {
-            match runtime.stop_monitor(&id, monitor_id).await {
-                Ok(()) => write_framed(&mut wr, &AgentResp::Ack).await?,
-                Err(e) => write_framed(&mut wr, &AgentResp::Error(format!("{e:#}"))).await?,
-            }
-        }
-        AgentReq::ListCheckpoints { id } => match runtime.list_checkpoints(&id) {
-            Ok(list) => write_framed(&mut wr, &AgentResp::Checkpoints(list)).await?,
-            Err(e) => write_framed(&mut wr, &AgentResp::Error(format!("{e:#}"))).await?,
-        },
-        AgentReq::Rewind { id, checkpoint_id } => match runtime.rewind(&id, checkpoint_id).await {
-            Ok(()) => write_framed(&mut wr, &AgentResp::Ack).await?,
-            Err(e) => write_framed(&mut wr, &AgentResp::Error(format!("{e:#}"))).await?,
-        },
-        AgentReq::List => {
-            write_framed(&mut wr, &AgentResp::Sessions(runtime.list())).await?;
-        }
         AgentReq::Attach { id, from } => {
             let Some(live) = runtime.session(&id) else {
-                write_framed(&mut wr, &AgentResp::Error(format!("no such session: {id}"))).await?;
+                fail(wr, no_session(&id)).await?;
                 return Ok(());
             };
-            stream_session(live, id, from, &mut wr).await?;
+            stream_session(runtime, live, id, from, reset, wr).await?;
         }
+        other => bail!("unhandled session request: {other:?}"),
     }
     Ok(())
 }
 
-async fn stream_session<W>(live: Arc<Mutex<Live>>, id: String, from: u64, wr: &mut W) -> Result<()>
+async fn dispatch_queue<W>(runtime: &Arc<Runtime>, req: AgentReq, wr: &mut W) -> Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    let (mut snapshot, running, seq_now, monitors_hub, mut rx) = {
-        let mut state = live.lock().unwrap();
-        debug!(session = %id, from, seq = state.seq, "attach");
-        let from = if from > state.seq { 0 } else { from };
-        let snapshot: Vec<SeqEvent> = state
-            .events
-            .iter()
-            .filter(|e| e.seq > from)
-            .cloned()
-            .collect();
-        let running = state.running;
-        let seq_now = state.seq;
-        let hub = state.monitors.clone();
-        let (tx, rx) = mpsc::unbounded_channel();
-        state.subs.push(tx);
-        (snapshot, running, seq_now, hub, rx)
-    };
-    let active_monitors = monitors_hub.active_list();
-    if !active_monitors.is_empty() {
-        snapshot.push(SeqEvent {
-            seq: seq_now,
-            event: AgentEvent::MonitorsSync {
-                monitors: active_monitors,
-            },
-        });
-    }
-    write_framed(
-        wr,
-        &AgentResp::Snapshot {
-            events: snapshot,
-            running,
-        },
-    )
-    .await?;
-    while let Some(event) = rx.recv().await {
-        if write_framed(wr, &AgentResp::Event(event)).await.is_err() {
-            break;
+    match req {
+        AgentReq::Send { id, text, mode } => {
+            if runtime.session(&id).is_none() {
+                fail(wr, no_session(&id)).await?;
+            } else {
+                runtime.send(&id, text, mode);
+                ack(wr).await?;
+            }
         }
+        AgentReq::Interrupt { id } => {
+            if runtime.session(&id).is_none() {
+                fail(wr, no_session(&id)).await?;
+            } else {
+                runtime.interrupt(&id);
+                ack(wr).await?;
+            }
+        }
+        AgentReq::Answer { id, ask_id, label } => {
+            if runtime.session(&id).is_none() {
+                fail(wr, no_session(&id)).await?;
+            } else {
+                runtime.answer(&id, ask_id, label);
+                ack(wr).await?;
+            }
+        }
+        AgentReq::Recall { id } => {
+            if runtime.session(&id).is_none() {
+                fail(wr, no_session(&id)).await?;
+            } else {
+                write_framed(wr, &AgentResp::Recalled(runtime.recall(&id))).await?;
+            }
+        }
+        AgentReq::SetPermissionMode { id, mode } => {
+            if runtime.session(&id).is_none() {
+                fail(wr, no_session(&id)).await?;
+            } else {
+                runtime.set_permission_mode(&id, mode);
+                ack(wr).await?;
+            }
+        }
+        other => bail!("unhandled queue request: {other:?}"),
     }
     Ok(())
+}
+
+async fn dispatch_edit<W>(runtime: &Arc<Runtime>, req: AgentReq, wr: &mut W) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    match req {
+        AgentReq::Compact { id, focus } => match runtime.start_compact(&id, focus, false) {
+            Ok(()) => ack(wr).await?,
+            Err(err) => fail(wr, format!("{err:#}")).await?,
+        },
+        AgentReq::Handoff { id, focus } => match runtime.start_compact(&id, focus, true) {
+            Ok(()) => ack(wr).await?,
+            Err(err) => fail(wr, format!("{err:#}")).await?,
+        },
+        AgentReq::StopMonitor { id, monitor_id } => {
+            match runtime.stop_monitor(&id, monitor_id).await {
+                Ok(()) => ack(wr).await?,
+                Err(err) => fail(wr, format!("{err:#}")).await?,
+            }
+        }
+        AgentReq::ListCheckpoints { id } => match runtime.list_checkpoints(&id) {
+            Ok(list) => write_framed(wr, &AgentResp::Checkpoints(list)).await?,
+            Err(err) => fail(wr, format!("{err:#}")).await?,
+        },
+        AgentReq::Rewind { id, checkpoint_id } => match runtime.rewind(&id, checkpoint_id).await {
+            Ok(()) => ack(wr).await?,
+            Err(err) => fail(wr, format!("{err:#}")).await?,
+        },
+        AgentReq::List => {
+            write_framed(wr, &AgentResp::Sessions(runtime.list())).await?;
+        }
+        AgentReq::SetCwd { id, cwd } => match runtime.set_cwd(&id, cwd) {
+            Ok(()) => ack(wr).await?,
+            Err(err) => fail(wr, format!("{err:#}")).await?,
+        },
+        AgentReq::SetTarget { id, target } => match runtime.set_target(&id, target) {
+            Ok(()) => ack(wr).await?,
+            Err(err) => fail(wr, format!("{err:#}")).await?,
+        },
+        AgentReq::Clear { id } => match runtime.clear_context(&id) {
+            Ok(()) => ack(wr).await?,
+            Err(err) => fail(wr, format!("{err:#}")).await?,
+        },
+        other => bail!("unhandled edit request: {other:?}"),
+    }
+    Ok(())
+}
+
+fn no_session(id: &str) -> String {
+    format!("no such session: {id}")
+}
+
+async fn ack<W: AsyncWrite + Unpin>(wr: &mut W) -> Result<()> {
+    write_framed(wr, &AgentResp::Ack).await
+}
+
+async fn fail<W: AsyncWrite + Unpin>(wr: &mut W, message: String) -> Result<()> {
+    write_framed(wr, &AgentResp::Error(message)).await
 }

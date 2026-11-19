@@ -1,15 +1,17 @@
 //! The single agent loop with pre-flight context budgeting and 1x overflow retry.
 
-use super::config::TurnConfig;
+use super::config::{TurnConfig, TurnUsage};
 use super::context::{
-    estimate_turn_raw_tokens, refresh_models_dev_if_stale, resolve_budget, tools_overhead,
-    TokenCalibration,
+    estimate_turn_raw_tokens, estimate_turn_tokens, refresh_models_dev_if_stale, resolve_budget,
+    skip_inplace_mask, tools_overhead, TokenCalibration,
 };
 use super::events::AgentEvent;
 use super::loop_hooks::{hook_context_message, TurnHookSession};
 pub(crate) use super::loop_provider::call_provider_with_overflow_retry;
 use super::loop_provider::finalize_step_limit;
-use super::prompt::{build_system_prompt, environment_note_for_depth, sync_environment};
+use super::prompt::{
+    build_system_prompt, sync_environment, sync_pre_model_tail, EnvDiskSnapshot,
+};
 use super::subagent::SubagentHost;
 use super::tools::ToolFilter;
 use crate::auth::ensure_fresh_provider;
@@ -20,7 +22,6 @@ use anyhow::Result;
 use envoy_service::{dialer_for, AgentDialer, Remote, UnixDialer};
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::time::Duration;
 use tokio::sync::mpsc;
 
 pub(super) const DEFAULT_TOOL_STEPS: usize = 100;
@@ -41,6 +42,9 @@ pub(crate) struct LoopOutcome {
     pub(crate) input_tokens: u64,
     pub(crate) output_tokens: u64,
     pub(crate) context_tokens: u64,
+    pub(crate) cache_read_tokens: u64,
+    pub(crate) cache_create_tokens: u64,
+    pub(crate) calibration_factor: f64,
     pub(crate) hook_state: BTreeMap<String, Value>,
 }
 
@@ -82,6 +86,9 @@ pub async fn run_agent_turn(cfg: TurnConfig, tx: mpsc::UnboundedSender<AgentEven
                 input_tokens: outcome.input_tokens,
                 output_tokens: outcome.output_tokens,
                 context_tokens: outcome.context_tokens,
+                cache_read_tokens: outcome.cache_read_tokens,
+                cache_create_tokens: outcome.cache_create_tokens,
+                calibration_factor: outcome.calibration_factor,
             });
         }
         Err(e) => {
@@ -90,14 +97,35 @@ pub async fn run_agent_turn(cfg: TurnConfig, tx: mpsc::UnboundedSender<AgentEven
     }
 }
 
+struct UsageNote {
+    input_tokens: u64,
+    output_tokens: u64,
+    context_tokens: u64,
+    cache_read_tokens: u64,
+    cache_create_tokens: u64,
+    calibration_factor: f64,
+}
+
+fn note_usage(cfg: &TurnConfig, note: UsageNote) {
+    let Some(slot) = &cfg.usage else {
+        return;
+    };
+    *slot.lock().unwrap() = TurnUsage {
+        input_tokens: note.input_tokens,
+        output_tokens: note.output_tokens,
+        context_tokens: note.context_tokens,
+        cache_read_tokens: note.cache_read_tokens,
+        cache_create_tokens: note.cache_create_tokens,
+        calibration_factor: note.calibration_factor,
+    };
+}
+
 pub(crate) async fn execute_loop(
     cfg: TurnConfig,
     opts: LoopOptions,
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<LoopOutcome> {
-    let http = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(20))
-        .build()?;
+    let http = super::providers::shared_http_client()?;
 
     let is_local = cfg.target == "local" || cfg.target.is_empty();
     if opts.depth == 0 {
@@ -118,7 +146,14 @@ pub(crate) async fn execute_loop(
     let mut total_out = 0u64;
     #[allow(unused_assignments)]
     let mut context_tokens = 0u64;
-    let mut calibration = TokenCalibration::default();
+    let mut calibration = match &cfg.usage {
+        Some(slot) => TokenCalibration::from_stored(slot.lock().unwrap().calibration_factor),
+        None => TokenCalibration::default(),
+    };
+    let mut cache_read_tokens = 0u64;
+    let mut cache_create_tokens = 0u64;
+    let mut mask_latched = false;
+    let env_disk = EnvDiskSnapshot::capture(&cfg.data_dir, &cfg.cwd, opts.depth);
 
     let dialer: Box<dyn AgentDialer> = match (&cfg.local_socket, is_local) {
         (Some(sock), true) => Box::new(UnixDialer::new(sock.clone())),
@@ -141,7 +176,7 @@ pub(crate) async fn execute_loop(
         allowed: opts.allowed_tools,
     };
     let system = opts.system;
-    let overhead = tools_overhead(extra_tools.len());
+    let overhead = tools_overhead(&extra_tools);
     let mut plan = resolve_budget(&cfg.data_dir, &cfg.provider.id, &cfg.model.model_id);
     let max_steps = opts.max_steps.clamp(1, HARD_MAX_TOOL_STEPS);
     let mut hook_session = TurnHookSession {
@@ -165,65 +200,65 @@ pub(crate) async fn execute_loop(
                 });
             }
             provider = ensure_fresh_provider(&http, &cfg.data_dir, provider).await?;
-            let note = environment_note_for_depth(
-                &cfg.data_dir,
-                &cfg.cwd,
-                cfg.permissions.session_id(),
-                opts.depth,
-            );
+            let note = env_disk.note(&cfg.data_dir, cfg.permissions.session_id(), opts.depth);
             sync_environment(&mut messages, note.as_deref());
 
-            if let Some(outcome) = hook_session
-                .prepare_context_step(
-                    step,
-                    &http,
-                    &cfg.data_dir,
-                    &provider,
-                    &cfg.model.model_id,
-                    &cfg.target,
-                    &cfg.cwd,
-                    &system,
-                    &mut messages,
-                    calibration,
-                    &plan,
-                    overhead,
-                    false,
-                    tx,
-                )
-                .await?
-            {
-                if !outcome.pruned_only {
-                    let _ = tx.send(AgentEvent::Compacted {
-                        messages: outcome.messages,
-                        before_tokens: outcome.before_tokens,
-                        after_tokens: outcome.after_tokens,
-                        summary: outcome.summary,
-                        auto: true,
-                    });
+            let before_tokens = estimate_turn_tokens(&system, &messages, overhead, calibration);
+            let mut compressed = false;
+            if !skip_inplace_mask(mask_latched, before_tokens, &plan) {
+                if let Some(outcome) = hook_session
+                    .prepare_context_step(
+                        step,
+                        &http,
+                        &cfg.data_dir,
+                        &provider,
+                        &cfg.model.model_id,
+                        &cfg.target,
+                        &cfg.cwd,
+                        &system,
+                        &mut messages,
+                        calibration,
+                        &plan,
+                        overhead,
+                        false,
+                        tx,
+                    )
+                    .await?
+                {
+                    compressed = true;
+                    if !outcome.pruned_only {
+                        let _ = tx.send(AgentEvent::Compacted {
+                            messages: outcome.messages,
+                            before_tokens: outcome.before_tokens,
+                            after_tokens: outcome.after_tokens,
+                            summary: outcome.summary,
+                            auto: true,
+                        });
+                    }
+                }
+                if before_tokens > plan.prune_at {
+                    mask_latched = true;
                 }
             }
 
-            let raw_est = estimate_turn_raw_tokens(&system, &messages, overhead);
             let pre_model_extra = hook_session
                 .run_pre_model_call(
                     step,
                     &cfg.model.model_id,
-                    raw_est,
+                    before_tokens,
                     context_tokens,
                     &cfg.asks,
                     tx,
                 )
                 .await?;
-            let effective_system = match pre_model_extra {
-                Some(extra) => format!("{system}\n\n<hook_context>\n{extra}\n</hook_context>"),
-                None => system.clone(),
-            };
+            sync_pre_model_tail(&mut messages, pre_model_extra.as_deref());
+            let raw_est = estimate_turn_raw_tokens(&system, &messages, overhead);
 
             let reply = call_provider_with_overflow_retry(
                 &http,
                 &cfg,
                 &mut provider,
-                &effective_system,
+                &system,
                 &mut messages,
                 &tool_filter,
                 &extra_tools,
@@ -235,10 +270,23 @@ pub(crate) async fn execute_loop(
             )
             .await?;
 
-            calibration.observe(raw_est, reply.input_tokens);
+            calibration.observe_uncompressed(raw_est, reply.input_tokens, reply.calibrate && !compressed);
             total_in += reply.input_tokens;
             total_out += reply.output_tokens;
+            cache_read_tokens += reply.cache_read_tokens;
+            cache_create_tokens += reply.cache_create_tokens;
             context_tokens = reply.input_tokens;
+            note_usage(
+                &cfg,
+                UsageNote {
+                    input_tokens: total_in,
+                    output_tokens: total_out,
+                    context_tokens,
+                    cache_read_tokens,
+                    cache_create_tokens,
+                    calibration_factor: calibration.factor,
+                },
+            );
 
             let planned_tools: Vec<String> =
                 reply.tool_calls.iter().map(|t| t.name.clone()).collect();
@@ -268,6 +316,7 @@ pub(crate) async fn execute_loop(
                 tool_calls: tool_calls.clone(),
                 tool_call_id: None,
                 tool_name: None,
+                reasoning_blocks: reply.reasoning_blocks.clone(),
             });
 
             if tool_calls.is_empty() {
@@ -285,7 +334,8 @@ pub(crate) async fn execute_loop(
                         tool_calls: Vec::new(),
                         tool_call_id: None,
                         tool_name: None,
-                    });
+                    
+                        reasoning_blocks: Vec::new(),});
                     continue;
                 }
                 return Ok(LoopOutcome {
@@ -293,11 +343,14 @@ pub(crate) async fn execute_loop(
                     input_tokens: total_in,
                     output_tokens: total_out,
                     context_tokens,
+                    cache_read_tokens,
+                    cache_create_tokens,
+                    calibration_factor: calibration.factor,
                     hook_state: hook_session.state.clone(),
                 });
             }
 
-            hook_session
+            let (child_in, child_out) = hook_session
                 .execute_tool_batch(
                     step,
                     &remote,
@@ -314,6 +367,19 @@ pub(crate) async fn execute_loop(
                     cfg.monitors.as_ref(),
                 )
                 .await;
+            total_in += child_in;
+            total_out += child_out;
+            note_usage(
+                &cfg,
+                UsageNote {
+                    input_tokens: total_in,
+                    output_tokens: total_out,
+                    context_tokens,
+                    cache_read_tokens,
+                    cache_create_tokens,
+                    calibration_factor: calibration.factor,
+                },
+            );
 
             if !post_model_extra.is_empty() {
                 messages.push(hook_context_message(&post_model_extra));
@@ -333,7 +399,8 @@ pub(crate) async fn execute_loop(
                     tool_calls: Vec::new(),
                     tool_call_id: None,
                     tool_name: None,
-                });
+                
+                    reasoning_blocks: Vec::new(),});
             }
         }
 

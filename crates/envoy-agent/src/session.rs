@@ -4,7 +4,7 @@
 //! cards, assistant text/reasoning, collapsible tool/shell cards) and the LLM
 //! conversation history (`messages`) so resuming a session restores everything.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -28,6 +28,17 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+/// Provider reasoning that must be replayed on a later request in the same
+/// turn. The display string stays in [`ChatMessage::reasoning`]. Postcard is
+/// not self-describing: this enum's variants are part of the agent protocol.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningBlock {
+    Thinking { text: String, signature: String },
+    Redacted { data: String },
+    Encrypted { id: String, content: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: ChatRole,
@@ -43,6 +54,33 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(default)]
     pub tool_name: Option<String>,
+    /// Structured thinking, redacted thinking, or encrypted reasoning items.
+    #[serde(default)]
+    pub reasoning_blocks: Vec<ReasoningBlock>,
+}
+
+impl ChatMessage {
+    pub fn text(role: ChatRole, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            reasoning: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+            tool_name: None,
+            reasoning_blocks: Vec::new(),
+        }
+    }
+}
+
+/// A new user turn is starting. Prior-turn reasoning must not be replayed.
+pub fn strip_prior_turn_reasoning(messages: &mut [ChatMessage]) {
+    for msg in messages {
+        if msg.role == ChatRole::Assistant {
+            msg.reasoning = None;
+            msg.reasoning_blocks.clear();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +155,10 @@ pub enum TranscriptItem {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_calibration_factor() -> f64 {
+    1.0
 }
 
 impl TranscriptItem {
@@ -262,6 +304,14 @@ pub struct Session {
     /// Last model call's prompt size. Drives the context-window meter.
     #[serde(default)]
     pub prompt_tokens: u64,
+    /// Prompt-cache tokens reported by the provider across turns.
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_create_tokens: u64,
+    /// Heuristic multiplier learned from uncompressed provider usage.
+    #[serde(default = "default_calibration_factor")]
+    pub calibration_factor: f64,
     #[serde(default)]
     pub next_item_id: u64,
     /// Last agent event applied to `items`; attach replays from here.
@@ -288,6 +338,9 @@ impl Session {
             input_tokens: 0,
             output_tokens: 0,
             prompt_tokens: 0,
+            cache_read_tokens: 0,
+            cache_create_tokens: 0,
+            calibration_factor: default_calibration_factor(),
             next_item_id: 1,
             event_seq: 0,
             items: Vec::new(),
@@ -364,23 +417,38 @@ pub fn sessions_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("sessions")
 }
 
+pub fn checked_session_id(id: &str) -> Result<&str> {
+    if id.is_empty()
+        || id == "."
+        || id == ".."
+        || id.contains('/')
+        || id.contains('\\')
+        || id.chars().any(|c| c.is_control())
+    {
+        bail!("invalid session id");
+    }
+    Ok(id)
+}
+
 pub fn save_session(data_dir: &Path, session: &Session) -> Result<()> {
     if session.items.is_empty() && session.messages.is_empty() {
         return Ok(());
     }
+    checked_session_id(&session.id)?;
     let dir = sessions_dir(data_dir);
-    std::fs::create_dir_all(&dir)?;
-    let tmp_dir = data_dir.join("tmp");
-    std::fs::create_dir_all(&tmp_dir)?;
+    envoy_core::fs::ensure_private_dir(&dir)?;
     let data = serde_json::to_string_pretty(session)?;
-    let tmp = tmp_dir.join(format!("{}.json.tmp", session.id));
-    std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, dir.join(format!("{}.json", session.id)))
-        .context("writing session file")?;
+    envoy_core::fs::write_atomic_sync(
+        &dir.join(format!("{}.json", session.id)),
+        data.as_bytes(),
+        0o600,
+    )
+    .context("writing session file")?;
     Ok(())
 }
 
 pub fn load_session(data_dir: &Path, id: &str) -> Result<Session> {
+    checked_session_id(id)?;
     let path = sessions_dir(data_dir).join(format!("{id}.json"));
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("reading session {}", path.display()))?;
@@ -389,9 +457,14 @@ pub fn load_session(data_dir: &Path, id: &str) -> Result<Session> {
 }
 
 pub fn delete_session(data_dir: &Path, id: &str) -> Result<()> {
+    checked_session_id(id)?;
     let path = sessions_dir(data_dir).join(format!("{id}.json"));
     if path.exists() {
         std::fs::remove_file(path)?;
+    }
+    let checkpoint = data_dir.join("checkpoints").join(format!("{id}.json"));
+    if std::fs::symlink_metadata(&checkpoint).is_ok_and(|meta| meta.is_file()) {
+        std::fs::remove_file(checkpoint)?;
     }
     Ok(())
 }
@@ -504,7 +577,8 @@ mod tests {
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
-        };
+        
+            reasoning_blocks: Vec::new(),};
         let bytes = postcard::to_stdvec(&message).unwrap();
         let back: ChatMessage = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(back.role, message.role);
@@ -523,10 +597,14 @@ mod tests {
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 tool_name: None,
-            }],
+            
+                reasoning_blocks: Vec::new(),}],
             input_tokens: 3,
             output_tokens: 4,
             context_tokens: 3,
+            cache_read_tokens: 0,
+            cache_create_tokens: 0,
+            calibration_factor: 1.0,
         };
         let bytes = postcard::to_stdvec(&event).unwrap();
         let back: crate::agent::AgentEvent = postcard::from_bytes(&bytes).unwrap();
@@ -536,6 +614,7 @@ mod tests {
                 input_tokens,
                 output_tokens,
                 context_tokens,
+                ..
             } => {
                 assert_eq!(messages.len(), 1);
                 assert_eq!(messages[0].content, "hi");

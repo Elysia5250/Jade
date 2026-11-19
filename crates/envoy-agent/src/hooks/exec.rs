@@ -18,39 +18,53 @@ pub enum HookExecOutcome {
         code: Option<i32>,
         stdout: String,
         stderr: String,
+        stdout_truncated: bool,
     },
     TimedOut,
     SpawnError(String),
 }
 
-async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut rd: R, cap: usize) -> Vec<u8> {
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut rd: R, cap: usize) -> (Vec<u8>, bool) {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
+    let mut truncated = false;
     while buf.len() < cap {
         match rd.read(&mut chunk).await {
-            Ok(0) | Err(_) => break,
+            Ok(0) | Err(_) => return (buf, false),
             Ok(n) => {
                 let take = n.min(cap - buf.len());
                 buf.extend_from_slice(&chunk[..take]);
+                if n > take {
+                    truncated = true;
+                    break;
+                }
             }
         }
     }
-    buf
+    if !truncated && buf.len() >= cap {
+        let mut probe = [0u8; 1];
+        if matches!(rd.read(&mut probe).await, Ok(n) if n > 0) {
+            truncated = true;
+        }
+    }
+    (buf, truncated)
 }
 
 struct HookLaunch {
     argv: Vec<String>,
     scratch: Option<PathBuf>,
     cwd: Option<PathBuf>,
+    landlock: Option<envoy_core::sandbox::LandlockPlan>,
 }
 
 fn hook_launch(rule: &HookRule, ctx: &HookContext) -> Result<HookLaunch, String> {
-    let raw = vec!["sh".to_string(), "-lc".to_string(), rule.command.clone()];
+    let raw = vec!["sh".to_string(), "-c".to_string(), rule.command.clone()];
     if rule.sandbox_off {
         return Ok(HookLaunch {
             argv: raw,
             scratch: None,
             cwd: ctx.cwd.exists().then(|| ctx.cwd.clone()),
+            landlock: None,
         });
     }
     let cwd = ctx.cwd.display().to_string();
@@ -72,6 +86,7 @@ fn hook_launch(rule: &HookRule, ctx: &HookContext) -> Result<HookLaunch, String>
         argv: prepared.argv,
         scratch: prepared.scratch_dir,
         cwd,
+        landlock: prepared.landlock,
     })
 }
 
@@ -119,11 +134,25 @@ pub async fn run_hook_process(
             );
         }
     };
-    let _scratch = ScratchGuard(launch.scratch);
+    let _scratch = ScratchGuard(launch.scratch.clone());
     let mut cmd = Command::new(&launch.argv[0]);
     cmd.args(&launch.argv[1..]);
     if let Some(cwd) = launch.cwd {
         cmd.current_dir(cwd);
+    }
+    cmd.env_clear();
+    for key in [
+        "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "TMPDIR",
+    ] {
+        if let Ok(val) = std::env::var(key) {
+            cmd.env(key, val);
+        }
+    }
+    if launch.landlock.is_some() {
+        if let Some(ref scratch) = launch.scratch {
+            let s = scratch.display().to_string();
+            cmd.env("TMPDIR", &s).env("TMP", &s).env("TEMP", &s);
+        }
     }
     cmd.env("ENVOY_HOOK_EVENT", ctx.event.label())
         .env("ENVOY_HOOK_ID", &rule.id)
@@ -136,13 +165,19 @@ pub async fn run_hook_process(
         .kill_on_drop(true);
 
     #[cfg(unix)]
-    unsafe {
-        cmd.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+    {
+        let landlock = launch.landlock;
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if let Some(ref plan) = landlock {
+                    envoy_core::sandbox::apply_landlock_in_child(plan)?;
+                }
+                Ok(())
+            });
+        }
     }
 
     let mut child = match cmd.spawn() {
@@ -171,32 +206,33 @@ pub async fn run_hook_process(
         let stdout_task = tokio::spawn(async move {
             match stdout_pipe {
                 Some(r) => read_capped(r, MAX_HOOK_OUTPUT_BYTES).await,
-                None => Vec::new(),
+                None => (Vec::new(), false),
             }
         });
         let stderr_task = tokio::spawn(async move {
             match stderr_pipe {
-                Some(r) => read_capped(r, MAX_HOOK_OUTPUT_BYTES).await,
+                Some(r) => read_capped(r, MAX_HOOK_OUTPUT_BYTES).await.0,
                 None => Vec::new(),
             }
         });
         let status = child.wait().await;
-        let out_bytes = stdout_task.await.unwrap_or_default();
+        let (out_bytes, stdout_truncated) = stdout_task.await.unwrap_or_default();
         let err_bytes = stderr_task.await.unwrap_or_default();
-        (status, out_bytes, err_bytes)
+        (status, out_bytes, stdout_truncated, err_bytes)
     };
 
     let elapsed = || start.elapsed().as_millis() as u64;
     let res = match tokio::time::timeout(Duration::from_millis(timeout_ms), wait_fut).await {
-        Ok((Ok(status), out_bytes, err_bytes)) => (
+        Ok((Ok(status), out_bytes, stdout_truncated, err_bytes)) => (
             HookExecOutcome::Exited {
                 code: status.code(),
                 stdout: String::from_utf8_lossy(&out_bytes).to_string(),
                 stderr: String::from_utf8_lossy(&err_bytes).to_string(),
+                stdout_truncated,
             },
             elapsed(),
         ),
-        Ok((Err(e), _, _)) => {
+        Ok((Err(e), _, _, _)) => {
             kill_process_group(pid);
             (
                 HookExecOutcome::SpawnError(format!("wait failed: {e}")),
@@ -269,6 +305,7 @@ pub fn apply_step_result(
             code: Some(2),
             stderr,
             stdout,
+            ..
         } => {
             let reason = first_non_empty(&[&stderr, &stdout])
                 .unwrap_or_else(|| format!("blocked by hook `{}` (exit 2)", rule.id));
@@ -306,12 +343,14 @@ pub fn apply_step_result(
         HookExecOutcome::Exited {
             code: Some(0),
             stdout,
+            stdout_truncated,
             ..
         } => {
             apply_zero_exit(
                 ctx,
                 rule,
                 &stdout,
+                stdout_truncated,
                 duration_ms,
                 already_halted,
                 &mut mutated_keys,
@@ -321,6 +360,7 @@ pub fn apply_step_result(
             code,
             stderr,
             stdout,
+            ..
         } => {
             let detail = first_non_empty(&[&stderr, &stdout]).unwrap_or_else(|| {
                 format!(
@@ -365,6 +405,7 @@ fn apply_zero_exit(
     ctx: &mut HookContext,
     rule: &HookRule,
     stdout: &str,
+    stdout_truncated: bool,
     duration_ms: u64,
     already_halted: bool,
     mutated_keys: &mut Vec<String>,
@@ -407,15 +448,35 @@ fn apply_zero_exit(
     let parsed: HookOutput = match serde_json::from_str(trimmed) {
         Ok(v) => v,
         Err(e) => {
+            let reason = format!(
+                "{} JSON stdout ignored: {e}",
+                if stdout_truncated {
+                    "truncated"
+                } else {
+                    "invalid"
+                }
+            );
+            let status = if rule.fail_closed {
+                if ctx.can_block && !already_halted {
+                    ctx.decision = HookDecision::Block {
+                        reason: format!("hook `{}` returned {reason} (fail_closed)", rule.id),
+                        by: rule.id.clone(),
+                        scope: rule.scope,
+                    };
+                }
+                HookStepStatus::Errored
+            } else {
+                HookStepStatus::Succeeded
+            };
             ctx.trace.push(HookStepTrace {
                 id: rule.id.clone(),
                 scope: rule.scope,
                 priority: rule.priority,
                 decl_index: rule.decl_index,
-                status: HookStepStatus::Succeeded,
+                status,
                 exit_code: Some(0),
                 duration_ms,
-                reason: format!("invalid JSON stdout ignored: {e}"),
+                reason,
                 mutated_keys: std::mem::take(mutated_keys),
             });
             return;
@@ -591,12 +652,16 @@ mod tests {
             envoy_core::sandbox::SandboxBackend::Landlock(_) => {
                 let launch = project.expect("landlock");
                 assert_eq!(launch.argv[0], "sh");
+                assert!(launch.landlock.is_some());
+                if let Some(scratch) = launch.scratch {
+                    let _ = std::fs::remove_dir_all(scratch);
+                }
             }
         }
         let user = hook_launch(&rule(HookScope::User, true), &ctx).unwrap();
         assert_eq!(
             user.argv,
-            vec!["sh".to_string(), "-lc".into(), "echo hi".into()]
+            vec!["sh".to_string(), "-c".into(), "echo hi".into()]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -32,6 +32,7 @@ async fn start_test_daemon(data_dir: &Path) -> oneshot::Sender<()> {
     let socket = crate::daemon::socket_path(data_dir);
     let _ = std::fs::remove_file(&socket);
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    crate::daemon::park_agent_sock(data_dir);
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
         crate::daemon::run_server(server, listener, socket, None, async {

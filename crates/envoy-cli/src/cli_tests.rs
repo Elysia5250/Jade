@@ -57,6 +57,27 @@ fn cwd_flag_is_global() {
 }
 
 #[test]
+fn shell_run_keeps_every_word() {
+    let cli = Cli::try_parse_from(["envoy", "run", "--shell", "echo", "hello", "world"])
+        .expect("parse");
+    let Commands::Run(args) = cli.cmd.expect("run") else {
+        panic!("expected run");
+    };
+    let req = args.into_request().expect("request");
+    match req.spec {
+        envoy_proto::TaskSpec::Shell { command } => assert_eq!(command, "echo hello world"),
+        other => panic!("expected shell, got {other:?}"),
+    }
+
+    let cli = Cli::try_parse_from(["envoy", "run", "echo", "hello"]).expect("parse");
+    let Commands::Run(args) = cli.cmd.expect("run") else {
+        panic!("expected run");
+    };
+    let req = args.into_request().expect("request");
+    assert!(matches!(req.spec, envoy_proto::TaskSpec::Argv { .. }));
+}
+
+#[test]
 fn ask_subcommand_and_new_flag_parse() {
     let cli = Cli::try_parse_from(["envoy", "--cwd", "/tmp/x", "--new"]).expect("parse --new");
     assert!(cli.new_session);

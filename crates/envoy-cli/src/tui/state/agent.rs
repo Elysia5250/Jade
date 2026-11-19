@@ -12,7 +12,10 @@ impl App {
             self.session.cwd.clone(),
             self.target.clone(),
             self.session.messages.clone(),
-            self.session.event_seq,
+            runtime::AttachOrigin {
+                from: self.session.event_seq,
+                incarnation_id: self.daemon_incarnation,
+            },
             tx,
         ));
         self.agent_stream = Some(rx);
@@ -228,28 +231,36 @@ impl App {
                 }
             };
             match message {
-                AgentResp::Snapshot { events, running } => {
-                    for item in events {
-                        self.apply_event(item.seq, item.event);
+                AgentResp::SnapshotStart {
+                    running,
+                    incarnation_id,
+                    ..
+                } => {
+                    self.daemon_incarnation = incarnation_id;
+                    self.snapshot = Some(SnapshotAccum {
+                        running,
+                        ..SnapshotAccum::default()
+                    });
+                }
+                AgentResp::SnapshotChunk { events } => {
+                    if let Some(accum) = &mut self.snapshot {
+                        accum.events.extend(events);
                     }
-                    // The daemon is authoritative: a console that missed a
-                    // TurnDone must not stay stuck in "running".
-                    self.agent_running = running;
-                    self.agent_offline = false;
-                    self.agent_ready = true;
-                    if running {
-                        self.resume_active_view();
+                }
+                AgentResp::SnapshotMessages { messages } => {
+                    if let Some(accum) = &mut self.snapshot {
+                        accum.messages.extend(messages);
+                        accum.saw_messages = true;
                     }
-                    if !self.outbox.is_empty() {
-                        self.set_toast("daemon back - sending queued prompt", false);
-                        self.flush_outbox();
-                    }
-                    if self.perm_mode != PermissionMode::Default {
-                        self.push_permission_mode_to_daemon(self.perm_mode);
+                }
+                AgentResp::SnapshotEnd => {
+                    if let Some(accum) = self.snapshot.take() {
+                        self.finish_snapshot(accum);
                     }
                 }
                 AgentResp::Event(item) => self.apply_event(item.seq, item.event),
                 AgentResp::Error(err) => {
+                    self.snapshot = None;
                     let first = !self.agent_offline;
                     self.agent_offline = true;
                     self.agent_ready = false;
@@ -284,11 +295,57 @@ impl App {
         if self.agent_offline || self.agent_stream.is_none() || !self.agent_ready {
             return;
         }
-        let data_dir = self.data_dir.clone();
         let id = self.session.id.clone();
+        self.sync_agent(AgentReq::SetPermissionMode { id, mode });
+    }
+
+    pub(in crate::tui) fn sync_agent(&self, req: AgentReq) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let data_dir = self.data_dir.clone();
+        let notice = self.notice_tx.clone();
         tokio::spawn(async move {
-            let _ = runtime::tell(&data_dir, AgentReq::SetPermissionMode { id, mode }).await;
+            if let Err(err) = runtime::tell(&data_dir, req).await {
+                let _ = notice.send(UiNotice::Toast(format!("{err:#}"), true));
+            }
         });
+    }
+
+    fn finish_snapshot(&mut self, accum: SnapshotAccum) {
+        self.skip_replay_tokens = accum
+            .events
+            .iter()
+            .any(|item| matches!(item.event, AgentEvent::SessionReset));
+        let SnapshotAccum {
+            running,
+            events,
+            messages,
+            saw_messages,
+        } = accum;
+        for item in events {
+            self.apply_event(item.seq, item.event);
+        }
+        self.skip_replay_tokens = false;
+        if saw_messages {
+            self.session.messages = messages;
+            self.persist_session();
+        }
+        // The daemon is authoritative: a console that missed a TurnDone must
+        // not stay stuck in "running".
+        self.agent_running = running;
+        self.agent_offline = false;
+        self.agent_ready = true;
+        if running {
+            self.resume_active_view();
+        }
+        if !self.outbox.is_empty() {
+            self.set_toast("daemon back - sending queued prompt", false);
+            self.flush_outbox();
+        }
+        if self.perm_mode != PermissionMode::Default {
+            self.push_permission_mode_to_daemon(self.perm_mode);
+        }
     }
 
     fn ensure_provider_or_login(&mut self, prompt: &str) -> bool {
@@ -332,11 +389,8 @@ impl App {
     }
 
     pub(in crate::tui) fn answer_ask(&self, ask_id: u64, label: String) {
-        let data_dir = self.data_dir.clone();
         let id = self.session.id.clone();
-        tokio::spawn(async move {
-            let _ = runtime::tell(&data_dir, AgentReq::Answer { id, ask_id, label }).await;
-        });
+        self.sync_agent(AgentReq::Answer { id, ask_id, label });
     }
 
     pub(in crate::tui) fn handle_ask_key(&mut self, key: KeyEvent) -> Action {
@@ -373,10 +427,7 @@ impl App {
     }
 
     pub(in crate::tui) fn interrupt_agent(&self) {
-        let data_dir = self.data_dir.clone();
         let id = self.session.id.clone();
-        tokio::spawn(async move {
-            let _ = runtime::tell(&data_dir, AgentReq::Interrupt { id }).await;
-        });
+        self.sync_agent(AgentReq::Interrupt { id });
     }
 }

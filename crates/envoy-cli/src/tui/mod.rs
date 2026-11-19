@@ -57,7 +57,7 @@ pub(crate) use envoy_agent::daemon;
 pub(crate) use envoy_agent::permissions::{
     is_workspace_trusted, set_workspace_trusted, PermissionEngine, PermissionMode, RuleScope,
 };
-pub(crate) use envoy_agent::runtime::{self, AgentReq, AgentResp, SendMode};
+pub(crate) use envoy_agent::runtime::{self, AgentReq, AgentResp, SendMode, SeqEvent};
 pub(crate) use envoy_agent::session::{
     delete_session, exact_session_for_cwd, latest_session_for_cwd, list_sessions, load_session,
     recent_workspaces, save_session, CardStatus, ChatMessage, ChatRole, Session, TranscriptItem,
@@ -413,6 +413,14 @@ pub(crate) struct PendingAsk {
     deadline: Instant,
 }
 
+#[derive(Default)]
+pub(crate) struct SnapshotAccum {
+    pub(crate) running: bool,
+    pub(crate) events: Vec<SeqEvent>,
+    pub(crate) messages: Vec<ChatMessage>,
+    pub(crate) saw_messages: bool,
+}
+
 pub(crate) struct App {
     data_dir: PathBuf,
     conduit: Option<PathBuf>,
@@ -456,6 +464,12 @@ pub(crate) struct App {
     /// True after the daemon has sent the attach snapshot. Until then sends
     /// are held in the outbox so they cannot race the session creation.
     agent_ready: bool,
+    /// Last daemon incarnation observed on `SnapshotStart`. `0` means none.
+    daemon_incarnation: u64,
+    snapshot: Option<SnapshotAccum>,
+    /// Set while applying a replay that included `SessionReset`, so token
+    /// totals already stored on the session are not added a second time.
+    skip_replay_tokens: bool,
     pending_ask: Option<PendingAsk>,
     queued: VecDeque<String>,
     outbox: VecDeque<(String, SendMode)>,

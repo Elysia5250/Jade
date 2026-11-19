@@ -1,8 +1,8 @@
 //! Daemon-side Runtime operations for background monitors and session checkpoints.
 
 use super::monitors::MonitorHub;
-use super::server::{Live, Runtime};
-use crate::agent::checkpoint::apply_file_baselines;
+use super::server::{Live, LivePhase, PhaseGuard, Runtime};
+use crate::agent::checkpoint::{apply_file_baselines, CheckpointStore};
 use crate::agent::{AgentEvent, MonitorBroker, MonitorInfo};
 use crate::session::{ChatMessage, ChatRole};
 use anyhow::{bail, Result};
@@ -51,10 +51,11 @@ impl Runtime {
             );
             self.publish(&mut state, AgentEvent::MonitorsSync { monitors: snapshot });
 
-            if state.running {
+            if state.phase != LivePhase::Idle || state.running {
                 state.steer.lock().unwrap().push(agent_message);
                 false
-            } else {
+            } else if state.claim(LivePhase::RunningTurn) {
+                crate::session::strip_prior_turn_reasoning(&mut state.messages);
                 state.messages.push(ChatMessage {
                     role: ChatRole::User,
                     content: agent_message,
@@ -62,8 +63,12 @@ impl Runtime {
                     tool_calls: Vec::new(),
                     tool_call_id: None,
                     tool_name: None,
-                });
+                
+                    reasoning_blocks: Vec::new(),});
                 true
+            } else {
+                state.steer.lock().unwrap().push(agent_message);
+                false
             }
         };
 
@@ -98,11 +103,15 @@ impl Runtime {
             bail!("no such session: {id}");
         };
 
-        let (target, local_socket, net_baselines) = {
-            let state = live.lock().unwrap();
-            if state.running {
+        {
+            let mut state = live.lock().unwrap();
+            if !state.claim(LivePhase::Rewinding) {
                 bail!("session is busy; wait for the active turn to finish or interrupt first");
             }
+        }
+        let _phase = PhaseGuard::new(Arc::clone(&live), LivePhase::Rewinding);
+        let (target, local_socket, net_baselines) = {
+            let state = live.lock().unwrap();
             let (idx, net) = state.checkpoints.plan_rewind(checkpoint_id)?;
             (state.target.clone(), state.local_socket.clone(), (idx, net))
         };
@@ -117,12 +126,13 @@ impl Runtime {
         let (restored_files, deleted_files, skipped_files) =
             apply_file_baselines(&remote, &target, &net).await;
 
-        let cp_id = {
+        let (cp_id, queued) = {
             let mut state = live.lock().unwrap();
-            if state.running {
+            if state.phase != LivePhase::Rewinding {
                 bail!("session became busy during rewind");
             }
-            let cp = state.checkpoints.commit_rewind(idx);
+            let cp = state.checkpoints.take_rewind(idx);
+            let queued = state.checkpoints.queued_write().ok();
             let cp_id = cp.id;
             state.messages = cp.messages.clone();
             state.user_turns = cp.remaining_user_turns;
@@ -139,8 +149,11 @@ impl Runtime {
                     skipped_files,
                 },
             );
-            cp_id
+            (cp_id, queued)
         };
+        if let Some((path, bytes)) = queued {
+            let _ = CheckpointStore::write_queued(&path, &bytes);
+        }
         self.run_post_rewind_hook(id, &live, cp_id).await;
         Ok(())
     }
@@ -166,13 +179,20 @@ pub(crate) fn seed_checkpoint_user_turns(
 }
 
 pub(crate) fn record_turn_checkpoint(live: &Arc<Mutex<Live>>, prompt: Option<&str>) {
-    if let Some(text) = prompt {
+    let Some(text) = prompt else {
+        return;
+    };
+    let queued = {
         let mut state = live.lock().unwrap();
         let turns = state.user_turns;
         let snapshot = state.messages.clone();
-        let cp_id = state.checkpoints.begin_turn(text, snapshot, turns);
+        let cp_id = state.checkpoints.insert_turn(text, snapshot, turns);
         state.active_checkpoint_id = Some(cp_id);
         state.user_turns = turns + 1;
+        state.checkpoints.queued_write().ok()
+    };
+    if let Some((path, bytes)) = queued {
+        let _ = CheckpointStore::write_queued(&path, &bytes);
     }
 }
 
@@ -232,7 +252,8 @@ mod tests {
                 tool_calls: vec![],
                 tool_call_id: None,
                 tool_name: None,
-            });
+            
+                reasoning_blocks: Vec::new(),});
             st.active_checkpoint_id = None;
         }
         std::fs::write(&tracked, "fn v1() {}\n").unwrap();

@@ -59,16 +59,14 @@ pub fn is_protected(resolved: &ResolvedPath) -> bool {
         || path_has_protected_component(&resolved.canonical)
 }
 
-/// True if `resolved` points inside `/tmp`, `/var/tmp`, or the active temp dir.
+/// True if `resolved` canonical path points inside `/tmp`, `/var/tmp`, or the active temp dir.
 pub fn is_temp_path(resolved: &ResolvedPath) -> bool {
     let sys_tmp = canonicalize_with_missing_tail(&std::env::temp_dir());
-    let tmp = Path::new("/tmp");
-    let var_tmp = Path::new("/var/tmp");
-    is_under(&resolved.canonical, tmp)
-        || is_under(&resolved.canonical, var_tmp)
+    let tmp = canonicalize_with_missing_tail(Path::new("/tmp"));
+    let var_tmp = canonicalize_with_missing_tail(Path::new("/var/tmp"));
+    is_under(&resolved.canonical, &tmp)
+        || is_under(&resolved.canonical, &var_tmp)
         || is_under(&resolved.canonical, &sys_tmp)
-        || is_under(&resolved.requested, tmp)
-        || is_under(&resolved.requested, var_tmp)
 }
 
 pub fn path_has_protected_component(path: &Path) -> bool {
@@ -77,19 +75,46 @@ pub fn path_has_protected_component(path: &Path) -> bool {
 
 fn has_component_in(path: &Path, basenames: &[&str]) -> bool {
     let s = path.to_string_lossy();
-    if s == "/etc/shadow" || s == "/etc/gshadow" || s == "/etc/sudoers" {
+    if matches!(s.as_ref(), "/etc/shadow" | "/etc/gshadow" | "/etc/sudoers") {
         return true;
     }
+    if envoy_core::sandbox::user_secret_paths()
+        .iter()
+        .any(|secret| path == secret || path.starts_with(secret))
+    {
+        return true;
+    }
+    const WILDCARD_PROTECTED: &[&str] = &[
+        ".env", ".env.local", ".git", ".ssh", ".aws", ".envoy", ".conduit", ".gnupg", ".kube",
+        ".codex", ".agents",
+    ];
     for comp in path.components() {
         let Component::Normal(os) = comp else {
             continue;
         };
         let name = os.to_string_lossy();
-        if basenames.contains(&name.as_ref()) || name.starts_with(".env.") {
+        if basenames.contains(&name.as_ref()) || envoy_core::sandbox::is_env_filename(&name) {
             return true;
+        }
+        if name.contains(['*', '?', '[']) {
+            let lower = name.to_ascii_lowercase();
+            if (lower.starts_with('.') && lower.contains('['))
+                || WILDCARD_PROTECTED
+                    .iter()
+                    .any(|target| super::match_rule::wildcard_match(&lower, target))
+            {
+                return true;
+            }
         }
     }
     false
+}
+
+/// True when `candidate` canonicalizes equal to or beneath `workspace_cwd`.
+pub fn is_path_under_workspace(workspace_cwd: &Path, candidate: &Path) -> bool {
+    let ws_canon = canonicalize_with_missing_tail(workspace_cwd);
+    let cand_canon = canonicalize_with_missing_tail(candidate);
+    is_under(&cand_canon, &ws_canon)
 }
 
 /// True when `resolved` stays inside `workspace_canon`.

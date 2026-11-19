@@ -197,15 +197,25 @@ fn job_id(args: &Value) -> Result<u64> {
         .context("missing `id` (required for this action)")
 }
 
-fn env_arg(args: &Value) -> Vec<(String, String)> {
-    args["env"]
-        .as_object()
-        .map(|m| {
-            m.iter()
-                .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
-                .collect()
-        })
-        .unwrap_or_default()
+pub(crate) fn validate_env_arg(args: &Value) -> Result<()> {
+    let _ = env_arg(args)?;
+    Ok(())
+}
+
+fn env_arg(args: &Value) -> Result<Vec<(String, String)>> {
+    let Some(m) = args["env"].as_object() else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(m.len());
+    for (k, v) in m {
+        if let Some(val) = v.as_str() {
+            if envoy_core::sandbox::is_dangerous_env_var(k) || val.contains('\0') {
+                anyhow::bail!("disallowed environment variable `{k}`");
+            }
+            out.push((k.clone(), val.to_string()));
+        }
+    }
+    Ok(out)
 }
 
 pub(crate) fn exec_request(
@@ -226,7 +236,7 @@ pub(crate) fn exec_request(
             command: command.to_string(),
         },
         cwd,
-        env: env_arg(args),
+        env: env_arg(args)?,
         label: args["label"].as_str().map(str::to_string),
         group: args["group"]
             .as_str()
@@ -570,12 +580,30 @@ pub(crate) async fn grep(
 pub(crate) async fn job(
     remote: Remote<Box<dyn AgentDialer>>,
     machine: &str,
+    cwd: &Path,
     args: &Value,
 ) -> Result<ToolReply> {
+    let is_local = machine.is_empty() || machine == "local";
+    let in_scope = |job_cwd: &str| -> bool {
+        !is_local
+            || (!job_cwd.is_empty()
+                && crate::permissions::paths::is_path_under_workspace(cwd, Path::new(job_cwd)))
+    };
+    let check_scope = |id: u64, job_cwd: &str| -> Result<()> {
+        if !in_scope(job_cwd) {
+            anyhow::bail!("job #{id} belongs to another workspace ({job_cwd})");
+        }
+        Ok(())
+    };
     let action = args["action"].as_str().unwrap_or("");
     match action {
         "list" => {
-            let jobs = remote.jobs(machine).await?;
+            let jobs: Vec<_> = remote
+                .jobs(machine)
+                .await?
+                .into_iter()
+                .filter(|j| in_scope(&j.cwd))
+                .collect();
             if jobs.is_empty() {
                 return Ok((
                     format!("no jobs on {machine}"),
@@ -589,6 +617,7 @@ pub(crate) async fn job(
         "status" => {
             let id = job_id(args)?;
             let job = remote.status(machine, id).await?;
+            check_scope(id, &job.cwd)?;
             let structured = json!({
                 "id": job.id,
                 "state": job.state.label(),
@@ -609,6 +638,8 @@ pub(crate) async fn job(
         }
         "logs" => {
             let id = job_id(args)?;
+            let job = remote.status(machine, id).await?;
+            check_scope(id, &job.cwd)?;
             let offset = args["offset"].as_u64().unwrap_or(0);
             let mut sink = Sink::new(offset);
             let (_server_cursor, finished) = remote
@@ -631,6 +662,8 @@ pub(crate) async fn job(
         }
         "cancel" => {
             let id = job_id(args)?;
+            let job = remote.status(machine, id).await?;
+            check_scope(id, &job.cwd)?;
             remote.cancel(machine, id).await?;
             Ok((
                 format!("cancel requested for job {id} on {machine}"),

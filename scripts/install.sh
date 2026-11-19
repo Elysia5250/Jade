@@ -124,8 +124,11 @@ tar -xzf "$tmp/$name.tar.gz" -C "$tmp" || die "cannot extract the release archiv
 
 step "installing to $DIR"
 mkdir -p "$DIR"
-cp "$tmp/$name/envoy" "$DIR/envoy"
-chmod 0755 "$DIR/envoy"
+# Write beside the destination, then rename. `cp` onto a running binary is ETXTBSY.
+newbin="$DIR/.envoy.new.$$"
+cp "$tmp/$name/envoy" "$newbin"
+chmod 0755 "$newbin"
+mv -f "$newbin" "$DIR/envoy"
 
 installed="$("$DIR/envoy" --version 2>/dev/null || true)"
 [ -n "$installed" ] || die "the installed binary does not run on this machine"
@@ -166,7 +169,7 @@ fi
 
 if [ "$INSTALL_SERVICE" = 1 ]; then
     step "installing login autostart"
-    "$DIR/envoy" daemon install || warn "autostart install failed; `envoy` will still start the daemon on first use"
+    "$DIR/envoy" daemon install || warn "autostart install failed; \`envoy\` will still start the daemon on first use"
 fi
 
 cat <<EOF
@@ -180,5 +183,5 @@ $(printf '\033[1;32m✓\033[0m') envoy $VERSION installed
                envoy ui
 
 Autostart at login:  envoy daemon install
-Uninstall:           rm -rf "$DIR" "$HOME/.envoy"
+Uninstall:           rm -f "$DIR/envoy"; rm -rf "$HOME/.envoy"
 EOF

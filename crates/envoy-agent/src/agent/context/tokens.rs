@@ -1,6 +1,6 @@
 //! Token estimation, dynamic calibration, and session usage reporting.
 
-use crate::session::{ChatMessage, Session};
+use crate::session::{ChatMessage, ReasoningBlock, Session};
 
 #[derive(Debug, Clone, Copy)]
 pub struct TokenCalibration {
@@ -30,12 +30,34 @@ impl TokenCalibration {
         };
     }
 
+    /// Sample only when `raw_estimate` and `actual_tokens` describe the same
+    /// uncompressed request. Overflow compaction must pass `false`.
+    pub fn observe_uncompressed(
+        &mut self,
+        raw_estimate: u64,
+        actual_tokens: u64,
+        same_uncompressed_request: bool,
+    ) {
+        if same_uncompressed_request {
+            self.observe(raw_estimate, actual_tokens);
+        }
+    }
+
+    pub fn from_stored(factor: f64) -> Self {
+        if (0.65..=1.65).contains(&factor) {
+            Self { factor }
+        } else {
+            Self::default()
+        }
+    }
+
     pub fn scale(self, raw_tokens: u64) -> u64 {
         ((raw_tokens as f64) * self.factor).round().max(0.0) as u64
     }
 }
 
-/// Estimate tokens for text using ASCII ~4 bytes/token and CJK/non-ASCII ~1.5 chars/token.
+/// Estimate tokens for text. ASCII is ~4 bytes/token. CJK and other
+/// non-ASCII characters are ~1.8 tokens each (`* 9 / 5`).
 pub fn estimate_text_tokens(text: &str) -> u64 {
     if text.is_empty() {
         return 0;
@@ -50,15 +72,16 @@ pub fn estimate_text_tokens(text: &str) -> u64 {
         }
     }
     let ascii_tokens = ascii_bytes.div_ceil(4);
-    let non_ascii_tokens = (non_ascii_chars * 2).div_ceil(3);
+    let non_ascii_tokens = (non_ascii_chars * 9).div_ceil(5);
     ascii_tokens + non_ascii_tokens
 }
 
 pub fn estimate_message_tokens(msg: &ChatMessage) -> u64 {
     let mut total = 6u64; // role + framing overhead
     total += estimate_text_tokens(&msg.content);
-    // Reasoning is stored for the transcript and for summary notes. Providers
-    // do not receive it again, so it must not move the compaction trigger.
+    // The display string is a transcript copy. Only structured blocks are
+    // replayed to the provider, so only those move the compaction trigger.
+    total += replayed_reasoning_tokens(&msg.reasoning_blocks);
     for tc in &msg.tool_calls {
         total += 10;
         total += estimate_text_tokens(&tc.name);
@@ -79,9 +102,36 @@ pub fn message_cost(msg: &ChatMessage, calibration: TokenCalibration) -> u64 {
     calibration.scale(estimate_message_tokens(msg))
 }
 
-/// Built-in tool schemas plus a flat allowance per MCP tool.
-pub fn tools_overhead(extra_tool_count: usize) -> u64 {
-    BUILTIN_TOOLS_TOKENS_ESTIMATE + (extra_tool_count as u64) * 200
+/// Built-in tool schemas measured from the active JSON, plus each extra schema.
+pub fn tools_overhead(extra_tools: &[serde_json::Value]) -> u64 {
+    builtin_tools_tokens()
+        + extra_tools
+            .iter()
+            .map(|tool| estimate_text_tokens(&tool.to_string()))
+            .sum::<u64>()
+}
+
+fn builtin_tools_tokens() -> u64 {
+    static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let tools = crate::agent::tools::openai_tools_json();
+        estimate_text_tokens(&serde_json::to_string(&tools).unwrap_or_default())
+    })
+}
+
+fn replayed_reasoning_tokens(blocks: &[ReasoningBlock]) -> u64 {
+    blocks
+        .iter()
+        .map(|block| match block {
+            ReasoningBlock::Thinking { text, signature } => {
+                estimate_text_tokens(text) + estimate_text_tokens(signature)
+            }
+            ReasoningBlock::Redacted { data } => estimate_text_tokens(data),
+            ReasoningBlock::Encrypted { id, content } => {
+                estimate_text_tokens(id) + estimate_text_tokens(content)
+            }
+        })
+        .sum()
 }
 
 pub fn estimate_turn_raw_tokens(
@@ -100,9 +150,6 @@ pub fn estimate_turn_tokens(
 ) -> u64 {
     calibration.scale(estimate_turn_raw_tokens(system, messages, tools_overhead))
 }
-
-/// Conservative baseline overhead for Envoy's 8 built-in tool schemas.
-pub const BUILTIN_TOOLS_TOKENS_ESTIMATE: u64 = 1_400;
 
 /// `(tokens, estimated)`. A finished turn stores the provider's reported prompt
 /// size; before that, messages are estimated.
@@ -126,8 +173,8 @@ mod tests {
         let ascii = estimate_text_tokens("abcdefgh");
         assert_eq!(ascii, 2);
 
-        let cjk = estimate_text_tokens("你好世界测试长度"); // 8 chars -> ceil(16/3) = 6
-        assert_eq!(cjk, 6);
+        let cjk = estimate_text_tokens("你好世界测试长度"); // 8 chars * 1.8 = 14.4 -> 15
+        assert_eq!(cjk, 15);
 
         let msg = ChatMessage {
             role: ChatRole::Assistant,
@@ -140,7 +187,8 @@ mod tests {
             }],
             tool_call_id: None,
             tool_name: None,
-        };
+        
+            reasoning_blocks: Vec::new(),};
         assert!(estimate_message_tokens(&msg) >= 20);
         let mut with_reasoning = msg.clone();
         with_reasoning.reasoning = Some("x".repeat(4_000));
@@ -148,6 +196,42 @@ mod tests {
             estimate_message_tokens(&msg),
             estimate_message_tokens(&with_reasoning)
         );
+    }
+
+    #[test]
+    fn pure_chinese_1000_chars_lands_in_the_cjk_band() {
+        let text: String = "测".repeat(1000);
+        let tokens = estimate_text_tokens(&text);
+        assert!((1_500..=2_000).contains(&tokens), "{tokens}");
+    }
+
+    #[test]
+    fn overflow_sample_does_not_move_calibration() {
+        let mut cal = TokenCalibration::default();
+        cal.observe_uncompressed(10_000, 4_000, false);
+        assert_eq!(cal.factor, 1.0);
+        cal.observe_uncompressed(10_000, 13_000, true);
+        assert!((cal.factor - 1.3).abs() < 0.01);
+    }
+
+    #[test]
+    fn tools_overhead_follows_the_schema_not_a_flat_1400() {
+        let overhead = tools_overhead(&[]);
+        assert!(overhead > 1_400, "{overhead}");
+        let extra = serde_json::json!({"name": "mcp", "description": "x".repeat(400)});
+        let with_extra = tools_overhead(&[extra]);
+        assert!(with_extra > overhead);
+    }
+
+    #[test]
+    fn replayed_reasoning_blocks_add_tokens() {
+        let mut msg = ChatMessage::text(ChatRole::Assistant, "ok");
+        let before = estimate_message_tokens(&msg);
+        msg.reasoning_blocks.push(crate::session::ReasoningBlock::Thinking {
+            text: "想".repeat(100),
+            signature: "sig".into(),
+        });
+        assert!(estimate_message_tokens(&msg) > before);
     }
 
     #[test]

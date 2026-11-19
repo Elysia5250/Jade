@@ -1,15 +1,21 @@
 //! MCP client transports: stdio (JSON-RPC lines) and Streamable HTTP (`POST` JSON + SSE).
 
-use super::config::{safe_stdio_env, McpTransportConfig};
+use super::config::{safe_stdio_env, McpScope, McpTransportConfig};
+use crate::agent::tools::web::{validate_http_url, SafeDnsResolver};
+use crate::permissions::paths::is_path_under_workspace;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+
+const MAX_MCP_LINE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_MCP_HTTP_BYTES: usize = 4 * 1024 * 1024;
 
 #[allow(clippy::large_enum_variant)]
 pub enum McpTransport {
@@ -17,8 +23,19 @@ pub enum McpTransport {
     Http(HttpTransport),
 }
 
+struct ScratchGuard(Option<PathBuf>);
+
+impl Drop for ScratchGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
 pub struct StdioTransport {
     _child: Child,
+    _scratch: ScratchGuard,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: AtomicU64,
@@ -33,17 +50,32 @@ pub struct HttpTransport {
 }
 
 impl McpTransport {
-    pub async fn connect(cfg: &McpTransportConfig, timeout_s: u64) -> Result<Self> {
+    pub async fn connect(
+        cfg: &McpTransportConfig,
+        scope: McpScope,
+        workspace_cwd: &Path,
+        timeout_s: u64,
+    ) -> Result<Self> {
         let mut conn = match cfg {
             McpTransportConfig::Stdio {
                 command,
                 args,
                 env,
                 cwd,
-            } => Self::Stdio(StdioTransport::spawn(command, args, env, cwd.as_ref())?),
-            McpTransportConfig::Http { url, headers } => {
-                Self::Http(HttpTransport::new(url.clone(), headers.clone(), timeout_s)?)
-            }
+            } => Self::Stdio(StdioTransport::spawn(
+                command,
+                args,
+                env,
+                cwd.as_ref(),
+                scope,
+                workspace_cwd,
+            )?),
+            McpTransportConfig::Http { url, headers } => Self::Http(HttpTransport::new(
+                url.clone(),
+                headers.clone(),
+                scope,
+                timeout_s,
+            )?),
         };
 
         let timeout = Duration::from_secs(timeout_s);
@@ -88,18 +120,82 @@ impl StdioTransport {
         args: &[String],
         env: &BTreeMap<String, String>,
         cwd: Option<&PathBuf>,
+        scope: McpScope,
+        workspace_cwd: &Path,
     ) -> Result<Self> {
-        let mut cmd = Command::new(command);
-        cmd.args(args)
-            .env_clear()
-            .envs(safe_stdio_env(env))
-            .stdin(Stdio::piped())
+        let env_map = safe_stdio_env(env, scope);
+        let mut scratch = ScratchGuard(None);
+        let mut cmd = if scope == McpScope::Project {
+            let eff_cwd = match cwd {
+                Some(dir) => {
+                    if !is_path_under_workspace(workspace_cwd, dir) {
+                        bail!(
+                            "project MCP server cwd `{}` escapes workspace",
+                            dir.display()
+                        );
+                    }
+                    dir.as_path()
+                }
+                None => workspace_cwd,
+            };
+            let mut raw_argv = Vec::with_capacity(1 + args.len());
+            raw_argv.push(command.to_string());
+            raw_argv.extend(args.iter().cloned());
+            let env_vec: Vec<(String, String)> =
+                env_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let prepared = envoy_core::prepare_command_with_env(
+                &raw_argv,
+                &eff_cwd.display().to_string(),
+                &envoy_proto::SandboxPolicy::WorkspaceWrite {
+                    cwd: workspace_cwd.display().to_string(),
+                    extra_rw: Vec::new(),
+                    allow_net: false,
+                },
+                &env_vec,
+            )
+            .with_context(|| format!("sandbox setup for project MCP server `{command}`"))?;
+            scratch = ScratchGuard(prepared.scratch_dir.clone());
+            let mut c = Command::new(&prepared.argv[0]);
+            c.args(&prepared.argv[1..]).env_clear();
+            if prepared.apply_env_in_child {
+                c.envs(&env_map);
+                if prepared.landlock.is_some() {
+                    if let Some(ref dir) = prepared.scratch_dir {
+                        let s = dir.display().to_string();
+                        c.env("TMPDIR", &s).env("TMP", &s).env("TEMP", &s);
+                    }
+                }
+            } else {
+                for key in ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "TMPDIR"] {
+                    if let Some(val) = env_map.get(key) {
+                        c.env(key, val);
+                    }
+                }
+            }
+            if let Some(override_dir) = prepared.cwd_override {
+                c.current_dir(override_dir);
+            } else if eff_cwd.exists() {
+                c.current_dir(eff_cwd);
+            }
+            #[cfg(unix)]
+            if let Some(plan) = prepared.landlock {
+                unsafe {
+                    c.pre_exec(move || envoy_core::sandbox::apply_landlock_in_child(&plan));
+                }
+            }
+            c
+        } else {
+            let mut c = Command::new(command);
+            c.args(args).env_clear().envs(&env_map);
+            if let Some(dir) = cwd {
+                c.current_dir(dir);
+            }
+            c
+        };
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        if let Some(dir) = cwd {
-            cmd.current_dir(dir);
-        }
         let mut child = cmd
             .spawn()
             .with_context(|| format!("spawning MCP server `{command}`"))?;
@@ -107,6 +203,7 @@ impl StdioTransport {
         let stdout = BufReader::new(child.stdout.take().context("MCP child stdout missing")?);
         Ok(Self {
             _child: child,
+            _scratch: scratch,
             stdin,
             stdout,
             next_id: AtomicU64::new(1),
@@ -140,13 +237,10 @@ impl StdioTransport {
         });
         tokio::time::timeout(timeout, async {
             self.write_json(&payload).await?;
-            let mut line = String::new();
             loop {
-                line.clear();
-                let n = self.stdout.read_line(&mut line).await?;
-                if n == 0 {
+                let Some(line) = read_mcp_line(&mut self.stdout, MAX_MCP_LINE_BYTES).await? else {
                     bail!("MCP stdio server closed stdout");
-                }
+                };
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
@@ -165,11 +259,45 @@ impl StdioTransport {
     }
 }
 
+async fn read_mcp_line(reader: &mut BufReader<ChildStdout>, cap: usize) -> Result<Option<String>> {
+    let mut buf = Vec::new();
+    let n = reader
+        .take((cap + 1) as u64)
+        .read_until(b'\n', &mut buf)
+        .await?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if buf.len() > cap {
+        bail!("MCP stdio response line exceeded {cap} byte limit");
+    }
+    Ok(Some(String::from_utf8_lossy(&buf).to_string()))
+}
+
 impl HttpTransport {
-    fn new(url: String, headers: BTreeMap<String, String>, timeout_s: u64) -> Result<Self> {
-        let http = reqwest::Client::builder()
+    fn new(
+        url: String,
+        headers: BTreeMap<String, String>,
+        scope: McpScope,
+        timeout_s: u64,
+    ) -> Result<Self> {
+        let parsed = reqwest::Url::parse(&url).context("invalid MCP HTTP URL")?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            bail!("unsupported MCP HTTP URL scheme `{}`", parsed.scheme());
+        }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            bail!("MCP HTTP URLs with embedded credentials are not allowed");
+        }
+        let mut builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(timeout_s))
-            .build()?;
+            .redirect(reqwest::redirect::Policy::none());
+        if scope == McpScope::Project {
+            validate_http_url(&parsed, true)?;
+            builder = builder
+                .no_proxy()
+                .dns_resolver(Arc::new(SafeDnsResolver::new(true)));
+        }
+        let http = builder.build()?;
         Ok(Self {
             http,
             url,
@@ -239,7 +367,7 @@ impl HttpTransport {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_ascii_lowercase();
-        let body = resp.text().await?;
+        let body = read_capped_body(resp, MAX_MCP_HTTP_BYTES).await?;
         if !status.is_success() {
             bail!("MCP HTTP {status}: {body}");
         }
@@ -252,6 +380,17 @@ impl HttpTransport {
             extract_rpc_result(&msg)
         }
     }
+}
+
+async fn read_capped_body(mut resp: reqwest::Response, cap: usize) -> Result<String> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if bytes.len() + chunk.len() > cap {
+            bail!("MCP HTTP response exceeded {cap} byte limit");
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
 fn extract_rpc_result(msg: &Value) -> Result<Value> {

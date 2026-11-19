@@ -249,24 +249,10 @@ pub fn load_auth(data_dir: &Path) -> AuthFile {
 }
 
 pub fn save_auth(data_dir: &Path, auth: &AuthFile) -> Result<()> {
-    std::fs::create_dir_all(data_dir)?;
-    let tmp_dir = data_dir.join("tmp");
-    std::fs::create_dir_all(&tmp_dir)?;
+    envoy_core::fs::ensure_private_dir(data_dir)?;
     let data = serde_json::to_string_pretty(auth)?;
-    let tmp = tmp_dir.join("auth.json.tmp");
-    std::fs::write(&tmp, data)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    }
-    let dst = auth_path(data_dir);
-    std::fs::rename(&tmp, &dst).context("writing auth.json")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o600));
-    }
+    envoy_core::fs::write_atomic_sync(&auth_path(data_dir), data.as_bytes(), 0o600)
+        .context("writing auth.json")?;
     Ok(())
 }
 
@@ -279,13 +265,10 @@ pub fn load_prefs(data_dir: &Path) -> ModelPrefs {
 }
 
 pub fn save_prefs(data_dir: &Path, prefs: &ModelPrefs) -> Result<()> {
-    std::fs::create_dir_all(data_dir)?;
-    let tmp_dir = data_dir.join("tmp");
-    std::fs::create_dir_all(&tmp_dir)?;
+    envoy_core::fs::ensure_private_dir(data_dir)?;
     let data = serde_json::to_string_pretty(prefs)?;
-    let tmp = tmp_dir.join("model.json.tmp");
-    std::fs::write(&tmp, data)?;
-    std::fs::rename(&tmp, prefs_path(data_dir)).context("writing model.json")?;
+    envoy_core::fs::write_atomic_sync(&prefs_path(data_dir), data.as_bytes(), 0o600)
+        .context("writing model.json")?;
     Ok(())
 }
 

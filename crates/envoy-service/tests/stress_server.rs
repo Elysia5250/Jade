@@ -56,7 +56,9 @@ async fn stress_24_concurrent_clients_with_aborted_followers() {
                     let Ok((stream, _)) = accepted else { break; };
                     let s = srv.clone();
                     tokio::spawn(async move {
-                        let _ = s.serve_stream("stress-client", stream).await;
+                        let _ = s
+                            .serve_stream(envoy_service::Caller::Remote("stress-client".into()), stream)
+                            .await;
                     });
                 }
             }

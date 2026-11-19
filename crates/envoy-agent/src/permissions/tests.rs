@@ -242,13 +242,10 @@ async fn auto_mode_approves_routine_dev_ops_while_keeping_safety_guards() {
     let asks = AskBroker::new_headless();
     let (tx, _rx) = mpsc::unbounded_channel();
 
-    // Network exec Allows in Auto only when a sandbox backend exists.
-    // Destructive commands always Ask. Without a sandbox, other exec asks
+    // Network exec Allows in Auto only when a strong sandbox backend exists.
+    // Destructive commands always Ask. Without one, other exec asks
     // like Default. Protected paths always Ask.
-    let isolated = !matches!(
-        envoy_core::sandbox::probe_backend(),
-        envoy_core::sandbox::SandboxBackend::None
-    );
+    let isolated = envoy_core::sandbox::capabilities().enforces_workspace_boundary();
     if isolated {
         let net_auth = eng
             .authorize_tool_call(
@@ -355,10 +352,7 @@ fn default_allows_in_workspace_exec_only_when_sandboxed() {
         "local".into(),
         PermissionMode::Default,
     );
-    let isolated = !matches!(
-        envoy_core::sandbox::probe_backend(),
-        envoy_core::sandbox::SandboxBackend::None
-    );
+    let isolated = envoy_core::sandbox::capabilities().enforces_workspace_boundary();
     let cargo = eng.evaluate("exec", &json!({"command": "cargo test"}));
     if isolated {
         assert_eq!(cargo.effect, Effect::Allow, "{cargo:?}");
@@ -385,7 +379,7 @@ fn default_allows_in_workspace_exec_only_when_sandboxed() {
 
 #[test]
 fn remote_target_still_carries_workspace_sandbox_policy() {
-    let policy = sandbox_for(Path::new("/work"), &[], false, false, None);
+    let policy = sandbox_for(Path::new("/work"), &[], false, false, false, None);
     assert!(
         matches!(
             policy,
@@ -396,15 +390,24 @@ fn remote_target_still_carries_workspace_sandbox_policy() {
         ),
         "{policy:?}"
     );
+    let ro = sandbox_for(Path::new("/work"), &[], true, true, true, None);
+    assert!(matches!(
+        ro,
+        SandboxPolicy::ReadOnly {
+            allow_net: false,
+            ..
+        }
+    ));
     let off = sandbox_for(
         Path::new("/work"),
         &[],
         true,
         false,
+        false,
         Some(SandboxOverride::Off),
     );
     assert!(matches!(off, SandboxPolicy::Off));
-    let danger = sandbox_for(Path::new("/work"), &[], false, true, None);
+    let danger = sandbox_for(Path::new("/work"), &[], false, true, false, None);
     assert!(matches!(danger, SandboxPolicy::DangerFullAccess));
 }
 

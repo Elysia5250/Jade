@@ -133,6 +133,25 @@ fn merge_fast_forwards_and_refuses_a_dirty_source() {
 }
 
 #[test]
+fn create_and_remove_from_a_subdirectory() {
+    let root = init_repo();
+    let sub = root.join("src");
+    std::fs::create_dir_all(&sub).unwrap();
+    let Effect::Enter { path, .. } = execute(&sub, "side").unwrap() else {
+        panic!("expected enter");
+    };
+    assert!(path.join("note.txt").is_file());
+    assert_ne!(canon(&path), canon(&root));
+    let Effect::Toast(notice) = execute(&sub, "remove side").unwrap() else {
+        panic!("expected toast");
+    };
+    assert!(notice.contains("removed"), "{notice}");
+    assert!(!path.exists());
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(linked_path(&root, "side").unwrap().parent().unwrap());
+}
+
+#[test]
 fn merge_conflict_stays_in_progress_on_the_main_tree() {
     let root = init_repo();
     let Effect::Enter { path: side, .. } = execute(&root, "topic").unwrap() else {

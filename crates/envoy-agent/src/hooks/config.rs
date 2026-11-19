@@ -34,8 +34,9 @@ struct HookEntry {
     always_run: bool,
     #[serde(default = "default_true")]
     enabled: bool,
-    /// `off` / `none` / `false` opts a project hook out of the workspace sandbox.
+    /// Deprecated opt-out field (ignored for `HookScope::Project`, which is always sandboxed).
     #[serde(default)]
+    #[allow(dead_code)]
     sandbox: Option<String>,
 }
 
@@ -43,13 +44,10 @@ fn default_true() -> bool {
     true
 }
 
-fn sandbox_opt_out(raw: &Option<String>) -> bool {
-    raw.as_deref().map(str::trim).is_some_and(|value| {
-        matches!(
-            value.to_ascii_lowercase().as_str(),
-            "off" | "none" | "false"
-        )
-    })
+#[derive(Debug, Clone)]
+pub struct LoadedHooks {
+    pub rules: Vec<HookRule>,
+    pub managed_error: Option<String>,
 }
 
 pub fn user_hooks_path(data_dir: &Path) -> PathBuf {
@@ -61,15 +59,31 @@ pub fn project_hooks_path(cwd: &Path) -> PathBuf {
 }
 
 fn managed_hooks_path(override_path: Option<&Path>) -> PathBuf {
-    override_path
-        .map(PathBuf::from)
-        .or_else(|| std::env::var("ENVOY_MANAGED_HOOKS").ok().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MANAGED_HOOKS_PATH))
+    if let Some(p) = override_path {
+        return p.to_path_buf();
+    }
+    #[cfg(test)]
+    if let Ok(env_path) = std::env::var("ENVOY_MANAGED_HOOKS") {
+        if !env_path.trim().is_empty() {
+            return PathBuf::from(env_path);
+        }
+    }
+    PathBuf::from(DEFAULT_MANAGED_HOOKS_PATH)
 }
 
 fn read_hooks_file(path: &Path) -> Option<HooksFile> {
     let raw = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()
+}
+
+fn read_hooks_file_strict(path: &Path) -> Result<Option<HooksFile>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str(&raw)
+            .map(Some)
+            .map_err(|e| format!("{}: invalid JSON ({e})", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: read error ({e})", path.display())),
+    }
 }
 
 fn effective_timeout_ms(event: HookEvent, raw: Option<u64>) -> u64 {
@@ -100,7 +114,8 @@ fn push_scope_rules(scope: HookScope, file: HooksFile, out: &mut Vec<HookRule>) 
                     && !matches!(event.capability(), StageCapability::ObserveOnly)
             });
             let timeout_ms = effective_timeout_ms(event, entry.timeout_ms);
-            let sandbox_off = scope != HookScope::Project || sandbox_opt_out(&entry.sandbox);
+            // Project hooks are never allowed to opt themselves out of the sandbox.
+            let sandbox_off = scope != HookScope::Project;
             out.push(HookRule {
                 id,
                 scope,
@@ -126,11 +141,25 @@ pub fn load_hooks(
     trusted: bool,
     managed_override: Option<&Path>,
 ) -> Vec<HookRule> {
+    load_hooks_checked(data_dir, cwd, trusted, managed_override).rules
+}
+
+/// Like [`load_hooks`], also reporting malformed/unreadable managed hooks so
+/// callers fail closed.
+pub fn load_hooks_checked(
+    data_dir: &Path,
+    cwd: &Path,
+    trusted: bool,
+    managed_override: Option<&Path>,
+) -> LoadedHooks {
     let mut rules = Vec::new();
+    let mut managed_error = None;
 
     let managed_path = managed_hooks_path(managed_override);
-    if let Some(file) = read_hooks_file(&managed_path) {
-        push_scope_rules(HookScope::Managed, file, &mut rules);
+    match read_hooks_file_strict(&managed_path) {
+        Ok(Some(file)) => push_scope_rules(HookScope::Managed, file, &mut rules),
+        Ok(None) => {}
+        Err(err) => managed_error = Some(err),
     }
 
     if let Some(file) = read_hooks_file(&user_hooks_path(data_dir)) {
@@ -144,7 +173,10 @@ pub fn load_hooks(
     }
 
     rules.sort_by_key(HookRule::sort_key);
-    rules
+    LoadedHooks {
+        rules,
+        managed_error,
+    }
 }
 
 pub fn matches_rule(rule: &HookRule, ctx: &HookContext) -> bool {
@@ -273,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn project_hook_can_opt_out_of_the_sandbox() {
+    fn project_hook_cannot_opt_out_of_the_sandbox() {
         let dir = tmpdir("sandbox-off");
         let data = dir.join("data");
         let cwd = dir.join("ws");
@@ -295,7 +327,7 @@ mod tests {
         let boxed = rules.iter().find(|rule| rule.id == "boxed").unwrap();
         let open = rules.iter().find(|rule| rule.id == "open").unwrap();
         assert!(!boxed.sandbox_off);
-        assert!(open.sandbox_off);
+        assert!(!open.sandbox_off);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

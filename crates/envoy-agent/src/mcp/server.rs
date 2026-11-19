@@ -11,21 +11,23 @@
 //!   every target. The peer applies that policy with its own backend.
 
 use super::server_tools::{self, machine_arg, tool_defs, Sink, ToolReply};
+use crate::agent::AskBroker;
 use crate::daemon;
-use crate::permissions::{Effect, PermissionEngine, PermissionMode};
+use crate::permissions::paths::is_path_under_workspace;
+use crate::permissions::{PermissionEngine, PermissionMode};
 use anyhow::{bail, Result};
 use envoy_proto::SandboxPolicy;
 use envoy_service::{dialer_for, AgentDialer, Remote};
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-struct Mcp {
-    data_dir: PathBuf,
-    cwd: PathBuf,
-    conduit: Option<PathBuf>,
-    permissions: Arc<PermissionEngine>,
+pub(super) struct Mcp {
+    pub(super) data_dir: PathBuf,
+    pub(super) cwd: PathBuf,
+    pub(super) conduit: Option<PathBuf>,
+    pub(super) permissions: Arc<PermissionEngine>,
 }
 
 impl Mcp {
@@ -172,7 +174,85 @@ fn initialize(params: &Value) -> Value {
     })
 }
 
-async fn call_tool(mcp: &Mcp, params: &Value) -> Result<ToolReply> {
+fn resolve_from_cwd(cwd: &Path, raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "." {
+        return cwd.display().to_string();
+    }
+    if trimmed.starts_with('/') || trimmed.starts_with("~/") || trimmed == "~" {
+        return trimmed.to_string();
+    }
+    cwd.join(trimmed).display().to_string()
+}
+
+fn normalize_local_args(name: &str, cwd: &Path, args: &Value) -> Value {
+    if machine_arg(args) != "local" {
+        return args.clone();
+    }
+    let mut out = if args.is_object() {
+        args.clone()
+    } else {
+        json!({})
+    };
+    match name {
+        "read" | "write" | "edit" | "ls" => {
+            if let Some(raw) = out.get("path").and_then(Value::as_str).map(str::to_string) {
+                out["path"] = Value::String(resolve_from_cwd(cwd, &raw));
+            } else if name == "ls" {
+                out["path"] = Value::String(cwd.display().to_string());
+            }
+        }
+        "glob" | "grep" => {
+            let raw = out
+                .get("path")
+                .or_else(|| out.get("root"))
+                .and_then(Value::as_str)
+                .unwrap_or(".");
+            out["path"] = Value::String(resolve_from_cwd(cwd, raw));
+        }
+        "exec" => {
+            let raw_cwd = out.get("cwd").and_then(Value::as_str).unwrap_or(".");
+            out["cwd"] = Value::String(resolve_from_cwd(cwd, raw_cwd));
+        }
+        _ => {}
+    }
+    out
+}
+
+async fn authorize_mcp_tool(mcp: &Mcp, name: &str, args: &Value) -> std::result::Result<SandboxPolicy, String> {
+    let asks = AskBroker::new_headless();
+    let (sink_tx, _sink_rx) = tokio::sync::mpsc::unbounded_channel();
+    match mcp
+        .permissions
+        .authorize_tool_call(name, args, &asks, &sink_tx)
+        .await
+    {
+        Ok(auth) => Ok(match auth.sandbox {
+            SandboxPolicy::WorkspaceWrite { cwd, extra_rw, .. } => SandboxPolicy::WorkspaceWrite {
+                cwd,
+                extra_rw,
+                allow_net: false,
+            },
+            SandboxPolicy::ReadOnly { cwd, .. } => SandboxPolicy::ReadOnly {
+                cwd,
+                allow_net: false,
+            },
+            other => other,
+        }),
+        Err(err) => {
+            let msg = format!("{err:#}");
+            if msg.contains("requires interactive approval") {
+                Err(format!(
+                    "permission requires approval over non-interactive MCP stdio ({msg})"
+                ))
+            } else {
+                Err(msg)
+            }
+        }
+    }
+}
+
+pub(super) async fn call_tool(mcp: &Mcp, params: &Value) -> Result<ToolReply> {
     let name = params["name"].as_str().unwrap_or("");
     let args = &params["arguments"];
     if !matches!(
@@ -188,56 +268,60 @@ async fn call_tool(mcp: &Mcp, params: &Value) -> Result<ToolReply> {
         ));
     }
 
-    let decision = mcp.permissions.evaluate(name, args);
-    match decision.effect {
-        Effect::Deny => {
+    let machine = machine_arg(args);
+    if machine != "local" {
+        let mode = mcp.permissions.mode();
+        if mode == PermissionMode::Plan
+            && !matches!(name, "read" | "ls" | "glob" | "grep")
+            && !(name == "job" && args["action"].as_str() != Some("cancel"))
+        {
             return Ok((
-                format!("permission denied: {}", decision.reason),
+                "permission denied: plan mode forbids remote mutations".into(),
                 None,
                 true,
             ));
         }
-        Effect::Ask => {
-            let hint = decision
-                .suggested_rule
-                .map(|r| format!("; add `{r}` to permissions.json or launch with `--mode auto`"))
-                .unwrap_or_default();
+        if mode != PermissionMode::Auto {
             return Ok((
                 format!(
-                    "permission requires approval over non-interactive MCP stdio ({}){hint}",
-                    decision.reason
+                    "permission requires approval over non-interactive MCP stdio (remote machine target `{machine}`)"
                 ),
                 None,
                 true,
             ));
         }
-        Effect::Allow => {}
     }
 
-    let machine = machine_arg(args);
-    let remote = mcp.remote(&machine).await?;
-    let mut extra_rw = mcp.permissions.loaded_policies().extra_rw;
-    extra_rw.extend(decision.extra_rw);
-    let sandbox = SandboxPolicy::WorkspaceWrite {
-        cwd: mcp.cwd.display().to_string(),
-        extra_rw,
-        allow_net: false,
+    let norm_args = normalize_local_args(name, &mcp.cwd, args);
+    if name == "exec" {
+        if let Err(e) = server_tools::validate_env_arg(&norm_args) {
+            return Ok((format!("{e:#}"), None, true));
+        }
+    }
+
+    let sandbox = match authorize_mcp_tool(mcp, name, &norm_args).await {
+        Ok(s) => s,
+        Err(msg) => return Ok((msg, None, true)),
     };
 
+    let remote = mcp.remote(&machine).await?;
     match name {
-        "exec" => server_tools::exec(remote, &machine, &mcp.cwd, sandbox, args).await,
-        "read" => server_tools::read(remote, &machine, args).await,
-        "write" => server_tools::write(remote, &machine, args).await,
-        "edit" => server_tools::edit(remote, &machine, args).await,
-        "ls" => server_tools::ls(remote, &machine, args).await,
-        "glob" => server_tools::glob(remote, &machine, args).await,
-        "grep" => server_tools::grep(remote, &machine, args).await,
-        "job" => server_tools::job(remote, &machine, args).await,
+        "exec" => server_tools::exec(remote, &machine, &mcp.cwd, sandbox, &norm_args).await,
+        "read" => server_tools::read(remote, &machine, &norm_args).await,
+        "write" => server_tools::write(remote, &machine, &norm_args).await,
+        "edit" => server_tools::edit(remote, &machine, &norm_args).await,
+        "ls" => server_tools::ls(remote, &machine, &norm_args).await,
+        "glob" => server_tools::glob(remote, &machine, &norm_args).await,
+        "grep" => server_tools::grep(remote, &machine, &norm_args).await,
+        "job" => server_tools::job(remote, &machine, &mcp.cwd, &norm_args).await,
         _ => unreachable!(),
     }
 }
 
 async fn list_resources(mcp: &Mcp) -> Result<Value> {
+    if let Err(msg) = authorize_mcp_tool(mcp, "job", &json!({ "action": "list" })).await {
+        bail!("{msg}");
+    }
     let remote = mcp.remote("local").await?;
     let jobs = remote.jobs("local").await.unwrap_or_default();
     let mut resources = vec![json!({
@@ -246,7 +330,11 @@ async fn list_resources(mcp: &Mcp) -> Result<Value> {
         "description": "List of detached jobs managed by the local envoy daemon.",
         "mimeType": "application/json",
     })];
-    for j in jobs.into_iter().take(50) {
+    for j in jobs
+        .into_iter()
+        .filter(|j| !j.cwd.is_empty() && is_path_under_workspace(&mcp.cwd, Path::new(&j.cwd)))
+        .take(50)
+    {
         resources.push(json!({
             "uri": format!("envoy://jobs/{}/log", j.id),
             "name": format!("Job #{} Log", j.id),
@@ -259,11 +347,20 @@ async fn list_resources(mcp: &Mcp) -> Result<Value> {
 
 async fn read_resource(mcp: &Mcp, params: &Value) -> Result<Value> {
     let uri = params["uri"].as_str().unwrap_or("");
+    let action = if uri == "envoy://jobs" {
+        "list"
+    } else {
+        "logs"
+    };
+    if let Err(msg) = authorize_mcp_tool(mcp, "job", &json!({ "action": action })).await {
+        bail!("{msg}");
+    }
     let remote = mcp.remote("local").await?;
     if uri == "envoy://jobs" {
         let jobs = remote.jobs("local").await?;
         let json_list: Vec<Value> = jobs
             .into_iter()
+            .filter(|j| !j.cwd.is_empty() && is_path_under_workspace(&mcp.cwd, Path::new(&j.cwd)))
             .map(|j| {
                 json!({
                     "id": j.id,
@@ -285,6 +382,10 @@ async fn read_resource(mcp: &Mcp, params: &Value) -> Result<Value> {
     if let Some(rest) = uri.strip_prefix("envoy://jobs/") {
         if let Some(id_str) = rest.strip_suffix("/log") {
             let id: u64 = id_str.parse()?;
+            let job = remote.status("local", id).await?;
+            if job.cwd.is_empty() || !is_path_under_workspace(&mcp.cwd, Path::new(&job.cwd)) {
+                bail!("job #{id} belongs to another workspace ({})", job.cwd);
+            }
             let mut sink = Sink::new(0);
             let _ = remote
                 .logs("local", id, 0, false, |recs| sink.push_records(recs))

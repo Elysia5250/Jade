@@ -356,8 +356,11 @@ impl App {
                 let candidate = resolve_cd_path(&self.session.cwd, arg);
                 match std::fs::canonicalize(&candidate) {
                     Ok(path) if path.is_dir() => {
+                        let id = self.session.id.clone();
+                        let cwd = path.clone();
                         self.session_cwd_set(path);
                         self.persist_session();
+                        self.sync_agent(AgentReq::SetCwd { id, cwd });
                         self.set_toast(format!("cwd: {}", self.cwd_label()), false);
                     }
                     Ok(_) => self.set_toast(format!("not a directory: {arg}"), true),
@@ -448,6 +451,7 @@ impl App {
                 Action::None
             }
             "clear" => {
+                let id = self.session.id.clone();
                 self.session.items.clear();
                 self.session.messages.clear();
                 self.session.changed_files.clear();
@@ -455,6 +459,7 @@ impl App {
                 self.transcript_cache.clear();
                 self.selected_card = None;
                 self.transcript_scroll = 0;
+                self.sync_agent(AgentReq::Clear { id });
                 self.set_toast("transcript cleared", false);
                 Action::None
             }

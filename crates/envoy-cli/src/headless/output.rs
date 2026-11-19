@@ -15,12 +15,39 @@ pub(super) struct TurnStreamDone {
     pub(super) accumulated_text: String,
 }
 
-pub(super) async fn collect_events<WOut: Write, WErr: Write>(
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<SeqEvent>,
+#[derive(Debug)]
+pub(super) struct TurnFailure {
+    pub(super) message: String,
+    pub(super) tool_calls: usize,
+}
+
+pub(super) trait PullEvents {
+    fn pull(&mut self) -> impl std::future::Future<Output = Option<SeqEvent>> + Send;
+}
+
+impl PullEvents for tokio::sync::mpsc::Receiver<SeqEvent> {
+    async fn pull(&mut self) -> Option<SeqEvent> {
+        self.recv().await
+    }
+}
+
+impl PullEvents for tokio::sync::mpsc::UnboundedReceiver<SeqEvent> {
+    async fn pull(&mut self) -> Option<SeqEvent> {
+        self.recv().await
+    }
+}
+
+pub(super) async fn collect_events<R, WOut, WErr>(
+    rx: &mut R,
     fmt: OutputFormat,
     out: &mut WOut,
     err: &mut WErr,
-) -> std::result::Result<TurnStreamDone, String> {
+) -> std::result::Result<TurnStreamDone, TurnFailure>
+where
+    R: PullEvents,
+    WOut: Write,
+    WErr: Write,
+{
     let mut accumulated_text = String::new();
     let mut tool_calls = 0usize;
     let mut need_step_sep = false;
@@ -28,7 +55,7 @@ pub(super) async fn collect_events<WOut: Write, WErr: Write>(
     let mut last_char_nl = false;
     let mut saw_approval_denial = false;
 
-    while let Some(seq_ev) = rx.recv().await {
+    while let Some(seq_ev) = rx.pull().await {
         if fmt == OutputFormat::StreamJson {
             if let Ok(line) = serde_json::to_string(&seq_ev) {
                 let _ = writeln!(out, "{line}");
@@ -93,7 +120,18 @@ pub(super) async fn collect_events<WOut: Write, WErr: Write>(
                 input_tokens,
                 output_tokens,
                 context_tokens,
+                cache_read_tokens,
+                cache_create_tokens,
+                ..
             } => {
+                if fmt == OutputFormat::Text
+                    && (cache_read_tokens > 0 || cache_create_tokens > 0)
+                {
+                    let _ = writeln!(
+                        err,
+                        "[cache] read={cache_read_tokens} create={cache_create_tokens}"
+                    );
+                }
                 if fmt == OutputFormat::Text && wrote_text && !last_char_nl {
                     let _ = writeln!(out);
                     let _ = out.flush();
@@ -112,11 +150,14 @@ pub(super) async fn collect_events<WOut: Write, WErr: Write>(
                     let _ = writeln!(out);
                     let _ = out.flush();
                 }
-                return Err(msg);
+                return Err(TurnFailure { message: msg, tool_calls });
             }
             _ => {}
         }
     }
 
-    Err("agent event stream closed unexpectedly".into())
+    Err(TurnFailure {
+        message: "agent event stream closed unexpectedly".into(),
+        tool_calls,
+    })
 }

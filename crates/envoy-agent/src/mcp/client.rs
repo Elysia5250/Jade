@@ -6,6 +6,7 @@ use super::config::{
 use super::transport::McpTransport;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -64,7 +65,8 @@ impl McpManager {
 
         let mut handles = Vec::new();
         for cfg in report.servers {
-            handles.push(tokio::spawn(connect_one(cfg)));
+            let cwd_c = cwd.to_path_buf();
+            handles.push(tokio::spawn(connect_one(cfg, cwd_c)));
         }
 
         for h in handles {
@@ -74,7 +76,19 @@ impl McpManager {
             if let Some(conn) = conn_opt {
                 mgr.servers.insert(status.name.clone(), conn);
             }
-            for t in discovered {
+            for mut t in discovered {
+                if mgr.tools.contains_key(&t.qualified_name) {
+                    let candidate = disambiguate_tool_name(&t.qualified_name, &t.server, &t.raw_name);
+                    if mgr.tools.contains_key(&candidate) {
+                        tracing::warn!(
+                            server = %t.server,
+                            tool = %t.raw_name,
+                            "skipping colliding MCP tool name"
+                        );
+                        continue;
+                    }
+                    t.qualified_name = candidate;
+                }
                 mgr.tools.insert(t.qualified_name.clone(), t);
             }
             mgr.statuses.push(status);
@@ -93,6 +107,12 @@ impl McpManager {
 
     pub fn tools(&self) -> Vec<&McpToolInfo> {
         self.tools.values().collect()
+    }
+
+    pub fn tool_identity(&self, qualified_name: &str) -> Option<(&str, &str)> {
+        self.tools
+            .get(qualified_name)
+            .map(|t| (t.server.as_str(), t.raw_name.as_str()))
     }
 
     pub fn is_read_only(&self, qualified_name: &str) -> bool {
@@ -155,6 +175,7 @@ impl McpManager {
 
 async fn connect_one(
     cfg: McpServerConfig,
+    workspace_cwd: PathBuf,
 ) -> (McpServerStatus, Option<ConnectedServer>, Vec<McpToolInfo>) {
     let transport_label = match cfg.transport {
         McpTransportConfig::Stdio { .. } => "stdio",
@@ -176,7 +197,9 @@ async fn connect_one(
     }
 
     let timeout = Duration::from_secs(cfg.timeout_s);
-    let mut transport = match McpTransport::connect(&cfg.transport, cfg.timeout_s).await {
+    let mut transport =
+        match McpTransport::connect(&cfg.transport, cfg.scope, &workspace_cwd, cfg.timeout_s).await
+        {
         Ok(t) => t,
         Err(e) => {
             return (
@@ -264,6 +287,18 @@ async fn connect_one(
         timeout,
     };
     (status, Some(conn), tools)
+}
+
+fn disambiguate_tool_name(base: &str, server: &str, raw_name: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(server.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(raw_name.as_bytes());
+    let d = hasher.finalize();
+    let suffix = format!("_{:02x}{:02x}{:02x}{:02x}", d[0], d[1], d[2], d[3]);
+    let keep = 64usize.saturating_sub(suffix.len());
+    let prefix = if base.len() > keep { &base[..keep] } else { base };
+    format!("{prefix}{suffix}")
 }
 
 fn format_mcp_call_result(result: &Value) -> String {

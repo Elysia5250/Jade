@@ -1,136 +1,48 @@
 //! Daemon-side session store, turn runner, and manual `/compact` + `/handoff`.
 
-use super::hooks::{new_hook_engine, run_manual_context_op};
-use super::monitors::MonitorHub;
-use super::ops::seed_checkpoint_user_turns;
+use super::hooks::run_manual_context_op;
 use super::protocol::{SendMode, SeqEvent, SessionInfo};
 use crate::agent::checkpoint::CheckpointStore;
 use crate::agent::MonitorBroker;
-use crate::agent::{AgentEvent, AskBroker, TurnConfig};
+use crate::agent::{AgentEvent, TurnConfig};
 use crate::auth::resolve_provider_with_overrides;
-use crate::hooks::HookEngine;
-use crate::permissions::{PermissionEngine, PermissionMode};
+use crate::permissions::PermissionMode;
 use crate::session::ChatMessage;
 use anyhow::{bail, Result};
-
-use serde_json::Value;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use envoy_service::{dialer_for, AgentDialer, Remote, UnixDialer};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tracing::debug;
 
-pub struct Live {
-    pub(crate) cwd: PathBuf,
-    pub(crate) target: String,
-    pub local_socket: Option<PathBuf>,
-    pub(crate) messages: Vec<ChatMessage>,
-    pub(crate) events: Vec<SeqEvent>,
-    pub(crate) seq: u64,
-    pub(crate) running: bool,
-    queued: VecDeque<String>,
-    pub(crate) steer: Arc<Mutex<Vec<String>>>,
-    pub asks: Arc<AskBroker>,
-    pub permissions: Arc<PermissionEngine>,
-    pub monitors: Arc<MonitorHub>,
-    pub(crate) hooks: Arc<HookEngine>,
-    pub(crate) hook_state: Arc<Mutex<BTreeMap<String, Value>>>,
-    pub(crate) pending_session_context: Vec<String>,
-    pub(crate) turn_seq: u64,
-    pub(crate) session_started: bool,
-    pub(crate) session_ended: bool,
-    pub(crate) checkpoints: CheckpointStore,
-    pub(crate) active_checkpoint_id: Option<u64>,
-    pub(crate) user_turns: usize,
-    pub model_override: Option<String>,
-    pub max_steps: Option<usize>,
-    pub(crate) subs: Vec<mpsc::UnboundedSender<SeqEvent>>,
-    turn: Option<tokio::task::JoinHandle<()>>,
-    pump: Option<tokio::task::JoinHandle<()>>,
-}
+pub(crate) use super::live::{Live, LivePhase, PhaseGuard};
 
-impl Live {
-    fn new(
-        runtime: &Arc<Runtime>,
-        data_dir: &Path,
-        id: &str,
-        cwd: PathBuf,
-        target: String,
-        messages: Vec<ChatMessage>,
-    ) -> Self {
-        let permissions = PermissionEngine::new(
-            data_dir.to_path_buf(),
-            cwd.clone(),
-            id.to_string(),
-            target.clone(),
-            PermissionMode::Default,
-        );
-        let monitors = MonitorHub::new(
-            id.to_string(),
-            data_dir.to_path_buf(),
-            Arc::downgrade(runtime),
-        );
-        let hooks = new_hook_engine(data_dir, &cwd);
-        let checkpoints = CheckpointStore::load(data_dir.to_path_buf(), id.to_string());
-        let user_turns = seed_checkpoint_user_turns(&checkpoints, &messages);
-        Self {
-            cwd,
-            target,
-            local_socket: None,
-            messages,
-            events: Vec::new(),
-            seq: 0,
-            running: false,
-            queued: VecDeque::new(),
-            steer: Arc::new(Mutex::new(Vec::new())),
-            asks: AskBroker::new(),
-            permissions,
-            monitors,
-            hooks,
-            hook_state: Arc::new(Mutex::new(BTreeMap::new())),
-            pending_session_context: Vec::new(),
-            turn_seq: 0,
-            session_started: false,
-            session_ended: false,
-            checkpoints,
-            active_checkpoint_id: None,
-            user_turns,
-            model_override: None,
-            max_steps: None,
-            subs: Vec::new(),
-            turn: None,
-            pump: None,
-        }
-    }
-
-    pub fn subscribe(&mut self) -> mpsc::UnboundedReceiver<SeqEvent> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        self.subs.push(tx);
-        rx
-    }
-
-    fn info(&self, id: &str) -> SessionInfo {
-        SessionInfo {
-            id: id.to_string(),
-            cwd: self.cwd.clone(),
-            target: self.target.clone(),
-            running: self.running,
-            queued: self.queued.len(),
-        }
-    }
-}
 
 pub struct Runtime {
     pub(crate) data_dir: PathBuf,
+    conduit: Option<PathBuf>,
     sessions: Mutex<HashMap<String, Arc<Mutex<Live>>>>,
+    incarnation_id: u64,
 }
 
 impl Runtime {
     pub fn new(data_dir: PathBuf) -> Arc<Self> {
+        Self::with_conduit(data_dir, None)
+    }
+
+    pub fn with_conduit(data_dir: PathBuf, conduit: Option<PathBuf>) -> Arc<Self> {
         Arc::new(Self {
             data_dir,
+            conduit,
             sessions: Mutex::new(HashMap::new()),
+            incarnation_id: new_incarnation(),
         })
+    }
+
+    pub(crate) fn incarnation_id(&self) -> u64 {
+        self.incarnation_id
     }
 
     pub(crate) fn session(&self, id: &str) -> Option<Arc<Mutex<Live>>> {
@@ -145,6 +57,9 @@ impl Runtime {
         self.sessions.lock().unwrap().drain().collect()
     }
 
+    /// Test helper: boot a session already `Idle`. Production sessions go
+    /// through `ensure_with_hooks`, which claims `Initializing` first.
+    #[cfg(test)]
     pub(crate) fn ensure(
         self: &Arc<Self>,
         id: String,
@@ -152,30 +67,75 @@ impl Runtime {
         target: String,
         history: Vec<ChatMessage>,
     ) -> Arc<Mutex<Live>> {
+        self.ensure_in(id, cwd, target, history, LivePhase::Idle).0
+    }
+
+    pub(crate) fn ensure_in(
+        self: &Arc<Self>,
+        id: String,
+        cwd: PathBuf,
+        target: String,
+        history: Vec<ChatMessage>,
+        boot: LivePhase,
+    ) -> (Arc<Mutex<Live>>, bool) {
         let mut map = self.sessions.lock().unwrap();
+        if let Some(existing) = map.get(&id).cloned() {
+            drop(map);
+            let mut state = existing.lock().unwrap();
+            state.last_used = Instant::now();
+            if state.cwd != cwd || state.target != target {
+                state.permissions = state
+                    .permissions
+                    .rebind_workspace(cwd.clone(), target.clone());
+                state.cwd = cwd;
+                state.target = target;
+            }
+            let fresh = !state.session_started && state.phase == LivePhase::Idle;
+            if fresh && boot == LivePhase::Initializing {
+                state.phase = LivePhase::Initializing;
+                state.session_started = true;
+            }
+            drop(state);
+            return (existing, fresh && boot == LivePhase::Initializing);
+        }
+        Live::evict_idle_sessions(&mut map);
         let data_dir = &self.data_dir;
-        map.entry(id.clone())
-            .or_insert_with(|| {
-                let mut live = Live::new(self, data_dir, &id, cwd, target, history);
-                live.seq = 1;
-                live.events.push(SeqEvent {
-                    seq: 1,
-                    event: AgentEvent::SessionReset,
-                });
-                Arc::new(Mutex::new(live))
-            })
-            .clone()
+        let mut live = Live::new(self, data_dir, &id, cwd, target, history);
+        if let Ok(saved) = crate::session::load_session(data_dir, &id) {
+            live.calibration_factor =
+                crate::agent::context::TokenCalibration::from_stored(saved.calibration_factor)
+                    .factor;
+        }
+        live.seq = 1;
+        live.record_logged(1, &AgentEvent::SessionReset);
+        if boot == LivePhase::Initializing {
+            live.phase = LivePhase::Initializing;
+            live.session_started = true;
+        }
+        let arc = Arc::new(Mutex::new(live));
+        map.insert(id, arc.clone());
+        (arc, boot == LivePhase::Initializing)
     }
 
     pub(crate) fn publish(&self, live: &mut Live, event: AgentEvent) {
         live.seq += 1;
         let seq = live.seq;
+        live.record_logged(seq, &event);
         let item = SeqEvent { seq, event };
-        live.events.push(item.clone());
-        if live.events.len() > 20_000 {
-            live.events.drain(..5_000);
+        let mut dropped_slow = false;
+        live.subs.retain(|tx| match tx.try_send(item.clone()) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                dropped_slow = true;
+                false
+            }
+        });
+        if dropped_slow {
+            live.seq += 1;
+            let reset = AgentEvent::SessionReset;
+            live.record_logged(live.seq, &reset);
         }
-        live.subs.retain(|tx| tx.send(item.clone()).is_ok());
     }
 
     pub(crate) fn start_turn(
@@ -198,7 +158,7 @@ impl Runtime {
                     },
                 );
             }
-            state.running = false;
+            state.release();
             self.publish(
                 &mut state,
                 AgentEvent::TurnError("no model configured: run /login".into()),
@@ -207,7 +167,7 @@ impl Runtime {
         };
         if model.model_id.trim().is_empty() {
             let mut state = live.lock().unwrap();
-            state.running = false;
+            state.release();
             self.publish(
                 &mut state,
                 AgentEvent::TurnError("no model selected: pass --model or set ENVOY_MODEL".into()),
@@ -230,17 +190,25 @@ impl Runtime {
             hook_state_sink,
             turn_seq,
             max_steps,
+            usage,
         ) = {
             let mut state = live.lock().unwrap();
-            state.running = true;
+            if state.phase == LivePhase::Idle {
+                state.claim(LivePhase::RunningTurn);
+            }
             state.turn_seq += 1;
+            *state.turn_usage.lock().unwrap() = crate::agent::TurnUsage {
+                calibration_factor: state.calibration_factor,
+                ..crate::agent::TurnUsage::default()
+            };
             let monitors: Arc<dyn MonitorBroker> = state.monitors.clone();
             let hook_state = state.hook_state.lock().unwrap().clone();
+            let (cwd, target, history) = state.next_turn_context();
             (
-                state.cwd.clone(),
-                state.target.clone(),
+                cwd,
+                target,
                 state.local_socket.clone(),
-                state.messages.clone(),
+                history,
                 state.asks.clone(),
                 state.steer.clone(),
                 state.permissions.clone(),
@@ -250,12 +218,13 @@ impl Runtime {
                 Some(Arc::clone(&state.hook_state)),
                 state.turn_seq,
                 state.max_steps,
+                Arc::clone(&state.turn_usage),
             )
         };
 
         let cfg = TurnConfig {
             data_dir: self.data_dir.clone(),
-            conduit: None,
+            conduit: self.conduit.clone(),
             local_socket,
             target,
             cwd,
@@ -271,6 +240,7 @@ impl Runtime {
             hook_state_sink,
             turn_seq,
             max_steps,
+            usage: Some(usage),
         };
         debug!(session = %id, turn_seq, "turn start");
         let turn = tokio::spawn(Arc::clone(self).run_turn_with_hooks(
@@ -291,8 +261,9 @@ impl Runtime {
                     None => {
                         debug!(session = %id, "turn channel closed without a terminal event");
                         let mut state = pump_live.lock().unwrap();
-                        state.running = false;
+                        state.release();
                         state.active_checkpoint_id = None;
+                        state.active_job = None;
                         state.queued.clear();
                         runtime.publish(
                             &mut state,
@@ -306,41 +277,79 @@ impl Runtime {
                     event,
                     AgentEvent::TurnDone { .. } | AgentEvent::TurnError(_)
                 );
-                let mut state = pump_live.lock().unwrap();
-                match &event {
-                    AgentEvent::TurnDone { messages, .. }
-                    | AgentEvent::Compacted { messages, .. } => {
-                        state.messages = messages.clone();
-                    }
-                    AgentEvent::FileChanged {
-                        path,
-                        before,
-                        existed_before,
-                        restorable_before,
-                        ..
-                    } => {
-                        if let Some(cp_id) = state.active_checkpoint_id {
-                            state.checkpoints.record_file_change(
-                                cp_id,
-                                path.clone(),
-                                *existed_before,
-                                before.clone(),
-                                *restorable_before,
-                            );
+                let checkpoint_flush = {
+                    let mut state = pump_live.lock().unwrap();
+                    let mut flush = None;
+                    match &event {
+                        AgentEvent::TurnDone { messages, .. }
+                        | AgentEvent::Compacted { messages, .. } => {
+                            state.messages = messages.clone();
                         }
+                        AgentEvent::FileChanged {
+                            path,
+                            before,
+                            existed_before,
+                            restorable_before,
+                            ..
+                        } => {
+                            if let Some(cp_id) = state.active_checkpoint_id {
+                                if state.checkpoints.note_file_change(
+                                    cp_id,
+                                    path.clone(),
+                                    *existed_before,
+                                    before.clone(),
+                                    *restorable_before,
+                                ) {
+                                    flush = state.checkpoints.queued_write().ok();
+                                }
+                            }
+                        }
+                        AgentEvent::ToolJob { job_id, .. } => {
+                            state.active_job = Some(*job_id);
+                        }
+                        AgentEvent::ToolDone { .. } => {
+                            state.active_job = None;
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                }
-                runtime.publish(&mut state, event);
-                if finished {
-                    state.running = false;
-                    state.active_checkpoint_id = None;
-                    let next = state.queued.pop_front();
-                    drop(state);
-                    if let Some(next) = next {
-                        runtime.start_turn(&id, Arc::clone(&pump_live), Some(next));
+                    runtime.publish(&mut state, event);
+                    if finished {
+                        let usage = state.turn_usage.lock().unwrap().clone();
+                        if (0.65..=1.65).contains(&usage.calibration_factor) {
+                            state.calibration_factor = usage.calibration_factor;
+                        }
+                        let snapshot = SessionSnapshot {
+                            cwd: state.cwd.clone(),
+                            target: state.target.clone(),
+                            messages: state.messages.clone(),
+                            usage,
+                        };
+                        state.release();
+                        state.active_checkpoint_id = None;
+                        state.active_job = None;
+                        let next = state.queued.pop_front();
+                        let continued = match next {
+                            Some(next) if state.claim(LivePhase::RunningTurn) => Some(next),
+                            Some(next) => {
+                                state.queued.push_front(next);
+                                None
+                            }
+                            None => None,
+                        };
+                        drop(state);
+                        if let Some((path, bytes)) = flush {
+                            let _ = CheckpointStore::write_queued(&path, &bytes);
+                        }
+                        persist_daemon_session(&runtime.data_dir, &id, snapshot);
+                        if let Some(next) = continued {
+                            runtime.start_turn(&id, Arc::clone(&pump_live), Some(next));
+                        }
+                        return;
                     }
-                    return;
+                    flush
+                };
+                if let Some((path, bytes)) = checkpoint_flush {
+                    let _ = CheckpointStore::write_queued(&path, &bytes);
                 }
             }
         });
@@ -359,7 +368,9 @@ impl Runtime {
             let mut state = live.lock().unwrap();
             debug!(session = id, ?mode, running = state.running, "send");
             match mode {
-                SendMode::Prompt | SendMode::Steer if state.running => {
+                SendMode::Prompt | SendMode::Steer
+                    if state.phase == LivePhase::RunningTurn =>
+                {
                     state.steer.lock().unwrap().push(text.clone());
                     self.publish(
                         &mut state,
@@ -370,11 +381,20 @@ impl Runtime {
                     );
                     return;
                 }
-                SendMode::FollowUp if state.running => {
+                SendMode::FollowUp if state.phase != LivePhase::Idle || state.running => {
                     state.queued.push_back(text);
                     return;
                 }
-                _ => text,
+                _ => {
+                    if !state.claim(LivePhase::RunningTurn) {
+                        self.publish(
+                            &mut state,
+                            AgentEvent::TurnError("session is busy".into()),
+                        );
+                        return;
+                    }
+                    text
+                }
             }
         };
         self.start_turn(id, live, Some(start));
@@ -397,16 +417,17 @@ impl Runtime {
         };
         let (cwd, target, mut messages) = {
             let mut state = live.lock().unwrap();
-            if state.running {
+            if !state.claim(LivePhase::Compacting) {
                 bail!("session is busy; wait for the active turn to finish or interrupt first");
             }
             if state.messages.len() < 2 && !handoff {
+                state.release();
                 bail!("nothing to compact yet");
             }
             if state.messages.is_empty() && handoff {
+                state.release();
                 bail!("nothing to hand off yet");
             }
-            state.running = true;
             self.publish(
                 &mut state,
                 AgentEvent::Compacting {
@@ -442,7 +463,9 @@ impl Runtime {
             .await;
 
             let mut state = task_live.lock().unwrap();
-            state.running = false;
+            if state.phase == LivePhase::Compacting {
+                state.release();
+            }
             match res {
                 Ok(ev) => {
                     if let AgentEvent::Compacted { messages, .. } = &ev {
@@ -464,19 +487,35 @@ impl Runtime {
         let Some(live) = self.session(id) else {
             return;
         };
-        let (turn, pump) = {
+        let (turn, pump, job) = {
             let mut state = live.lock().unwrap();
             state.steer.lock().unwrap().clear();
             state.queued.clear();
-            state.running = false;
+            state.release();
             state.active_checkpoint_id = None;
-            (state.turn.take(), state.pump.take())
+            let job = state.active_job.take().map(|job_id| {
+                (
+                    job_id,
+                    state.target.clone(),
+                    state.local_socket.clone(),
+                )
+            });
+            (state.turn.take(), state.pump.take(), job)
         };
         if let Some(task) = turn {
             task.abort();
         }
         if let Some(task) = pump {
             task.abort();
+        }
+        if let Some((job_id, target, local_socket)) = job {
+            let data_dir = self.data_dir.clone();
+            let conduit = self.conduit.clone();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    cancel_active_job(&data_dir, &target, local_socket, conduit, job_id).await;
+                });
+            }
         }
         let mut state = live.lock().unwrap();
         self.publish(
@@ -512,4 +551,61 @@ impl Runtime {
             .map(|(id, live)| live.lock().unwrap().info(id))
             .collect()
     }
+}
+
+fn new_incarnation() -> u64 {
+    let mut buf = [0u8; 8];
+    if getrandom::fill(&mut buf).is_err() {
+        return 1;
+    }
+    let id = u64::from_le_bytes(buf);
+    if id == 0 { 1 } else { id }
+}
+
+struct SessionSnapshot {
+    cwd: PathBuf,
+    target: String,
+    messages: Vec<ChatMessage>,
+    usage: crate::agent::TurnUsage,
+}
+
+fn persist_daemon_session(data_dir: &Path, id: &str, snap: SessionSnapshot) {
+    if crate::session::checked_session_id(id).is_err() {
+        return;
+    }
+    let mut session = crate::session::load_session(data_dir, id).unwrap_or_else(|_| {
+        let mut created = crate::session::Session::new(snap.cwd.clone(), snap.target.clone());
+        created.id = id.to_string();
+        created
+    });
+    session.id = id.to_string();
+    session.cwd = snap.cwd;
+    session.target = snap.target;
+    session.messages = snap.messages;
+    session.input_tokens = session.input_tokens.max(snap.usage.input_tokens);
+    session.output_tokens = session.output_tokens.max(snap.usage.output_tokens);
+    session.prompt_tokens = session.prompt_tokens.max(snap.usage.context_tokens);
+    session.cache_read_tokens += snap.usage.cache_read_tokens;
+    session.cache_create_tokens += snap.usage.cache_create_tokens;
+    if (0.65..=1.65).contains(&snap.usage.calibration_factor) {
+        session.calibration_factor = snap.usage.calibration_factor;
+    }
+    session.touch();
+    let _ = crate::session::save_session(data_dir, &session);
+}
+
+async fn cancel_active_job(
+    data_dir: &Path,
+    target: &str,
+    local_socket: Option<PathBuf>,
+    conduit: Option<PathBuf>,
+    job_id: u64,
+) {
+    let dialer: Box<dyn AgentDialer> = match (local_socket, target == "local" || target.is_empty())
+    {
+        (Some(sock), true) => Box::new(UnixDialer::new(sock)),
+        _ => dialer_for(data_dir, target, conduit),
+    };
+    let remote = Remote::new(dialer);
+    let _ = remote.cancel(target, job_id).await;
 }

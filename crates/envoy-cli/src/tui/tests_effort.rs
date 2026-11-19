@@ -16,7 +16,7 @@ fn slash_effort_persists_a_level_and_rejects_unknown() {
     let dir = tmpdir();
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
     app.run_slash("/effort");
-    assert_eq!(effort::load(&dir), "low");
+    assert_eq!(effort::load(&dir), "medium");
     app.run_slash("/effort xhigh");
     assert_eq!(effort::load(&dir), "xhigh");
     app.run_slash("/effort off");

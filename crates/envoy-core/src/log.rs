@@ -11,6 +11,7 @@
 //! the last `seq` without losing or duplicating output.
 
 use envoy_proto::{LogRecord, AGENT_CHUNK};
+use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,8 +23,6 @@ pub const MAX_LOG_BYTES: u64 = 16 * 1024 * 1024;
 pub const RECORD_HEADER: u64 = 5;
 /// Largest record payload accepted when reading (guards corruption).
 const MAX_RECORD: usize = 2 * AGENT_CHUNK;
-/// Orphaned log files younger than this are left alone.
-const ORPHAN_GRACE: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Directory layout: `<data_dir>/jobs/<id>.log`.
 #[derive(Debug, Clone)]
@@ -44,7 +43,13 @@ impl JobLogs {
         self.dir().join(format!("{id}.log"))
     }
 
-    pub fn prune(&self, keep: &[u64]) {
+    /// Delete log files whose ids are not in `keep` and not reported live.
+    ///
+    /// `still_live` closes the race where a job is submitted after `keep` was
+    /// snapshotted but before this scan runs. Evicted ids are removed
+    /// immediately; there is no grace period that retains multi-megabyte logs.
+    pub fn prune(&self, keep: &[u64], still_live: impl Fn(u64) -> bool) {
+        let keep: HashSet<u64> = keep.iter().copied().collect();
         let Ok(rd) = std::fs::read_dir(self.dir()) else {
             return;
         };
@@ -56,20 +61,10 @@ impl JobLogs {
             let Ok(id) = stem.parse::<u64>() else {
                 continue; // state.json and anything else
             };
-            if keep.contains(&id) {
+            if keep.contains(&id) || still_live(id) {
                 continue;
             }
-            // Only reclaim logs that are clearly orphans: a live job's file may
-            // be written a moment after the table snapshot was taken.
-            let stale = std::fs::metadata(&path)
-                .and_then(|m| m.modified())
-                .ok()
-                .and_then(|t| t.elapsed().ok())
-                .map(|age| age > ORPHAN_GRACE)
-                .unwrap_or(true);
-            if stale {
-                let _ = std::fs::remove_file(path);
-            }
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -107,27 +102,41 @@ impl LogWriter {
         &self.path
     }
 
-    /// Append one output chunk. Output beyond [`MAX_LOG_BYTES`] is dropped; a
-    /// single truncation notice is appended so readers know why it stops.
+    /// Append one output chunk. Payloads larger than [`MAX_RECORD`] are split
+    /// into consecutive records so the length header stays honest. Output
+    /// beyond [`MAX_LOG_BYTES`] is dropped; a single truncation notice is
+    /// appended so readers know why it stops.
     pub fn record(&mut self, fd: u8, data: &[u8]) {
         if data.is_empty() {
             return;
         }
-        if self.payload >= MAX_LOG_BYTES {
-            if !self.truncated {
-                self.truncated = true;
-                let note = b"\n[log truncated: cap reached]\n";
-                let _ = self.write_record(1, note);
-                self.notify.notify_waiters();
+        let mut rest = data;
+        while !rest.is_empty() {
+            if self.payload >= MAX_LOG_BYTES {
+                self.note_truncated();
+                break;
             }
-            return;
-        }
-        let room = (MAX_LOG_BYTES - self.payload) as usize;
-        let take = room.min(data.len());
-        if self.write_record(fd, &data[..take]).is_ok() {
+            let room = (MAX_LOG_BYTES - self.payload) as usize;
+            let take = room.min(rest.len()).min(MAX_RECORD);
+            if take == 0 || self.write_record(fd, &rest[..take]).is_err() {
+                break;
+            }
             self.payload += take as u64;
+            rest = &rest[take..];
+        }
+        if self.payload >= MAX_LOG_BYTES {
+            self.note_truncated();
         }
         self.notify.notify_waiters();
+    }
+
+    fn note_truncated(&mut self) {
+        if self.truncated {
+            return;
+        }
+        self.truncated = true;
+        let note = b"\n[log truncated: cap reached]\n";
+        let _ = self.write_record(1, note);
     }
 
     fn write_record(&mut self, fd: u8, data: &[u8]) -> std::io::Result<()> {
@@ -276,6 +285,38 @@ mod tests {
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].data, b"complete");
         assert_eq!(next, recs[0].seq + RECORD_HEADER + 8);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn oversized_payload_is_split_into_readable_records() {
+        let dir = tmpdir("split");
+        let path = dir.join("3.log");
+        let wake = Arc::new(Notify::new());
+        let mut payload = vec![0xABu8; MAX_RECORD + 100];
+        payload[0] = 1;
+        payload[MAX_RECORD] = 2;
+        {
+            let mut w = LogWriter::create(path.clone(), wake).unwrap();
+            w.record(0, &payload);
+        }
+        let (recs, _) = read_from(&path, 0, payload.len() + 64).unwrap();
+        assert!(recs.len() >= 2, "expected a split, got {}", recs.len());
+        let joined: Vec<u8> = recs.iter().flat_map(|r| r.data.clone()).collect();
+        assert_eq!(joined, payload);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_deletes_evicted_logs_immediately() {
+        let dir = tmpdir("prune");
+        let logs = JobLogs::new(dir.clone());
+        std::fs::create_dir_all(logs.dir()).unwrap();
+        std::fs::write(logs.path(1), b"keep").unwrap();
+        std::fs::write(logs.path(2), b"drop").unwrap();
+        logs.prune(&[1], |_| false);
+        assert!(logs.path(1).exists());
+        assert!(!logs.path(2).exists(), "evicted log must not linger");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

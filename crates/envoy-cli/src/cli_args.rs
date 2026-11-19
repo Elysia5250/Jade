@@ -162,9 +162,13 @@ impl TaskArgs {
         if argv.is_empty() {
             bail!("no command given");
         }
-        // A single argument is a command line ("echo hi | wc -l"); several are
-        // already split words and run without a shell unless --shell is given.
-        let spec = if self.shell || argv.len() == 1 {
+        // `--shell` joins every word. A single argument is already a command
+        // line ("echo hi | wc -l"); several words without --shell stay argv.
+        let spec = if self.shell {
+            TaskSpec::Shell {
+                command: argv.join(" "),
+            }
+        } else if argv.len() == 1 {
             TaskSpec::Shell {
                 command: argv.remove(0),
             }

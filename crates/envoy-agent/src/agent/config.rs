@@ -39,4 +39,17 @@ pub struct TurnConfig {
     pub turn_seq: u64,
     /// Optional per-turn tool-step ceiling (defaults to 100).
     pub max_steps: Option<usize>,
+    /// Filled as the loop runs so a failed turn can still report partial usage.
+    pub usage: Option<Arc<Mutex<TurnUsage>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TurnUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub context_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_create_tokens: u64,
+    /// `0.0` means "not sampled yet"; a stored factor lives in `0.65..=1.65`.
+    pub calibration_factor: f64,
 }

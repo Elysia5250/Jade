@@ -6,7 +6,8 @@
 //! rule engine falls back to `Ask`.
 
 use super::shell_classify::{
-    base_bin, classify_argv, segment_is_catastrophic, segment_is_destructive, segment_needs_net,
+    base_bin, classify_argv, is_env_assign, parse_redir_inline, redir_op_kind,
+    segment_is_catastrophic, segment_is_destructive, segment_needs_net, tokenize_words, RedirKind,
 };
 use anyhow::{bail, Result};
 
@@ -15,6 +16,7 @@ pub struct CommandSegment {
     pub raw: String,
     pub argv: Vec<String>,
     pub redirections: Vec<String>,
+    pub read_redirections: Vec<String>,
     pub uses_sudo: bool,
     pub uses_xargs: bool,
 }
@@ -31,7 +33,7 @@ pub struct ShellAnalysis {
 }
 
 pub fn analyze_shell(command: &str) -> Result<ShellAnalysis> {
-    let raw_segments = split_compound_and_subshells(command)?;
+    let (raw_segments, has_write_proc_sub) = split_compound_and_subshells(command)?;
     if raw_segments.is_empty() {
         bail!("empty command");
     }
@@ -47,7 +49,7 @@ pub fn analyze_shell(command: &str) -> Result<ShellAnalysis> {
     let mut needs_net = false;
     let mut destructive = false;
     let mut catastrophic = false;
-    let mut read_only_all = true;
+    let mut read_only_all = !has_write_proc_sub;
     let mut referenced_paths = Vec::new();
     let mut write_paths = Vec::new();
 
@@ -74,6 +76,9 @@ pub fn analyze_shell(command: &str) -> Result<ShellAnalysis> {
                 referenced_paths.push(r.clone());
             }
         }
+        for r in &seg.read_redirections {
+            referenced_paths.push(r.clone());
+        }
         let (is_ro, refs, writes) = classify_argv(&seg.argv);
         if !is_ro {
             read_only_all = false;
@@ -93,14 +98,19 @@ pub fn analyze_shell(command: &str) -> Result<ShellAnalysis> {
     })
 }
 
-fn split_compound_and_subshells(input: &str) -> Result<Vec<String>> {
+fn split_compound_and_subshells(input: &str) -> Result<(Vec<String>, bool)> {
     let chars: Vec<char> = input.chars().collect();
     let mut out = Vec::new();
-    split_range(&chars, &mut out)?;
-    Ok(out)
+    let mut has_write_proc_sub = false;
+    split_range(&chars, &mut out, &mut has_write_proc_sub)?;
+    Ok((out, has_write_proc_sub))
 }
 
-fn split_range(chars: &[char], out: &mut Vec<String>) -> Result<()> {
+fn split_range(
+    chars: &[char],
+    out: &mut Vec<String>,
+    has_write_proc_sub: &mut bool,
+) -> Result<()> {
     let mut cur = String::new();
     let mut i = 0usize;
     let mut in_single = false;
@@ -129,14 +139,14 @@ fn split_range(chars: &[char], out: &mut Vec<String>) -> Result<()> {
         if in_double {
             if c == '$' && i + 1 < chars.len() && chars[i + 1] == '(' {
                 let (inner, end) = extract_paren_group(chars, i + 1)?;
-                split_range(&inner, out)?;
+                split_range(&inner, out, has_write_proc_sub)?;
                 cur.push_str(&chars[i..=end].iter().collect::<String>());
                 i = end + 1;
                 continue;
             }
             if c == '`' {
                 let (inner, end) = extract_backtick(chars, i)?;
-                split_range(&inner, out)?;
+                split_range(&inner, out, has_write_proc_sub)?;
                 cur.push_str(&chars[i..=end].iter().collect::<String>());
                 i = end + 1;
                 continue;
@@ -162,13 +172,28 @@ fn split_range(chars: &[char], out: &mut Vec<String>) -> Result<()> {
             }
             '$' if i + 1 < chars.len() && chars[i + 1] == '(' => {
                 let (inner, end) = extract_paren_group(chars, i + 1)?;
-                split_range(&inner, out)?;
+                split_range(&inner, out, has_write_proc_sub)?;
                 cur.push_str(&chars[i..=end].iter().collect::<String>());
+                i = end + 1;
+            }
+            '<' | '>' if i + 1 < chars.len() && chars[i + 1] == '(' => {
+                let (inner, end) = extract_paren_group(chars, i + 1)?;
+                let inner_s: String = inner.iter().collect();
+                if inner_s.trim().is_empty() {
+                    bail!("empty process substitution");
+                }
+                if c == '>' {
+                    *has_write_proc_sub = true;
+                }
+                split_range(&inner, out, has_write_proc_sub)?;
+                if !cur.ends_with(' ') && !cur.is_empty() {
+                    cur.push(' ');
+                }
                 i = end + 1;
             }
             '`' => {
                 let (inner, end) = extract_backtick(chars, i)?;
-                split_range(&inner, out)?;
+                split_range(&inner, out, has_write_proc_sub)?;
                 cur.push_str(&chars[i..=end].iter().collect::<String>());
                 i = end + 1;
             }
@@ -176,9 +201,11 @@ fn split_range(chars: &[char], out: &mut Vec<String>) -> Result<()> {
                 paren_depth += 1;
                 if paren_depth == 1 && cur.trim().is_empty() {
                     let (inner, end) = extract_paren_group(chars, i)?;
-                    split_range(&inner, out)?;
+                    split_range(&inner, out, has_write_proc_sub)?;
                     paren_depth = 0;
                     i = end + 1;
+                } else if paren_depth == 1 {
+                    bail!("unexpected `(` mid-command");
                 } else {
                     cur.push(c);
                     i += 1;
@@ -298,23 +325,49 @@ fn parse_segment(raw: &str) -> Result<Vec<CommandSegment>> {
     let tokens = tokenize_words(raw)?;
     let mut argv = Vec::new();
     let mut redirections = Vec::new();
+    let mut read_redirections = Vec::new();
+    let mut has_heredoc = false;
     let mut i = 0usize;
 
     while i < tokens.len() {
         let tok = &tokens[i];
-        if let Some(target) = parse_redir_inline(tok) {
-            if target != "/dev/null" && !target.starts_with('&') {
-                redirections.push(target);
+        if let Some((kind, target)) = parse_redir_inline(tok) {
+            match kind {
+                RedirKind::Write => {
+                    if target != "/dev/null" && !target.starts_with('&') {
+                        redirections.push(target);
+                    }
+                }
+                RedirKind::Read => {
+                    if target != "/dev/null" && !target.starts_with('&') {
+                        read_redirections.push(target);
+                    }
+                }
+                RedirKind::Heredoc => {
+                    has_heredoc = true;
+                }
             }
             i += 1;
             continue;
         }
-        if is_redir_op(tok) {
+        if let Some(kind) = redir_op_kind(tok) {
             let Some(next) = tokens.get(i + 1) else {
                 bail!("missing redirection target");
             };
-            if next != "/dev/null" && !next.starts_with('&') {
-                redirections.push(next.clone());
+            match kind {
+                RedirKind::Write => {
+                    if next != "/dev/null" && !next.starts_with('&') {
+                        redirections.push(next.clone());
+                    }
+                }
+                RedirKind::Read => {
+                    if next != "/dev/null" && !next.starts_with('&') {
+                        read_redirections.push(next.clone());
+                    }
+                }
+                RedirKind::Heredoc => {
+                    has_heredoc = true;
+                }
             }
             i += 2;
             continue;
@@ -323,41 +376,93 @@ fn parse_segment(raw: &str) -> Result<Vec<CommandSegment>> {
         i += 1;
     }
 
-    unwrap_wrappers(raw, argv, redirections)
+    let mut segs = unwrap_wrappers(raw, argv, redirections, read_redirections)?;
+    if has_heredoc {
+        for s in &mut segs {
+            s.uses_xargs = true;
+        }
+    }
+    Ok(segs)
 }
 
 fn unwrap_wrappers(
     raw: &str,
     mut argv: Vec<String>,
     redirections: Vec<String>,
+    mut read_redirections: Vec<String>,
 ) -> Result<Vec<CommandSegment>> {
     let mut uses_sudo = false;
     let mut uses_xargs = false;
+    let mut stripped_anything = false;
 
     loop {
         while argv.first().is_some_and(|w| is_env_assign(w)) {
-            argv.remove(0);
+            stripped_anything = true;
+            let assign = argv.remove(0);
+            if let Some((k, _)) = assign.split_once('=') {
+                if envoy_core::sandbox::is_dangerous_env_var(k) {
+                    bail!("command sets security-sensitive env var `{k}`");
+                }
+            }
         }
         let Some(first) = argv.first().map(String::as_str) else {
+            if stripped_anything {
+                bail!("wrapper or env assignment left no executable command");
+            }
             return Ok(Vec::new());
         };
+        if matches!(
+            first,
+            "{" | "}"
+                | "!"
+                | "if"
+                | "then"
+                | "elif"
+                | "else"
+                | "fi"
+                | "for"
+                | "while"
+                | "until"
+                | "do"
+                | "done"
+                | "case"
+                | "esac"
+                | "select"
+                | "function"
+                | "coproc"
+                | "eval"
+                | "exec"
+                | "source"
+                | "."
+        ) {
+            bail!("compound syntax or dynamic builtin `{first}` requires approval");
+        }
         let bin = base_bin(first);
         match bin {
             "sudo" | "doas" => {
+                stripped_anything = true;
                 uses_sudo = true;
                 argv.remove(0);
-                while argv.first().is_some_and(|a| a.starts_with('-')) {
-                    let take_arg = matches!(argv[0].as_str(), "-u" | "-g" | "-C" | "-h");
-                    argv.remove(0);
-                    if take_arg && !argv.is_empty() {
-                        argv.remove(0);
-                    }
-                }
+                strip_wrapper_flags(&mut argv, &["-u", "-g", "-C", "-h"]);
             }
             "env" | "nohup" | "time" | "command" => {
+                stripped_anything = true;
+                let is_env = bin == "env";
                 argv.remove(0);
                 while argv.first().is_some_and(|a| a.starts_with('-')) {
-                    let take_arg = matches!(argv[0].as_str(), "-u" | "-C" | "-S");
+                    if argv[0] == "--" {
+                        argv.remove(0);
+                        break;
+                    }
+                    if is_env
+                        && (argv[0] == "-S"
+                            || argv[0].starts_with("-S")
+                            || argv[0] == "--split-string"
+                            || argv[0].starts_with("--split-string="))
+                    {
+                        bail!("`env -S` split-string requires approval");
+                    }
+                    let take_arg = matches!(argv[0].as_str(), "-u" | "-C" | "--unset" | "--chdir");
                     argv.remove(0);
                     if take_arg && !argv.is_empty() {
                         argv.remove(0);
@@ -365,51 +470,53 @@ fn unwrap_wrappers(
                 }
             }
             "nice" | "ionice" | "stdbuf" => {
+                stripped_anything = true;
                 argv.remove(0);
-                while argv.first().is_some_and(|a| a.starts_with('-')) {
-                    let take_arg = matches!(argv[0].as_str(), "-n" | "-c" | "-i" | "-o" | "-e");
-                    argv.remove(0);
-                    if take_arg && !argv.is_empty() {
-                        argv.remove(0);
-                    }
-                }
+                strip_wrapper_flags(&mut argv, &["-n", "-c", "-i", "-o", "-e"]);
             }
             "timeout" => {
+                stripped_anything = true;
                 argv.remove(0);
-                while argv.first().is_some_and(|a| a.starts_with('-')) {
-                    argv.remove(0);
+                strip_wrapper_flags(&mut argv, &["-k", "-s", "--kill-after", "--signal"]);
+                if argv.is_empty() {
+                    bail!("timeout missing duration or command");
                 }
-                if !argv.is_empty() {
-                    argv.remove(0);
-                }
+                argv.remove(0);
             }
             "xargs" => {
+                stripped_anything = true;
                 uses_xargs = true;
                 argv.remove(0);
-                while argv.first().is_some_and(|a| a.starts_with('-')) {
-                    let take_arg =
-                        matches!(argv[0].as_str(), "-I" | "-n" | "-P" | "-d" | "-E" | "-L");
-                    argv.remove(0);
-                    if take_arg && !argv.is_empty() {
-                        argv.remove(0);
-                    }
-                }
+                strip_wrapper_flags(&mut argv, &["-I", "-n", "-P", "-d", "-E", "-L"]);
             }
             "sh" | "bash" | "zsh" | "dash" => {
-                if let Some(c_pos) = argv.iter().position(|a| a == "-c" || a == "-lc") {
-                    if let Some(inner) = argv.get(c_pos + 1).cloned() {
-                        let inner_segs = split_compound_and_subshells(&inner)?;
-                        let mut out = Vec::new();
-                        for seg in inner_segs {
-                            let mut parsed = parse_segment(&seg)?;
-                            for s in &mut parsed {
-                                s.uses_sudo |= uses_sudo;
-                                s.uses_xargs |= uses_xargs;
-                                s.redirections.extend(redirections.iter().cloned());
-                            }
-                            out.extend(parsed);
+                if let Some(c_pos) = argv.iter().position(|a| is_shell_c_flag(a)) {
+                    let Some(inner) = argv.get(c_pos + 1).cloned() else {
+                        bail!("shell `-c` missing inline command");
+                    };
+                    let extra_positional: Vec<String> =
+                        argv.get(c_pos + 2..).unwrap_or(&[]).to_vec();
+                    let (inner_segs, has_write_proc) = split_compound_and_subshells(&inner)?;
+                    let mut out = Vec::new();
+                    for seg in inner_segs {
+                        let mut parsed = parse_segment(&seg)?;
+                        for s in &mut parsed {
+                            s.uses_sudo |= uses_sudo;
+                            s.uses_xargs |= uses_xargs || has_write_proc;
+                            s.redirections.extend(redirections.iter().cloned());
+                            s.read_redirections.extend(read_redirections.iter().cloned());
+                            s.read_redirections.extend(extra_positional.iter().cloned());
                         }
-                        return Ok(out);
+                        out.extend(parsed);
+                    }
+                    if out.is_empty() {
+                        bail!("empty inline shell command");
+                    }
+                    return Ok(out);
+                }
+                for tok in argv.iter().skip(1) {
+                    if !tok.starts_with('-') {
+                        read_redirections.push(tok.clone());
                     }
                 }
                 break;
@@ -419,103 +526,39 @@ fn unwrap_wrappers(
     }
 
     if argv.is_empty() {
+        if stripped_anything {
+            bail!("wrapper left no executable command");
+        }
         return Ok(Vec::new());
     }
     Ok(vec![CommandSegment {
         raw: raw.to_string(),
         argv,
         redirections,
+        read_redirections,
         uses_sudo,
         uses_xargs,
     }])
 }
 
-fn tokenize_words(input: &str) -> Result<Vec<String>> {
-    let mut words = Vec::new();
-    let mut cur = String::new();
-    let mut has_token = false;
-    let chars: Vec<char> = input.chars().collect();
-    let mut i = 0usize;
-
-    while i < chars.len() {
-        let c = chars[i];
-        if c.is_whitespace() {
-            if has_token {
-                words.push(std::mem::take(&mut cur));
-                has_token = false;
-            }
-            i += 1;
-            continue;
+fn strip_wrapper_flags(argv: &mut Vec<String>, take_arg_flags: &[&str]) {
+    while argv.first().is_some_and(|a| a.starts_with('-')) {
+        if argv[0] == "--" {
+            argv.remove(0);
+            break;
         }
-        has_token = true;
-        match c {
-            '\'' => {
-                i += 1;
-                while i < chars.len() && chars[i] != '\'' {
-                    cur.push(chars[i]);
-                    i += 1;
-                }
-                if i >= chars.len() {
-                    bail!("unclosed single quote");
-                }
-                i += 1;
-            }
-            '"' => {
-                i += 1;
-                while i < chars.len() && chars[i] != '"' {
-                    if chars[i] == '\\' && i + 1 < chars.len() {
-                        cur.push(chars[i + 1]);
-                        i += 2;
-                    } else {
-                        cur.push(chars[i]);
-                        i += 1;
-                    }
-                }
-                if i >= chars.len() {
-                    bail!("unclosed double quote");
-                }
-                i += 1;
-            }
-            '\\' => {
-                if i + 1 >= chars.len() {
-                    bail!("dangling escape");
-                }
-                cur.push(chars[i + 1]);
-                i += 2;
-            }
-            _ => {
-                cur.push(c);
-                i += 1;
-            }
+        let take_arg = take_arg_flags.contains(&argv[0].as_str());
+        argv.remove(0);
+        if take_arg && !argv.is_empty() {
+            argv.remove(0);
         }
     }
-    if has_token {
-        words.push(cur);
-    }
-    Ok(words)
 }
 
-fn is_redir_op(tok: &str) -> bool {
-    matches!(tok, ">" | ">>" | "1>" | "1>>" | "2>" | "2>>" | "&>" | "&>>")
-}
-
-fn parse_redir_inline(tok: &str) -> Option<String> {
-    for prefix in ["1>>", "2>>", "&>>", ">>", "1>", "2>", "&>", ">"] {
-        if let Some(rest) = tok.strip_prefix(prefix) {
-            if !rest.is_empty() {
-                return Some(rest.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn is_env_assign(w: &str) -> bool {
-    if let Some((k, _)) = w.split_once('=') {
-        !k.is_empty()
-            && !k.starts_with('-')
-            && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-    } else {
-        false
-    }
+fn is_shell_c_flag(flag: &str) -> bool {
+    flag.starts_with('-')
+        && !flag.starts_with("--")
+        && flag.len() >= 2
+        && flag[1..].bytes().all(|b| b.is_ascii_alphabetic())
+        && flag[1..].contains('c')
 }

@@ -4,16 +4,30 @@
 //! table, and `JobLog` is a *watch*, so a caller can disappear without
 //! affecting the job and reattach later at its last cursor.
 
+use crate::policy;
 use crate::transport::AgentHost;
 use anyhow::Result;
-use envoy_core::{audit, fs, gate, job, search, truncate, Jobs};
+use envoy_core::{audit, fs, gate, job, search, truncate, Caller, Jobs};
 use envoy_proto::codec::{read_framed, write_framed};
-use envoy_proto::{Call, ClientMsg, Hello, JobId, Op, Reply, AGENT_CHUNK, AGENT_VERSION};
+use envoy_proto::{
+    Call, ClientMsg, Hello, JobId, Op, Reply, VersionMismatch, AGENT_CHUNK, AGENT_VERSION,
+    WIRE_VERSION,
+};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::sync::Semaphore;
 use tracing::debug;
+
+tokio::task_local! {
+    static REPLY_FAILED: Arc<AtomicBool>;
+}
+
+fn mark_reply_failed() {
+    let _ = REPLY_FAILED.try_with(|flag| flag.store(true, Ordering::Relaxed));
+}
 
 /// How long a client has to send its first frame.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -33,6 +47,7 @@ struct Inner {
     root: PathBuf,
     /// Set when this server is mounted on a fabric: the authenticated device id.
     device: Option<String>,
+    streams: Arc<Semaphore>,
 }
 
 impl AgentServer {
@@ -44,6 +59,7 @@ impl AgentServer {
                 jobs: Jobs::open(root.clone(), max_jobs),
                 root,
                 device: None,
+                streams: Arc::new(Semaphore::new(policy::MAX_CONCURRENT_STREAMS)),
             }),
         }
     }
@@ -73,23 +89,47 @@ impl AgentServer {
     }
 
     /// Handle one request stream end-to-end.
-    pub async fn serve_stream<S>(&self, caller_id: &str, stream: S) -> Result<()>
+    pub async fn serve_stream<S>(&self, caller: Caller, stream: S) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        serve(self.inner.clone(), caller_id.to_string(), stream).await
+        serve(self.inner.clone(), caller, stream).await
     }
 }
 
-async fn serve<S>(inner: Arc<Inner>, caller_id: String, stream: S) -> Result<()>
+async fn serve<S>(inner: Arc<Inner>, caller: Caller, stream: S) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut rd, mut wr) = tokio::io::split(stream);
 
+    let Ok(_stream_permit) = inner.streams.clone().try_acquire_owned() else {
+        reply(
+            &mut wr,
+            Reply::Denied {
+                reason: "too many concurrent agent streams".into(),
+            },
+        )
+        .await?;
+        return Ok(());
+    };
+
     let first: ClientMsg = match tokio::time::timeout(HELLO_TIMEOUT, read_framed(&mut rd)).await {
         Ok(Ok(msg)) => msg,
-        Ok(Err(e)) => return Err(e.context("reading the agent call")),
+        Ok(Err(e)) => {
+            if let Some(mismatch) = e.downcast_ref::<VersionMismatch>() {
+                reply(
+                    &mut wr,
+                    Reply::VersionMismatch {
+                        server_version: mismatch.local_version,
+                        client_version: mismatch.peer_version,
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            return Err(e.context("reading the agent call"));
+        }
         Err(_) => {
             reply(
                 &mut wr,
@@ -97,7 +137,7 @@ where
                     error: "no call within 5s".into(),
                 },
             )
-            .await;
+            .await?;
             return Ok(());
         }
     };
@@ -110,7 +150,7 @@ where
                     error: "expected a call frame".into(),
                 },
             )
-            .await;
+            .await?;
             return Ok(());
         }
     };
@@ -118,24 +158,36 @@ where
     if call.version != AGENT_VERSION {
         reply(
             &mut wr,
-            Reply::Denied {
-                reason: format!(
-                    "agent protocol v{} on the peer, v{} here — upgrade both devices",
-                    call.version, AGENT_VERSION
-                ),
+            Reply::VersionMismatch {
+                server_version: WIRE_VERSION,
+                client_version: u16::from(call.version),
             },
         )
-        .await;
+        .await?;
         return Ok(());
     }
 
     // Gate before anything else: an unauthorized caller learns nothing beyond refusal.
     let cfg = inner.host.config();
-    if let Some(reason) = gate(&cfg, &caller_id) {
-        audit(&inner.root, &caller_id, "denied", &reason, false, 0);
-        reply(&mut wr, Reply::Denied { reason }).await;
+    let caller_label = caller.as_str().to_string();
+    if let Some(reason) = gate(&cfg, &caller) {
+        audit(&inner.root, &caller_label, "denied", &reason, false, 0);
+        reply(&mut wr, Reply::Denied { reason }).await?;
         return Ok(());
     }
+
+    let op = if !caller.is_local() {
+        match policy::guard_remote_op(call.op, &inner.root) {
+            Ok(guarded) => guarded,
+            Err(reason) => {
+                audit(&inner.root, &caller_label, "denied", &reason, false, 0);
+                reply(&mut wr, Reply::Denied { reason }).await?;
+                return Ok(());
+            }
+        }
+    } else {
+        call.op
+    };
 
     // `agent.json` is re-read per request, so a changed `max_jobs` applies
     // without restarting the daemon.
@@ -153,15 +205,21 @@ where
     }
 
     let start = Instant::now();
-    let (op_name, detail) = describe(&call.op);
-    let outcome = dispatch(&inner, &caller_id, call.op, &mut rd, &mut wr).await;
+    let (op_name, detail) = describe(&op);
+    let failed = Arc::new(AtomicBool::new(false));
+    let outcome = REPLY_FAILED
+        .scope(failed.clone(), dispatch(&inner, &caller, op, &mut rd, &mut wr))
+        .await;
     let ms = start.elapsed().as_millis() as u64;
+    // `dispatch` returns Ok after a `Reply::Failed` / `Reply::Denied`. The
+    // audit flag follows the reply the peer actually got, and a failed send.
+    let ok = outcome.is_ok() && !failed.load(Ordering::Relaxed);
     audit(
         &inner.root,
-        &caller_id,
+        &caller_label,
         op_name,
         &truncate(&detail, 200),
-        outcome.is_ok(),
+        ok,
         ms,
     );
     outcome
@@ -169,7 +227,7 @@ where
 
 async fn dispatch<S>(
     inner: &Inner,
-    caller: &str,
+    caller: &Caller,
     op: Op,
     rd: &mut ReadHalf<S>,
     wr: &mut WriteHalf<S>,
@@ -177,10 +235,11 @@ async fn dispatch<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
+    let caller_str = caller.as_str();
     match op {
-        Op::Probe => reply(wr, Reply::Done { code: 0, ms: 0 }).await,
-        Op::Submit(req) => match inner.jobs.submit(req, caller) {
-            Ok(job) => reply(wr, Reply::Accepted { job }).await,
+        Op::Probe => reply(wr, Reply::Done { code: 0, ms: 0 }).await?,
+        Op::Submit(req) => match inner.jobs.submit(req, caller_str) {
+            Ok(job) => reply(wr, Reply::Accepted { job }).await?,
             Err(e) => {
                 reply(
                     wr,
@@ -188,7 +247,7 @@ where
                         error: format!("{e:#}"),
                     },
                 )
-                .await
+                .await?;
             }
         },
         Op::Jobs => {
@@ -198,10 +257,10 @@ where
                     jobs: inner.jobs.list(),
                 },
             )
-            .await
+            .await?;
         }
         Op::JobStatus { id } => match inner.jobs.get(id) {
-            Some(job) => reply(wr, Reply::Job { job }).await,
+            Some(job) => reply(wr, Reply::Job { job }).await?,
             None => {
                 reply(
                     wr,
@@ -209,11 +268,11 @@ where
                         error: format!("no such job: {id}"),
                     },
                 )
-                .await
+                .await?;
             }
         },
         Op::JobCancel { id } => match inner.jobs.cancel(id) {
-            Ok(()) => reply(wr, Reply::Done { code: 0, ms: 0 }).await,
+            Ok(()) => reply(wr, Reply::Done { code: 0, ms: 0 }).await?,
             Err(e) => {
                 reply(
                     wr,
@@ -221,7 +280,7 @@ where
                         error: format!("{e:#}"),
                     },
                 )
-                .await
+                .await?;
             }
         },
         Op::JobLog { id, offset, follow } => follow_log(inner, id, offset, follow, wr).await?,
@@ -237,7 +296,7 @@ where
             new,
             replace_all,
         } => match fs::edit_file(&path, &old, &new, replace_all).await {
-            Ok(replacements) => reply(wr, Reply::Edited { replacements }).await,
+            Ok(replacements) => reply(wr, Reply::Edited { replacements }).await?,
             Err(e) => {
                 reply(
                     wr,
@@ -245,7 +304,7 @@ where
                         error: format!("{e:#}"),
                     },
                 )
-                .await
+                .await?;
             }
         },
         Op::Write { path, mode } => serve_write(rd, wr, &path, mode).await?,
@@ -265,6 +324,9 @@ where
 }
 
 /// Stream a job's log from `offset`, optionally following until it finishes.
+///
+/// `finished` is set only on the last frame. A fast exit that wrote more than
+/// one batch used to return after the first 64 KiB and drop the tail.
 async fn follow_log<W: AsyncWrite + Unpin>(
     inner: &Inner,
     id: JobId,
@@ -279,7 +341,7 @@ async fn follow_log<W: AsyncWrite + Unpin>(
                 error: format!("no such job: {id}"),
             },
         )
-        .await;
+        .await?;
         return Ok(());
     };
     let wake = inner.jobs.wake();
@@ -293,30 +355,44 @@ async fn follow_log<W: AsyncWrite + Unpin>(
                         error: format!("reading job log: {e}"),
                     },
                 )
-                .await;
+                .await?;
                 return Ok(());
             }
         };
         let progressed = !records.is_empty();
         offset = next;
-        let snapshot = inner.jobs.get(id);
-        let finished = snapshot.as_ref().and_then(|j| j.state.exit_code());
-        let log_bytes = snapshot.as_ref().map(|j| j.log_bytes).unwrap_or(0);
-
-        if progressed || finished.is_some() || !follow {
-            let msg = Reply::Log {
-                records,
-                next: offset,
-                log_bytes,
-                finished,
-            };
-            if write_framed(wr, &msg).await.is_err() {
-                // The watcher went away. The job keeps running.
-                return Ok(());
-            }
-        }
-        if finished.is_some() || !follow {
+        let Some(snapshot) = inner.jobs.get(id) else {
+            reply(
+                wr,
+                Reply::Failed {
+                    error: format!("job {id} is no longer available"),
+                },
+            )
+            .await?;
             return Ok(());
+        };
+        let done = snapshot.state.exit_code();
+        let file_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(offset);
+        // Done, and either the cursor is at EOF or this read made no progress
+        // (a partial trailing record will not grow after the writer exits).
+        let complete = done.is_some() && (offset >= file_len || !progressed);
+        if progressed || complete || !follow {
+            reply(
+                wr,
+                Reply::Log {
+                    records,
+                    next: offset,
+                    log_bytes: file_len,
+                    finished: if complete { done } else { None },
+                },
+            )
+            .await?;
+        }
+        if complete || !follow {
+            return Ok(());
+        }
+        if done.is_some() {
+            continue;
         }
         if !progressed {
             tokio::select! {
@@ -336,21 +412,15 @@ async fn read_op<W: AsyncWrite + Unpin>(
     let start = Instant::now();
     match fs::read_range(path, offset, limit).await {
         Ok((size, mode, data)) => {
-            if send(wr, Reply::Meta { size, mode }).await.is_err() {
-                return Ok(());
-            }
+            reply(wr, Reply::Meta { size, mode }).await?;
             for chunk in data.chunks(AGENT_CHUNK) {
-                if send(
+                reply(
                     wr,
                     Reply::Data {
                         data: chunk.to_vec(),
                     },
                 )
-                .await
-                .is_err()
-                {
-                    return Ok(());
-                }
+                .await?;
             }
             reply(
                 wr,
@@ -359,7 +429,7 @@ async fn read_op<W: AsyncWrite + Unpin>(
                     ms: start.elapsed().as_millis() as u64,
                 },
             )
-            .await;
+            .await?;
         }
         Err(e) => {
             reply(
@@ -368,7 +438,7 @@ async fn read_op<W: AsyncWrite + Unpin>(
                     error: e.to_string(),
                 },
             )
-            .await;
+            .await?;
         }
     }
     Ok(())
@@ -377,8 +447,8 @@ async fn read_op<W: AsyncWrite + Unpin>(
 async fn list_op<W: AsyncWrite + Unpin>(path: &str, wr: &mut W) -> Result<()> {
     match fs::list_dir(path).await {
         Ok(entries) => {
-            reply(wr, Reply::Listing { entries }).await;
-            reply(wr, Reply::Done { code: 0, ms: 0 }).await;
+            reply(wr, Reply::Listing { entries }).await?;
+            reply(wr, Reply::Done { code: 0, ms: 0 }).await?;
         }
         Err(e) => {
             reply(
@@ -387,7 +457,7 @@ async fn list_op<W: AsyncWrite + Unpin>(path: &str, wr: &mut W) -> Result<()> {
                     error: e.to_string(),
                 },
             )
-            .await;
+            .await?;
         }
     }
     Ok(())
@@ -407,7 +477,11 @@ async fn serve_write<S: AsyncRead + AsyncWrite + Unpin>(
         }
     }
     let part = fs::part_path(&path);
-    let mut f = match tokio::fs::File::create(&part).await {
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    opts.mode(mode.unwrap_or(0o600));
+    let mut f = match opts.open(&part).await {
         Ok(f) => f,
         Err(e) => {
             reply(
@@ -416,14 +490,31 @@ async fn serve_write<S: AsyncRead + AsyncWrite + Unpin>(
                     error: format!("create {}: {e}", part.display()),
                 },
             )
-            .await;
+            .await?;
             return Ok(());
         }
     };
     let mut bytes = 0u64;
     loop {
-        match read_framed::<_, ClientMsg>(rd).await {
-            Ok(ClientMsg::Data(d)) => {
+        match tokio::time::timeout(policy::WRITE_FRAME_TIMEOUT, read_framed::<_, ClientMsg>(rd))
+            .await
+        {
+            Ok(Ok(ClientMsg::Data(d))) => {
+                if bytes + (d.len() as u64) > policy::MAX_WRITE_BYTES {
+                    drop(f);
+                    let _ = tokio::fs::remove_file(&part).await;
+                    reply(
+                        wr,
+                        Reply::Failed {
+                            error: format!(
+                                "write exceeds {} byte limit",
+                                policy::MAX_WRITE_BYTES
+                            ),
+                        },
+                    )
+                    .await?;
+                    return Ok(());
+                }
                 if let Err(e) = f.write_all(&d).await {
                     drop(f);
                     let _ = tokio::fs::remove_file(&part).await;
@@ -433,12 +524,12 @@ async fn serve_write<S: AsyncRead + AsyncWrite + Unpin>(
                             error: format!("write {}: {e}", part.display()),
                         },
                     )
-                    .await;
+                    .await?;
                     return Ok(());
                 }
                 bytes += d.len() as u64;
             }
-            Ok(ClientMsg::End) => {
+            Ok(Ok(ClientMsg::End)) => {
                 f.flush().await.ok();
                 drop(f);
                 if let Some(m) = mode {
@@ -452,16 +543,28 @@ async fn serve_write<S: AsyncRead + AsyncWrite + Unpin>(
                             error: format!("rename into {}: {e}", path.display()),
                         },
                     )
-                    .await;
+                    .await?;
                     return Ok(());
                 }
-                reply(wr, Reply::Done { code: 0, ms: 0 }).await;
+                reply(wr, Reply::Done { code: 0, ms: 0 }).await?;
                 debug!(path = %path.display(), bytes, "agent wrote a file");
                 return Ok(());
             }
-            Ok(ClientMsg::Call(_)) | Err(_) => {
+            Ok(Ok(ClientMsg::Call(_))) | Ok(Err(_)) => {
                 drop(f);
                 let _ = tokio::fs::remove_file(&part).await;
+                return Ok(());
+            }
+            Err(_) => {
+                drop(f);
+                let _ = tokio::fs::remove_file(&part).await;
+                reply(
+                    wr,
+                    Reply::Failed {
+                        error: "write stream timed out".into(),
+                    },
+                )
+                .await?;
                 return Ok(());
             }
         }
@@ -494,8 +597,8 @@ async fn glob_op<W: AsyncWrite + Unpin>(
 ) -> Result<()> {
     match search::glob_files(root, pattern, max_results).await {
         Ok(paths) => {
-            reply(wr, Reply::GlobMatches { paths }).await;
-            reply(wr, Reply::Done { code: 0, ms: 0 }).await;
+            reply(wr, Reply::GlobMatches { paths }).await?;
+            reply(wr, Reply::Done { code: 0, ms: 0 }).await?;
         }
         Err(e) => {
             reply(
@@ -504,7 +607,7 @@ async fn glob_op<W: AsyncWrite + Unpin>(
                     error: format!("{e:#}"),
                 },
             )
-            .await;
+            .await?;
         }
     }
     Ok(())
@@ -519,8 +622,8 @@ async fn grep_op<W: AsyncWrite + Unpin>(
 ) -> Result<()> {
     match search::grep_files(root, pattern, include, max_results).await {
         Ok(matches) => {
-            reply(wr, Reply::GrepMatches { matches }).await;
-            reply(wr, Reply::Done { code: 0, ms: 0 }).await;
+            reply(wr, Reply::GrepMatches { matches }).await?;
+            reply(wr, Reply::Done { code: 0, ms: 0 }).await?;
         }
         Err(e) => {
             reply(
@@ -529,15 +632,24 @@ async fn grep_op<W: AsyncWrite + Unpin>(
                     error: format!("{e:#}"),
                 },
             )
-            .await;
+            .await?;
         }
     }
     Ok(())
 }
 
-/// Best-effort reply: a peer that hung up is not an error, it is a detach.
-async fn reply<W: AsyncWrite + Unpin>(wr: &mut W, event: Reply) {
-    let _ = send(wr, event).await;
+/// Send one reply. `Failed` / `Denied` clear the audit success flag. A write
+/// error is logged and aborts the request instead of being ignored.
+async fn reply<W: AsyncWrite + Unpin>(wr: &mut W, event: Reply) -> Result<()> {
+    if matches!(event, Reply::Failed { .. } | Reply::Denied { .. }) {
+        mark_reply_failed();
+    }
+    if let Err(e) = send(wr, event).await {
+        debug!(error = %e, "reply send failed");
+        mark_reply_failed();
+        return Err(anyhow::anyhow!("reply send failed: {e}"));
+    }
+    Ok(())
 }
 
 async fn send<W: AsyncWrite + Unpin>(wr: &mut W, event: Reply) -> std::io::Result<()> {
@@ -547,10 +659,5 @@ async fn send<W: AsyncWrite + Unpin>(wr: &mut W, event: Reply) -> std::io::Resul
 }
 
 fn hostname() -> String {
-    std::fs::read_to_string("/etc/hostname")
-        .map(|s| s.trim().to_string())
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("HOSTNAME").ok())
-        .unwrap_or_default()
+    envoy_core::system_hostname()
 }

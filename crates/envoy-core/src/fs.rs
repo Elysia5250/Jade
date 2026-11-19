@@ -71,18 +71,41 @@ pub async fn write_file(path: &str, data: &[u8], mode: Option<u32>) -> Result<u6
     Ok(data.len() as u64)
 }
 
+/// Largest regular file `edit_file` will read into memory.
+const MAX_EDIT_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Replace an exact snippet in a UTF-8 text file, atomically.
 ///
 /// Refuses a non-unique match unless `replace_all` is set, so a stale snippet
 /// cannot silently rewrite several places. Preserves the file's mode.
+/// Refuses symlinks, directories, devices, and files over [`MAX_EDIT_BYTES`].
 pub async fn edit_file(path: &str, old: &str, new: &str, replace_all: bool) -> Result<usize> {
     if old.is_empty() {
         anyhow::bail!("`old` must not be empty");
     }
     let path = resolve(path);
+    let sym = tokio::fs::symlink_metadata(&path)
+        .await
+        .with_context(|| format!("stat {}", path.display()))?;
+    if !sym.file_type().is_file() {
+        anyhow::bail!(
+            "{} is not a regular file (refusing symlink, device, or directory)",
+            path.display()
+        );
+    }
     let meta = tokio::fs::metadata(&path)
         .await
         .with_context(|| format!("stat {}", path.display()))?;
+    if !meta.file_type().is_file() {
+        anyhow::bail!("{} is not a regular file", path.display());
+    }
+    if meta.len() > MAX_EDIT_BYTES {
+        anyhow::bail!(
+            "{} is {} bytes; edit refuses files over {MAX_EDIT_BYTES}",
+            path.display(),
+            meta.len()
+        );
+    }
     let bytes = tokio::fs::read(&path)
         .await
         .with_context(|| format!("read {}", path.display()))?;
@@ -114,22 +137,139 @@ pub async fn edit_file(path: &str, old: &str, new: &str, replace_all: bool) -> R
 
 /// Write through a sibling `.part` and rename into place.
 pub async fn write_atomic(path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             tokio::fs::create_dir_all(parent).await.ok();
         }
     }
     let part = part_path(path);
-    tokio::fs::write(&part, data)
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    opts.mode(mode.unwrap_or(0o600));
+    let mut file = opts
+        .open(&part)
         .await
-        .with_context(|| format!("write {}", part.display()))?;
+        .with_context(|| format!("create {}", part.display()))?;
+    if let Err(err) = file.write_all(data).await {
+        drop(file);
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(err).with_context(|| format!("write {}", part.display()));
+    }
+    if let Err(err) = file.flush().await {
+        drop(file);
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(err).with_context(|| format!("flush {}", part.display()));
+    }
+    drop(file);
     if let Some(m) = mode {
         set_mode(&part, m);
     }
-    tokio::fs::rename(&part, path)
-        .await
-        .with_context(|| format!("rename into {}", path.display()))?;
+    if let Err(err) = tokio::fs::rename(&part, path).await {
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(err).with_context(|| format!("rename into {}", path.display()));
+    }
     Ok(())
+}
+
+/// Create a directory tree restricted to owner-only (`0700` on Unix).
+pub fn ensure_private_dir(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)
+            .with_context(|| format!("creating private directory {}", path.display()))?;
+        set_mode_strict(path, 0o700)?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+            .with_context(|| format!("creating directory {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Atomically write `data` to `path` via a unique sibling temp file with explicit mode.
+pub fn write_atomic_sync(path: &Path, data: &[u8], mode: u32) -> Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating parent dir {}", parent.display()))?;
+        }
+    }
+    let part = part_path(path);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(mode);
+    }
+    let mut file = opts
+        .open(&part)
+        .with_context(|| format!("creating {}", part.display()))?;
+    let write_res = file.write_all(data).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(err) = write_res {
+        let _ = std::fs::remove_file(&part);
+        return Err(err).with_context(|| format!("writing {}", part.display()));
+    }
+    if let Err(err) = set_mode_strict(&part, mode) {
+        let _ = std::fs::remove_file(&part);
+        return Err(err);
+    }
+    if let Err(err) = std::fs::rename(&part, path) {
+        let _ = std::fs::remove_file(&part);
+        return Err(err).with_context(|| format!("renaming into {}", path.display()));
+    }
+    Ok(())
+}
+
+/// Open an append-only file restricted to owner-only (`0600` on Unix).
+pub fn open_append_private(path: &Path) -> std::io::Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let file = opts.open(path)?;
+    set_mode(path, 0o600);
+    Ok(file)
+}
+
+/// Apply permission bits strictly, returning an error if `chmod` fails.
+pub fn set_mode_strict(path: &Path, mode: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .with_context(|| format!("setting mode {:o} on {}", mode, path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+    }
+    Ok(())
+}
+
+/// Disable ptrace/core-dump inspection of the current daemon process where supported.
+pub fn harden_process_dumpable() {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0);
+    }
 }
 
 /// Resolve `path` the way a shell would: relative names land in `$HOME`.
@@ -178,6 +318,31 @@ pub fn mode_of(meta: &std::fs::Metadata) -> u32 {
         let _ = meta;
         0o644
     }
+}
+
+/// Host name from `gethostname(2)`, with `HOSTNAME` / `COMPUTERNAME` as fallback.
+///
+/// Does not read `/etc/hostname`, which is absent on macOS and can disagree
+/// with the kernel's nodename.
+pub fn system_hostname() -> String {
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        // SAFETY: `buf` is a writable buffer and `len` is its size.
+        let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+        if rc == 0 {
+            let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+            if let Ok(name) = std::str::from_utf8(&buf[..end]) {
+                let name = name.trim();
+                if !name.is_empty() {
+                    return name.to_string();
+                }
+            }
+        }
+    }
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_default()
 }
 
 /// Apply permission bits; failures are best effort on filesystems without modes.
@@ -298,6 +463,41 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("not found"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn edit_rejects_symlink_fifo_and_oversized_file() {
+        let dir = tmpdir("edit-special");
+        let real = dir.join("real.txt");
+        std::fs::write(&real, b"hello\n").unwrap();
+        let link = dir.join("link.txt");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let err = edit_file(link.to_str().unwrap(), "hello", "bye", false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a regular file"), "{err}");
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "hello\n");
+
+        let fifo = dir.join("pipe");
+        let name = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let err = edit_file(fifo.to_str().unwrap(), "a", "b", false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a regular file"), "{err}");
+
+        let huge = dir.join("huge.txt");
+        let file = std::fs::File::create(&huge).unwrap();
+        file.set_len(MAX_EDIT_BYTES + 1).unwrap();
+        let err = edit_file(huge.to_str().unwrap(), "a", "b", false)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("refuses files over"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

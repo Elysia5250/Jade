@@ -130,7 +130,7 @@ class EnvoyHarborAgent(BaseAgent):  # type: ignore[misc]
         )
         if self.model_name:
             args.extend(["--model", self.model_name])
-        args.extend(["-p", instruction])
+        args.extend(["-p", "-"])
         return " ".join(shlex.quote(a) for a in args)
 
     @staticmethod
@@ -138,21 +138,18 @@ class EnvoyHarborAgent(BaseAgent):  # type: ignore[misc]
         raw = stdout.strip()
         if not raw:
             return {}
-        try:
-            parsed = json.loads(raw)
-            return parsed if isinstance(parsed, dict) else {}
-        except json.JSONDecodeError:
-            for line in reversed(raw.splitlines()):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    parsed = json.loads(line)
-                    if isinstance(parsed, dict):
-                        return parsed
-                except json.JSONDecodeError:
-                    continue
-            return {}
+        decoder = json.JSONDecoder()
+        best: dict[str, Any] = {}
+        for index, char in enumerate(raw):
+            if char != "{":
+                continue
+            try:
+                parsed, _ = decoder.raw_decode(raw[index:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                best = parsed
+        return best
 
     async def run(
         self,
@@ -160,7 +157,12 @@ class EnvoyHarborAgent(BaseAgent):  # type: ignore[misc]
         environment: Any,
         context: Any | None = None,
     ) -> dict[str, Any]:
-        cmd = self.build_command(instruction)
+        prompt_path = "/tmp/envoy-prompt.txt"
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        local_prompt = self.logs_dir / "envoy-prompt.txt"
+        local_prompt.write_text(instruction, encoding="utf-8")
+        await environment.upload_file(source_path=local_prompt, target_path=prompt_path)
+        cmd = self.build_command(instruction) + " < " + shlex.quote(prompt_path)
         res = await environment.exec(
             command=cmd,
             env=self._forwarded_env(),

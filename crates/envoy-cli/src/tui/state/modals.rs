@@ -475,15 +475,8 @@ impl App {
                     KeyCode::Char('d') => {
                         if let Some(target) = s.sessions.get(s.selected).map(|x| x.id.clone()) {
                             let _ = delete_session(&self.data_dir, &target);
-                            let data_dir = self.data_dir.clone();
                             let close_id = target.clone();
-                            tokio::spawn(async move {
-                                let _ = runtime::tell(
-                                    &data_dir,
-                                    AgentReq::CloseSession { id: close_id },
-                                )
-                                .await;
-                            });
+                            self.sync_agent(AgentReq::CloseSession { id: close_id });
                             s.sessions.retain(|x| x.id != target);
                             s.selected = s.selected.min(s.sessions.len().saturating_sub(1));
                         }

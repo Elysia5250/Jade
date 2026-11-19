@@ -10,6 +10,22 @@ use crate::session::ChatMessage;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Agent control protocol. Bumped with the job-socket [`envoy_proto::AGENT_VERSION`]
+/// when the framed handshake or these enums change incompatibly.
+pub const AGENT_PROTOCOL_VERSION: u32 = 4;
+
+/// First frame on `agent.sock`, both directions, before any [`AgentReq`].
+///
+/// On the server hello, `incarnation_id` is this daemon process. On the client
+/// hello it is the last incarnation the console observed, or `0` when the
+/// console has never attached. A non-zero mismatch forces [`crate::agent::AgentEvent::SessionReset`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentHello {
+    pub protocol_version: u32,
+    pub incarnation_id: u64,
+    pub bin_version: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SendMode {
     /// Start a turn if idle, otherwise steer the running one.
@@ -99,16 +115,44 @@ pub enum AgentReq {
         id: String,
     },
     List,
+    /// Point an existing session at a new working directory.
+    SetCwd {
+        id: String,
+        cwd: PathBuf,
+    },
+    /// Point an existing session at a new execution target.
+    SetTarget {
+        id: String,
+        target: String,
+    },
+    /// Drop model-visible history so the next turn starts empty.
+    Clear {
+        id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentResp {
-    /// Replay payload for an attach: everything after `from`, plus whether a
-    /// turn is currently live in the daemon.
-    Snapshot {
-        events: Vec<SeqEvent>,
+    /// Opens a replay. `total_items` counts events, not message chunks.
+    /// `incarnation_id` is the daemon process the console must send next time.
+    SnapshotStart {
+        session_id: String,
         running: bool,
+        seq: u64,
+        total_items: u32,
+        incarnation_id: u64,
     },
+    /// One slice of the replay log. Each frame stays under about 512 KiB.
+    SnapshotChunk {
+        events: Vec<SeqEvent>,
+    },
+    /// Authoritative model-visible history, split the same way as events.
+    /// An empty vec still means "the daemon history is empty".
+    SnapshotMessages {
+        messages: Vec<ChatMessage>,
+    },
+    /// The replay is complete. Live [`AgentResp::Event`] frames follow.
+    SnapshotEnd,
     Event(SeqEvent),
     Sessions(Vec<SessionInfo>),
     /// A queued follow-up returned to the console, or `None` if the queue was
@@ -236,5 +280,221 @@ mod tests {
             AgentResp::Checkpoints(list) => assert_eq!(list.len(), 1),
             other => panic!("unexpected resp: {other:?}"),
         }
+    }
+
+    fn assert_postcard<T>(value: &T)
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
+    {
+        let bytes = postcard::to_allocvec(value).unwrap();
+        let (decoded, rest): (T, &[u8]) = postcard::take_from_bytes(&bytes).unwrap();
+        assert!(rest.is_empty(), "trailing {}", rest.len());
+        assert_eq!(format!("{value:?}"), format!("{decoded:?}"));
+        assert_eq!(bytes, postcard::to_allocvec(&decoded).unwrap());
+    }
+
+    fn wire_message(content: &str) -> crate::session::ChatMessage {
+        crate::session::ChatMessage {
+            role: crate::session::ChatRole::Assistant,
+            content: content.into(),
+            reasoning: Some("because".into()),
+            tool_calls: vec![crate::session::ToolCall {
+                id: "call-1".into(),
+                name: "read".into(),
+                arguments: "{\"path\":\"a.rs\"}".into(),
+            }],
+            tool_call_id: Some("call-1".into()),
+            tool_name: Some("read".into()),
+            reasoning_blocks: vec![crate::session::ReasoningBlock::Thinking {
+                text: "step".into(),
+                signature: "sig".into(),
+            }],
+        }
+    }
+
+    fn sample_reqs_open() -> Vec<AgentReq> {
+        let history = vec![wire_message("prior")];
+        vec![
+            AgentReq::Ensure {
+                id: "s-ensure".into(),
+                cwd: PathBuf::from("/work/ensure"),
+                target: "local".into(),
+                history: history.clone(),
+            },
+            AgentReq::Resume {
+                id: "s-resume".into(),
+                cwd: PathBuf::from("/work/resume"),
+                target: "peer-1".into(),
+                history,
+                from: 9,
+            },
+            AgentReq::Send {
+                id: "s-send".into(),
+                text: "do the thing".into(),
+                mode: SendMode::Steer,
+            },
+            AgentReq::Attach {
+                id: "s-attach".into(),
+                from: 4,
+            },
+            AgentReq::Interrupt {
+                id: "s-int".into(),
+            },
+            AgentReq::Answer {
+                id: "s-ans".into(),
+                ask_id: 11,
+                label: "allow".into(),
+            },
+            AgentReq::Recall {
+                id: "s-recall".into(),
+            },
+            AgentReq::Compact {
+                id: "s-compact".into(),
+                focus: Some("keep failures".into()),
+            },
+            AgentReq::Handoff {
+                id: "s-handoff".into(),
+                focus: None,
+            },
+        ]
+    }
+
+    fn sample_reqs_edit() -> Vec<AgentReq> {
+        vec![
+            AgentReq::SetPermissionMode {
+                id: "s-mode".into(),
+                mode: PermissionMode::Plan,
+            },
+            AgentReq::StopMonitor {
+                id: "s-stop".into(),
+                monitor_id: 8,
+            },
+            AgentReq::ListCheckpoints {
+                id: "s-list-cp".into(),
+            },
+            AgentReq::Rewind {
+                id: "s-rewind".into(),
+                checkpoint_id: Some(3),
+            },
+            AgentReq::CloseSession {
+                id: "s-close".into(),
+            },
+            AgentReq::List,
+            AgentReq::SetCwd {
+                id: "s-cwd".into(),
+                cwd: PathBuf::from("/work/next"),
+            },
+            AgentReq::SetTarget {
+                id: "s-target".into(),
+                target: "peer-9".into(),
+            },
+            AgentReq::Clear { id: "s-clear".into() },
+        ]
+    }
+
+    fn req_index(req: &AgentReq) -> usize {
+        match req {
+            AgentReq::Ensure { .. } => 0,
+            AgentReq::Resume { .. } => 1,
+            AgentReq::Send { .. } => 2,
+            AgentReq::Attach { .. } => 3,
+            AgentReq::Interrupt { .. } => 4,
+            AgentReq::Answer { .. } => 5,
+            AgentReq::Recall { .. } => 6,
+            AgentReq::Compact { .. } => 7,
+            AgentReq::Handoff { .. } => 8,
+            AgentReq::SetPermissionMode { .. } => 9,
+            AgentReq::StopMonitor { .. } => 10,
+            AgentReq::ListCheckpoints { .. } => 11,
+            AgentReq::Rewind { .. } => 12,
+            AgentReq::CloseSession { .. } => 13,
+            AgentReq::List => 14,
+            AgentReq::SetCwd { .. } => 15,
+            AgentReq::SetTarget { .. } => 16,
+            AgentReq::Clear { .. } => 17,
+        }
+    }
+
+    fn sample_resps() -> Vec<AgentResp> {
+        let event = SeqEvent {
+            seq: 6,
+            event: AgentEvent::TextDelta("delta".into()),
+        };
+        vec![
+            AgentResp::SnapshotStart {
+                session_id: "s1".into(),
+                running: true,
+                seq: 12,
+                total_items: 3,
+                incarnation_id: 99,
+            },
+            AgentResp::SnapshotChunk {
+                events: vec![event.clone()],
+            },
+            AgentResp::SnapshotMessages {
+                messages: vec![wire_message("visible")],
+            },
+            AgentResp::SnapshotEnd,
+            AgentResp::Event(event),
+            AgentResp::Sessions(vec![SessionInfo {
+                id: "s1".into(),
+                cwd: PathBuf::from("/work"),
+                target: "peer-9".into(),
+                running: true,
+                queued: 4,
+            }]),
+            AgentResp::Recalled(Some("queued follow-up".into())),
+            AgentResp::Checkpoints(vec![CheckpointSummary {
+                id: 2,
+                label: "edit main".into(),
+                ts_ms: 123_456,
+                remaining_user_turns: 1,
+                files_touched: 3,
+            }]),
+            AgentResp::Ack,
+            AgentResp::Error("no such session: s9".into()),
+        ]
+    }
+
+    fn resp_index(resp: &AgentResp) -> usize {
+        match resp {
+            AgentResp::SnapshotStart { .. } => 0,
+            AgentResp::SnapshotChunk { .. } => 1,
+            AgentResp::SnapshotMessages { .. } => 2,
+            AgentResp::SnapshotEnd => 3,
+            AgentResp::Event(_) => 4,
+            AgentResp::Sessions(_) => 5,
+            AgentResp::Recalled(_) => 6,
+            AgentResp::Checkpoints(_) => 7,
+            AgentResp::Ack => 8,
+            AgentResp::Error(_) => 9,
+        }
+    }
+
+    fn assert_each<T>(samples: Vec<T>, index: fn(&T) -> usize, count: usize)
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
+    {
+        let mut seen = vec![false; count];
+        for sample in &samples {
+            let slot = index(sample);
+            assert!(slot < count && !seen[slot], "duplicate or unknown {slot}");
+            seen[slot] = true;
+            assert_postcard(sample);
+        }
+        assert!(seen.iter().all(|hit| *hit), "missing wire variant");
+    }
+
+    #[test]
+    fn every_agent_req_and_resp_round_trips_postcard() {
+        let mut reqs = sample_reqs_open();
+        reqs.extend(sample_reqs_edit());
+        assert_each(reqs, req_index, 18);
+        assert_each(sample_resps(), resp_index, 10);
+        assert_postcard(&AgentHello {
+            protocol_version: AGENT_PROTOCOL_VERSION,
+            incarnation_id: 7,
+            bin_version: "0.1.0".into(),
+        });
     }
 }

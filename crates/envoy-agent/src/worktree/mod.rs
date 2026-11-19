@@ -149,7 +149,7 @@ fn merge_tree(cwd: &Path, name: Option<&str>) -> Result<Effect, String> {
             false,
         ));
     }
-    if main.join(".git").join("MERGE_HEAD").is_file() {
+    if merge_in_progress(&main) {
         return Ok(enter(
             main,
             true,
@@ -295,11 +295,24 @@ fn main_root(cwd: &Path) -> Result<PathBuf, String> {
     if git_text(cwd, &["rev-parse", "--is-bare-repository"])? == "true" {
         return Err("bare repositories have no main worktree".into());
     }
-    let common = git_text(
+    let git_dir = PathBuf::from(git_text(
+        cwd,
+        &["rev-parse", "--path-format=absolute", "--git-dir"],
+    )?);
+    let toplevel = canon(&PathBuf::from(git_text(
+        cwd,
+        &["rev-parse", "--show-toplevel"],
+    )?));
+    // A main checkout's git dir is named `.git` (a directory, or a gitfile
+    // that rev-parse already resolved). A linked worktree's git dir is
+    // `.git/worktrees/<name>`.
+    if git_dir.file_name().and_then(|name| name.to_str()) == Some(".git") && toplevel.is_dir() {
+        return Ok(toplevel);
+    }
+    let common = PathBuf::from(git_text(
         cwd,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )?;
-    let common = PathBuf::from(common);
+    )?);
     if common.file_name().and_then(|name| name.to_str()) != Some(".git") {
         return Err("cannot find the main worktree".into());
     }
@@ -308,6 +321,12 @@ fn main_root(cwd: &Path) -> Result<PathBuf, String> {
         .map(canon)
         .filter(|path| path.is_dir())
         .ok_or_else(|| "cannot find the main worktree".to_string())
+}
+
+fn merge_in_progress(cwd: &Path) -> bool {
+    git(cwd, &["rev-parse", "-q", "--verify", "MERGE_HEAD"])
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 fn branch_of(cwd: &Path) -> Result<String, String> {

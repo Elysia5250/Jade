@@ -29,7 +29,12 @@ Exact commands / PTY checks.
 
 Active plans:
 
-- (none)
+- `hardening-and-modernization.md` — close OS sandbox, permission, MCP, and SSRF
+  security gaps; fix data loss, protocol versioning, and concurrency bugs;
+  align prompt caching and reasoning; slim TUI and duplicated subsystems.
+- `handoff-phase3-to-phase8.md` — standalone step-by-step execution manual,
+  non-negotiable invariants, pitfalls, and quantitative test metrics for taking
+  over Phase 3 through Phase 8.
 
 Completed plans:
 

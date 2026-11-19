@@ -1,6 +1,7 @@
 //! Stage 2 structured compaction summary, safe boundary splitting, and `/handoff`.
 
 use super::is_context_overflow_error;
+use super::prune::bound_tool_output;
 use super::tokens::{message_cost, TokenCalibration};
 use crate::agent::events::AgentEvent;
 use crate::agent::providers::{stream_anthropic, stream_openai_chat, stream_openai_codex};
@@ -133,7 +134,8 @@ pub fn assemble_compacted_messages(
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: None,
-    }];
+    
+        reasoning_blocks: Vec::new(),}];
     if tail
         .first()
         .is_some_and(|m| m.role == ChatRole::User || m.role == ChatRole::Tool)
@@ -147,7 +149,8 @@ pub fn assemble_compacted_messages(
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
-        });
+        
+            reasoning_blocks: Vec::new(),});
     }
     out.extend(tail);
     out
@@ -176,14 +179,14 @@ pub async fn summarize_messages(
         if body.trim().is_empty() {
             break;
         }
-        let req_msgs = vec![user_note(&body), user_note(&instruction)];
+        let req_msgs = summary_request_messages(&body, &instruction);
 
         let fresh = ensure_fresh_provider(http, data_dir, provider.clone())
             .await
             .unwrap_or_else(|_| provider.clone());
         let (sink_tx, _sink_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let routed = fresh.routed_for(model_id);
-        let tool_filter = crate::agent::tools::ToolFilter::default();
+        let tool_filter = crate::agent::tools::ToolFilter::none();
         let res = match routed.protocol {
             ProviderProtocol::OpenAiChat => {
                 stream_openai_chat(
@@ -252,6 +255,17 @@ pub async fn summarize_messages(
     Ok(merge_summary(previous.as_deref(), &dossier))
 }
 
+/// One synthetic user message and no tools. Two user messages in a row are
+/// rejected by Anthropic, and the summary call must not advertise tools.
+pub(crate) fn summary_request_messages(body: &str, instruction: &str) -> Vec<ChatMessage> {
+    let text = if body.trim().is_empty() {
+        instruction.to_string()
+    } else {
+        format!("{body}\n\n{instruction}")
+    };
+    vec![user_note(&text)]
+}
+
 fn user_note(text: &str) -> ChatMessage {
     ChatMessage {
         role: ChatRole::User,
@@ -260,6 +274,7 @@ fn user_note(text: &str) -> ChatMessage {
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: None,
+        reasoning_blocks: Vec::new(),
     }
 }
 
@@ -302,6 +317,8 @@ fn previous_summary(content: &str) -> Option<String> {
     }
 }
 
+const TOOL_NOTE_BYTES: usize = 8_000;
+
 fn dossier_from(messages: &[ChatMessage]) -> String {
     let mut users = Vec::new();
     let mut decisions = Vec::new();
@@ -310,41 +327,30 @@ fn dossier_from(messages: &[ChatMessage]) -> String {
     for msg in messages {
         match msg.role {
             ChatRole::User => {
-                let first = msg.content.lines().next().unwrap_or("").trim();
-                if first.is_empty()
-                    || first.starts_with("<compacted_context>")
-                    || first.starts_with("<environment>")
+                let text = msg.content.trim();
+                if text.is_empty()
+                    || text.starts_with("<compacted_context>")
+                    || text.starts_with("<environment>")
                 {
                     continue;
                 }
-                users.push(truncate_chars(first, 160));
+                users.push(text.to_string());
             }
             ChatRole::Assistant => {
-                if let Some(line) = msg
-                    .content
-                    .lines()
-                    .rev()
-                    .find(|line| !line.trim().is_empty())
-                {
-                    decisions.push(truncate_chars(line.trim(), 160));
+                let text = msg.content.trim();
+                if !text.is_empty() {
+                    decisions.push(text.to_string());
                 }
                 if let Some(reasoning) = msg.reasoning.as_deref().filter(|s| !s.trim().is_empty()) {
-                    decisions.push(format!(
-                        "reasoning: {}",
-                        truncate_chars(reasoning.trim(), 300)
-                    ));
+                    decisions.push(format!("reasoning: {}", reasoning.trim()));
                 }
                 for call in &msg.tool_calls {
-                    files.push(format!(
-                        "`{}` {}",
-                        call.name,
-                        truncate_chars(&call.arguments, 120)
-                    ));
+                    files.push(format!("`{}` {}", call.name, call.arguments));
                 }
             }
             ChatRole::Tool => {
                 let name = msg.tool_name.as_deref().unwrap_or("tool");
-                let excerpt = tool_excerpt(&msg.content);
+                let excerpt = bound_tool_output(&msg.content, TOOL_NOTE_BYTES);
                 files.push(format!("`{name}` result: {excerpt}"));
                 if msg.content.to_ascii_lowercase().contains("error")
                     || msg.content.contains("exit=")
@@ -366,11 +372,6 @@ fn dossier_from(messages: &[ChatMessage]) -> String {
     out
 }
 
-fn tool_excerpt(content: &str) -> String {
-    let lines: Vec<&str> = content.lines().take(12).collect();
-    truncate_chars(&lines.join("\n"), 800)
-}
-
 fn push_notes(out: &mut String, title: &str, notes: &[String]) {
     if notes.is_empty() {
         return;
@@ -386,6 +387,8 @@ fn push_notes(out: &mut String, title: &str, notes: &[String]) {
         out.push('\n');
     }
 }
+
+const SUMMARY_CHAR_CAP: usize = 16_000;
 
 /// Keep the previous six sections and append new notes under the matching heading.
 pub fn merge_summary(previous: Option<&str>, dossier: &str) -> String {
@@ -423,6 +426,9 @@ pub fn merge_summary(previous: Option<&str>, dossier: &str) -> String {
         "## Open Issues & Blockers",
         section_body(dossier, "### Errors"),
     );
+    if summary.chars().count() > SUMMARY_CHAR_CAP {
+        summary = truncate_chars(&summary, SUMMARY_CHAR_CAP);
+    }
     summary
 }
 
@@ -478,6 +484,7 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: None,
             tool_name: None,
+            reasoning_blocks: Vec::new(),
         }
     }
 
@@ -493,6 +500,7 @@ mod tests {
             }],
             tool_call_id: None,
             tool_name: None,
+            reasoning_blocks: Vec::new(),
         }
     }
 
@@ -504,6 +512,7 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: Some(id.into()),
             tool_name: Some("exec".into()),
+            reasoning_blocks: Vec::new(),
         }
     }
 
@@ -563,7 +572,8 @@ mod tests {
                 tool_calls: vec![],
                 tool_call_id: None,
                 tool_name: None,
-            },
+            
+                reasoning_blocks: Vec::new(),},
             user("add a flag"),
             ChatMessage {
                 role: ChatRole::Assistant,
@@ -572,7 +582,8 @@ mod tests {
                 tool_calls: vec![],
                 tool_call_id: None,
                 tool_name: None,
-            },
+            
+                reasoning_blocks: Vec::new(),},
             tool("c9", &huge),
         ];
         let (prev, dossier) = condense_for_summary(&msgs);
@@ -582,7 +593,7 @@ mod tests {
         assert!(input.contains("ship it"));
         assert!(input.contains("add a flag"));
         assert!(input.contains("rejected a config file"));
-        assert!(input.matches('Z').count() < 900);
+        assert_eq!(input.matches('Z').count(), 3_000);
         let merged = merge_summary(Some("## Goal & Constraints\n- ship it\n"), &dossier);
         assert!(merged.contains("ship it"));
         assert!(merged.contains("add a flag"));

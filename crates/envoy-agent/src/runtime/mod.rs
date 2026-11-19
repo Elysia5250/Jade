@@ -4,18 +4,26 @@
 //! postcard framing (`envoy_proto::codec`).
 
 mod client;
+mod control;
+pub(crate) mod hello;
 mod hooks;
 mod listen;
+mod live;
 mod monitors;
 mod ops;
 mod protocol;
 mod server;
+mod snapshot;
 #[cfg(test)]
 mod tests_hooks;
 #[cfg(test)]
+mod tests_phase;
+#[cfg(test)]
+mod tests_protocol;
+#[cfg(test)]
 mod tests_stress;
 
-pub use client::{attach, request, tell};
+pub use client::{attach, request, tell, AttachOrigin};
 pub use listen::serve;
 #[allow(unused_imports)]
 pub use protocol::{AgentReq, AgentResp, SendMode, SeqEvent, SessionInfo};

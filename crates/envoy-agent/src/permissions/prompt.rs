@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 pub(super) enum ApprovalChoice {
     OnceOffline,
     OnceWithNet,
+    OnceExpanded,
     OnceOutsideSandbox,
     Session,
     Project,
@@ -104,9 +105,8 @@ pub(super) async fn prompt_user_approval(
     };
 
     Ok(match chosen.as_str() {
-        "Allow once (with network)" | "Allow once (with expanded path)" => {
-            ApprovalChoice::OnceWithNet
-        }
+        "Allow once (with network)" => ApprovalChoice::OnceWithNet,
+        "Allow once (with expanded path)" => ApprovalChoice::OnceExpanded,
         "Allow once (unsandboxed)" => ApprovalChoice::OnceOutsideSandbox,
         "Allow once" | "Allow once (offline)" => ApprovalChoice::OnceOffline,
         "Allow for session" => ApprovalChoice::Session,
@@ -122,7 +122,10 @@ pub(super) fn summarize_call(tool: &str, args: &Value) -> String {
         "glob" | "grep" => format!(
             "{} ({})",
             args["pattern"].as_str().unwrap_or("*"),
-            args["root"].as_str().unwrap_or(".")
+            args["path"]
+                .as_str()
+                .or_else(|| args["root"].as_str())
+                .unwrap_or(".")
         ),
         "webfetch" => args["url"].as_str().unwrap_or("").to_string(),
         "delegate" => args["agent"]

@@ -4,17 +4,15 @@
 //!   Managed Deny > Local Deny > Hard Protected Guard > Managed Ask > Local Ask
 //!   > Managed Allow > Local Allow > Mode Baseline.
 
-use super::paths::{
-    expand_tilde, is_in_workspace, is_plan_file, is_protected, is_temp_path, resolve_path_pair,
-};
-use super::shell::analyze_shell;
+use super::match_rule::{find_match, InspectContext};
 use super::types::{
     Decision, Effect, PermissionMode, PermissionRule, PolicyFile, RuleScope, TrustStore,
 };
 use anyhow::Result;
-use envoy_core::search::glob_match;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+
+pub use super::match_rule::rule_matches;
 
 const DEFAULT_MANAGED_POLICY_PATH: &str = "/etc/envoy/policy.json";
 
@@ -23,6 +21,7 @@ pub struct LoadedPolicies {
     pub rules: Vec<PermissionRule>,
     pub default_mode: Option<PermissionMode>,
     pub extra_rw: Vec<String>,
+    pub managed_error: Option<String>,
 }
 
 pub fn user_policy_path(data_dir: &Path) -> PathBuf {
@@ -59,6 +58,19 @@ pub fn set_workspace_trusted(data_dir: &Path, cwd: &Path, trusted: bool) -> Resu
     write_json(&path, &store)
 }
 
+fn managed_policy_path(managed_override: Option<&Path>) -> PathBuf {
+    if let Some(p) = managed_override {
+        return p.to_path_buf();
+    }
+    #[cfg(test)]
+    if let Ok(env_path) = std::env::var("ENVOY_MANAGED_POLICY") {
+        if !env_path.trim().is_empty() {
+            return PathBuf::from(env_path);
+        }
+    }
+    PathBuf::from(DEFAULT_MANAGED_POLICY_PATH)
+}
+
 pub fn load_policies(
     data_dir: &Path,
     cwd: &Path,
@@ -69,21 +81,21 @@ pub fn load_policies(
     let mut rules = Vec::new();
     let mut default_mode = None;
     let mut extra_rw = Vec::new();
+    let mut managed_error = None;
 
-    let managed_path = managed_override
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var("ENVOY_MANAGED_POLICY")
-                .ok()
-                .map(PathBuf::from)
-        })
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_MANAGED_POLICY_PATH));
-    if let Some(p) = read_json::<PolicyFile>(&managed_path) {
-        if p.default_mode.is_some() {
-            default_mode = p.default_mode;
+    let managed_path = managed_policy_path(managed_override);
+    match read_json_strict::<PolicyFile>(&managed_path) {
+        Ok(Some(p)) => {
+            if p.default_mode.is_some() {
+                default_mode = p.default_mode;
+            }
+            extra_rw.extend(p.extra_rw.iter().cloned());
+            push_policy_rules(RuleScope::Managed, &p, &mut rules);
         }
-        extra_rw.extend(p.extra_rw.iter().cloned());
-        push_policy_rules(RuleScope::Managed, &p, &mut rules);
+        Ok(None) => {}
+        Err(err) => {
+            managed_error = Some(err);
+        }
     }
 
     if let Some(p) = read_json::<PolicyFile>(&user_policy_path(data_dir)) {
@@ -107,6 +119,7 @@ pub fn load_policies(
         rules,
         default_mode,
         extra_rw,
+        managed_error,
     }
 }
 
@@ -194,7 +207,26 @@ pub fn evaluate_tool_call(
     tool: &str,
     args: &Value,
 ) -> Decision {
-    let ctx = InspectContext::build(data_dir, cwd, tool, args);
+    evaluate_tool_call_with_mcp(data_dir, cwd, mode, policies, tool, args, None)
+}
+
+pub fn evaluate_tool_call_with_mcp(
+    data_dir: &Path,
+    cwd: &Path,
+    mode: PermissionMode,
+    policies: &LoadedPolicies,
+    tool: &str,
+    args: &Value,
+    mcp_identity: Option<(&str, &str)>,
+) -> Decision {
+    let ctx = InspectContext::build(data_dir, cwd, tool, args, mcp_identity);
+
+    if let Some(err) = &policies.managed_error {
+        return deny(
+            format!("managed policy load failed (fail-closed): {err}"),
+            &ctx,
+        );
+    }
 
     // 1. Managed Deny -> 2. Local Deny (never overridden by any allow).
     if let Some(rule) = find_match(
@@ -220,8 +252,22 @@ pub fn evaluate_tool_call(
                     );
                 }
             }
-            "exec" if !ctx.shell_readonly => {
-                return deny("plan mode forbids non-readonly shell commands", &ctx);
+            "exec" => {
+                if !ctx.shell_readonly {
+                    return deny("plan mode forbids non-readonly shell commands", &ctx);
+                }
+                if matches!(
+                    envoy_core::sandbox::probe_backend(),
+                    envoy_core::sandbox::SandboxBackend::None
+                ) {
+                    return deny(
+                        "plan mode forbids shell execution without a read-only OS sandbox",
+                        &ctx,
+                    );
+                }
+            }
+            "job" if args["action"].as_str() == Some("cancel") => {
+                return deny("plan mode forbids cancelling jobs", &ctx);
             }
             _ => {}
         }
@@ -229,7 +275,10 @@ pub fn evaluate_tool_call(
 
     // 4. Protected-path & symlink-escape guard (cannot be silently auto-allowed by mode).
     if ctx.protected_hit
-        && matches!(tool, "write" | "edit" | "read" | "exec")
+        && matches!(
+            tool,
+            "write" | "edit" | "read" | "exec" | "ls" | "glob" | "grep"
+        )
         && !ctx.is_plan_target
     {
         // Explicit Managed/Local Ask overrides below will also catch; ensure at least Ask.
@@ -277,11 +326,8 @@ pub fn evaluate_tool_call(
     mode_baseline(mode, tool, &ctx)
 }
 
-fn sandbox_backend_present() -> bool {
-    !matches!(
-        envoy_core::sandbox::probe_backend(),
-        envoy_core::sandbox::SandboxBackend::None
-    )
+fn sandbox_backend_isolated() -> bool {
+    envoy_core::sandbox::capabilities().enforces_workspace_boundary()
 }
 
 fn mode_baseline(mode: PermissionMode, tool: &str, ctx: &InspectContext) -> Decision {
@@ -317,17 +363,20 @@ fn mode_baseline(mode: PermissionMode, tool: &str, ctx: &InspectContext) -> Deci
             _ => ask("external web fetch", ctx),
         },
         "exec" => {
-            // Auto means "a sandbox exists, so ask less". Without one, exec
-            // falls back to the Default asks.
-            let isolated = sandbox_backend_present();
+            // Auto means "a strong sandbox exists, so ask less". Without one,
+            // exec falls back to the Default asks.
+            let isolated = sandbox_backend_isolated();
             if mode == PermissionMode::Auto && isolated {
                 // Catastrophic covers a few commands (rm of a root path) that
-                // the destructive matcher misses. Both must ask.
-                return if ctx.destructive || ctx.catastrophic {
-                    ask("destructive shell command", ctx)
-                } else {
-                    allow("auto mode workspace command", ctx)
-                };
+                // the destructive matcher misses. Outside-workspace targets and
+                // destructive commands must still ask.
+                if ctx.destructive || ctx.catastrophic {
+                    return ask("destructive shell command", ctx);
+                }
+                if ctx.outside_workspace {
+                    return ask("shell command references path outside workspace", ctx);
+                }
+                return allow("auto mode workspace command", ctx);
             }
             if ctx.destructive {
                 return ask("destructive shell command", ctx);
@@ -371,199 +420,10 @@ fn mode_baseline(mode: PermissionMode, tool: &str, ctx: &InspectContext) -> Deci
     }
 }
 
-struct InspectContext {
-    match_keys: Vec<String>,
-    segment_keys: Vec<Vec<String>>,
-    suggested_rule: Option<String>,
-    protected_hit: bool,
-    symlink_escape: bool,
-    outside_workspace: bool,
-    is_temp_target: bool,
-    is_plan_target: bool,
-    parse_failed: bool,
-    uses_sudo: bool,
-    shell_readonly: bool,
-    needs_net: bool,
-    destructive: bool,
-    catastrophic: bool,
-    extra_rw: Vec<String>,
-}
-
-impl InspectContext {
-    fn build(data_dir: &Path, cwd: &Path, tool: &str, args: &Value) -> Self {
-        let mut ctx = Self {
-            match_keys: vec![tool.to_string()],
-            segment_keys: Vec::new(),
-            suggested_rule: None,
-            protected_hit: false,
-            symlink_escape: false,
-            outside_workspace: false,
-            is_temp_target: false,
-            is_plan_target: false,
-            parse_failed: false,
-            uses_sudo: false,
-            shell_readonly: false,
-            needs_net: false,
-            destructive: false,
-            catastrophic: false,
-            extra_rw: Vec::new(),
-        };
-
-        match tool {
-            "read" | "write" | "edit" | "ls" | "glob" | "grep" => {
-                let raw = args["path"]
-                    .as_str()
-                    .or_else(|| args["root"].as_str())
-                    .unwrap_or(".");
-                let resolved = resolve_path_pair(cwd, raw);
-                let canon_s = resolved.canonical.display().to_string();
-                let rule_tool = match tool {
-                    "read" | "ls" | "glob" | "grep" => "Read",
-                    "write" => "Write",
-                    "edit" => "Edit",
-                    _ => tool,
-                };
-                ctx.match_keys.push(format!("{rule_tool}({raw})"));
-                ctx.match_keys.push(format!("{rule_tool}({canon_s})"));
-                if let Ok(rel) = resolved
-                    .canonical
-                    .strip_prefix(super::paths::canonicalize_with_missing_tail(cwd))
-                {
-                    ctx.match_keys
-                        .push(format!("{rule_tool}({})", rel.display()));
-                }
-                ctx.suggested_rule = Some(format!("{rule_tool}({canon_s})"));
-                ctx.protected_hit = is_protected(&resolved);
-                ctx.is_temp_target = is_temp_path(&resolved);
-                ctx.symlink_escape = resolved.escaped_via_symlink;
-                ctx.outside_workspace = !is_in_workspace(cwd, &resolved);
-                ctx.is_plan_target = is_plan_file(data_dir, cwd, &resolved);
-            }
-            "webfetch" => {
-                let url = args["url"].as_str().unwrap_or("");
-                let domain = extract_domain(url);
-                ctx.match_keys.push(format!("WebFetch(domain:{domain})"));
-                ctx.match_keys.push(format!("WebFetch({url})"));
-                ctx.suggested_rule = Some(format!("WebFetch(domain:{domain})"));
-                ctx.needs_net = true;
-            }
-            "exec" => {
-                let cmd = args["command"].as_str().unwrap_or("").trim();
-                ctx.match_keys.push(format!("Bash({cmd})"));
-                let prefix = cmd.split_whitespace().take(2).collect::<Vec<_>>().join(" ");
-                if !prefix.is_empty() {
-                    ctx.suggested_rule = Some(format!("Bash({prefix}*)"));
-                }
-                if let Some(job_cwd) = args["cwd"].as_str() {
-                    let r = resolve_path_pair(cwd, job_cwd);
-                    if is_protected(&r) {
-                        ctx.protected_hit = true;
-                    }
-                    if !is_in_workspace(cwd, &r) && !is_temp_path(&r) {
-                        ctx.outside_workspace = true;
-                        ctx.extra_rw.push(r.canonical.display().to_string());
-                    }
-                }
-                match analyze_shell(cmd) {
-                    Ok(a) => {
-                        ctx.needs_net = a.needs_net;
-                        ctx.destructive = a.destructive;
-                        ctx.catastrophic = a.catastrophic;
-                        ctx.shell_readonly = a.read_only_all;
-                        ctx.uses_sudo = a.segments.iter().any(|s| s.uses_sudo);
-                        for seg in &a.segments {
-                            let key = format!("Bash({})", seg.argv.join(" "));
-                            ctx.match_keys.push(key.clone());
-                            ctx.segment_keys.push(vec![tool.to_string(), key]);
-                        }
-                        for p in &a.referenced_paths {
-                            let r = resolve_path_pair(cwd, p);
-                            if is_protected(&r) {
-                                ctx.protected_hit = true;
-                            }
-                            if r.escaped_via_symlink {
-                                ctx.symlink_escape = true;
-                            }
-                            if !is_in_workspace(cwd, &r) && !is_temp_path(&r) {
-                                ctx.outside_workspace = true;
-                                if a.write_paths.contains(p) {
-                                    ctx.extra_rw.push(r.canonical.display().to_string());
-                                }
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        ctx.parse_failed = true;
-                    }
-                }
-            }
-            mcp if mcp.starts_with("mcp__") => {
-                if let Some(rest) = mcp.strip_prefix("mcp__") {
-                    if let Some((srv, tool_name)) = rest.split_once("__") {
-                        ctx.match_keys.push(format!("Mcp({srv}:{tool_name})"));
-                        ctx.suggested_rule = Some(format!("Mcp({srv}:{tool_name})"));
-                    }
-                }
-            }
-            _ => {}
-        }
-        ctx
-    }
-}
-
-fn find_match<'a>(
-    rules: &'a [PermissionRule],
-    effect: Effect,
-    scope_filter: Option<RuleScope>,
-    ctx: &InspectContext,
-) -> Option<&'a PermissionRule> {
-    if effect == Effect::Allow && ctx.segment_keys.len() > 1 {
-        let mut first_hit = None;
-        for seg_keys in &ctx.segment_keys {
-            let hit = rules.iter().find(|r| {
-                r.effect == Effect::Allow
-                    && scope_filter.is_none_or(|s| r.scope == s)
-                    && rule_matches(&r.pattern, seg_keys)
-            })?;
-            if first_hit.is_none() {
-                first_hit = Some(hit);
-            }
-        }
-        return first_hit;
-    }
-    rules.iter().find(|r| {
-        r.effect == effect
-            && scope_filter.is_none_or(|s| r.scope == s)
-            && rule_matches(&r.pattern, &ctx.match_keys)
-    })
-}
-
-pub fn rule_matches(pattern: &str, keys: &[String]) -> bool {
-    let pat = expand_tilde(pattern.trim());
-    keys.iter().any(|k| {
-        if pat == *k || pat == "*" {
-            return true;
-        }
-        if let (Some((p_tool, p_arg)), Some((k_tool, k_arg))) = (split_rule(&pat), split_rule(k)) {
-            if p_tool.eq_ignore_ascii_case(k_tool) {
-                return glob_match(p_arg, k_arg)
-                    || (p_arg.ends_with('*') && k_arg.starts_with(p_arg.trim_end_matches('*')));
-            }
-        }
-        false
-    })
-}
-
-fn split_rule(raw: &str) -> Option<(&str, &str)> {
-    let open = raw.find('(')?;
-    let close = raw.rfind(')')?;
-    if close <= open {
-        return None;
-    }
-    Some((&raw[..open], &raw[open + 1..close]))
-}
-
 pub fn is_tool_denied(policies: &LoadedPolicies, tool: &str) -> bool {
+    if policies.managed_error.is_some() {
+        return true;
+    }
     let keys = vec![tool.to_string()];
     policies
         .rules
@@ -571,43 +431,21 @@ pub fn is_tool_denied(policies: &LoadedPolicies, tool: &str) -> bool {
         .any(|r| r.effect == Effect::Deny && rule_matches(&r.pattern, &keys))
 }
 
-fn extract_domain(url: &str) -> String {
-    url.split("://")
-        .nth(1)
-        .unwrap_or(url)
-        .split(['/', '?', '#', ':'])
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase()
-}
-
 fn allow(reason: impl Into<String>, ctx: &InspectContext) -> Decision {
-    Decision {
-        effect: Effect::Allow,
-        reason: reason.into(),
-        suggested_rule: ctx.suggested_rule.clone(),
-        needs_net: ctx.needs_net,
-        extra_rw: ctx.extra_rw.clone(),
-        outside_workspace: ctx.outside_workspace,
-        destructive: ctx.destructive,
-    }
+    make_decision(Effect::Allow, reason, ctx)
 }
 
 fn ask(reason: impl Into<String>, ctx: &InspectContext) -> Decision {
-    Decision {
-        effect: Effect::Ask,
-        reason: reason.into(),
-        suggested_rule: ctx.suggested_rule.clone(),
-        needs_net: ctx.needs_net,
-        extra_rw: ctx.extra_rw.clone(),
-        outside_workspace: ctx.outside_workspace,
-        destructive: ctx.destructive,
-    }
+    make_decision(Effect::Ask, reason, ctx)
 }
 
 fn deny(reason: impl Into<String>, ctx: &InspectContext) -> Decision {
+    make_decision(Effect::Deny, reason, ctx)
+}
+
+fn make_decision(effect: Effect, reason: impl Into<String>, ctx: &InspectContext) -> Decision {
     Decision {
-        effect: Effect::Deny,
+        effect,
         reason: reason.into(),
         suggested_rule: ctx.suggested_rule.clone(),
         needs_net: ctx.needs_net,
@@ -622,11 +460,18 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_str(&text).ok()
 }
 
-fn write_json<T: serde::Serialize>(path: &Path, val: &T) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+fn read_json_strict<T: serde::de::DeserializeOwned>(path: &Path) -> std::result::Result<Option<T>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|e| format!("{}: invalid JSON ({e})", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: read error ({e})", path.display())),
     }
+}
+
+fn write_json<T: serde::Serialize>(path: &Path, val: &T) -> Result<()> {
     let body = serde_json::to_string_pretty(val)?;
-    std::fs::write(path, body)?;
+    envoy_core::fs::write_atomic_sync(path, body.as_bytes(), 0o600)?;
     Ok(())
 }

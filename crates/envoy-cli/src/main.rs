@@ -121,6 +121,58 @@ impl Ctx {
     }
 }
 
+fn tui_unsupported_flag(args: &headless::HeadlessArgs) -> Option<&'static str> {
+    if args.model.is_some() {
+        return Some("--model");
+    }
+    if args.permission_mode.is_some() {
+        return Some("--permission-mode");
+    }
+    if args.sandbox.is_some() {
+        return Some("--sandbox");
+    }
+    if args.max_steps.is_some() {
+        return Some("--max-steps");
+    }
+    if args.dangerously_skip_permissions {
+        return Some("--dangerously-skip-permissions");
+    }
+    if args.output_format != headless::OutputFormat::Text {
+        return Some("--output-format");
+    }
+    None
+}
+
+fn init_tracing(stderr_logs: bool, tui_log: Option<&Path>) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("envoy=info,envoy_service=info"));
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    if let Some(path) = tui_log {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let path = std::sync::Arc::new(path.to_path_buf());
+        builder
+            .with_ansi(false)
+            .with_writer(move || -> Box<dyn std::io::Write + Send> {
+                match std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path.as_ref())
+                {
+                    Ok(file) => Box::new(file),
+                    Err(_) => Box::new(std::io::sink()),
+                }
+            })
+            .init();
+    } else if stderr_logs {
+        // MCP, `ask`, and `-p`/piped output write clean responses/JSON on stdout; logs stay on stderr.
+        builder.with_writer(std::io::stderr).with_ansi(false).init();
+    } else {
+        builder.init();
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -128,19 +180,24 @@ async fn main() -> Result<()> {
     let piped_stdin = cli.cmd.is_none() && !std::io::IsTerminal::is_terminal(&std::io::stdin());
     let is_ask = matches!(cli.cmd.as_ref(), Some(Commands::Ask { .. }));
     let is_headless = cli.headless.is_active() || piped_stdin || is_ask;
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("envoy=info,envoy_service=info"));
-    let builder = tracing_subscriber::fmt().with_env_filter(filter);
-    if is_mcp || is_headless {
-        // MCP, `ask`, and `-p`/piped output write clean responses/JSON on stdout; logs stay on stderr.
-        builder.with_writer(std::io::stderr).init();
-    } else {
-        builder.init();
+    let opening_tui = match cli.cmd.as_ref() {
+        None => !is_headless,
+        Some(Commands::Ui) => !cli.headless.is_active(),
+        Some(_) => false,
+    };
+    if opening_tui {
+        if let Some(flag) = tui_unsupported_flag(&cli.headless) {
+            bail!(
+                "{flag} applies to headless -p/--print runs and is rejected when opening the TUI"
+            );
+        }
     }
-
     let data_dir = cli
         .data_dir
+        .clone()
         .unwrap_or_else(AgentConfigStore::default_data_dir);
+    let tui_log = opening_tui.then(|| data_dir.join("logs").join("tui.log"));
+    init_tracing(is_mcp || is_headless, tui_log.as_deref());
     let cwd = cli
         .cwd
         .clone()
@@ -353,34 +410,36 @@ async fn cmd_serve(
 ) -> Result<()> {
     // Serialize instances before touching the socket: a second daemon would
     // otherwise unlink the live one and share the job store with it.
+    envoy_core::fs::harden_process_dumpable();
+    envoy_core::fs::ensure_private_dir(&data_dir)?;
     let _lock = daemon::InstanceLock::acquire(&data_dir)?;
-    let path = socket.unwrap_or_else(|| daemon::socket_path(&data_dir));
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-    std::fs::create_dir_all(&data_dir)?;
-    let _ = std::fs::remove_file(&path);
-    let listener = tokio::net::UnixListener::bind(&path)
-        .with_context(|| format!("binding {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-    std::fs::write(daemon::pid_file(&data_dir), std::process::id().to_string()).ok();
 
-    // Console control plane: agent turns live here, not in the TUI.
+    // agent.sock must accept before the job socket and pid file advertise readiness.
     let agent_path = runtime::socket_path(&data_dir);
     let _ = std::fs::remove_file(&agent_path);
     let agent_listener = tokio::net::UnixListener::bind(&agent_path)
         .with_context(|| format!("binding {}", agent_path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&agent_path, std::fs::Permissions::from_mode(0o600));
-    }
-    let sessions = runtime::Runtime::new(data_dir.clone());
+    envoy_core::fs::set_mode_strict(&agent_path, 0o600)?;
+    let sessions = runtime::Runtime::with_conduit(data_dir.clone(), Some(conduit_socket.clone()));
     tokio::spawn(runtime::serve(sessions.clone(), agent_listener));
+
+    let path = socket.unwrap_or_else(|| daemon::socket_path(&data_dir));
+    if let Some(parent) = path.parent() {
+        if parent == data_dir || parent.starts_with(&data_dir) {
+            envoy_core::fs::ensure_private_dir(parent)?;
+        } else {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+    let listener = tokio::net::UnixListener::bind(&path)
+        .with_context(|| format!("binding {}", path.display()))?;
+    envoy_core::fs::set_mode_strict(&path, 0o600)?;
+    envoy_core::fs::write_atomic_sync(
+        &daemon::pid_file(&data_dir),
+        std::process::id().to_string().as_bytes(),
+        0o600,
+    )?;
 
     let server = AgentServer::open_store(data_dir.clone())?;
     tracing::info!(socket = %path.display(), "envoy daemon listening");
@@ -405,17 +464,18 @@ async fn cmd_serve(
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut int = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let pid_file = daemon::pid_file(&data_dir);
+    let sessions_shutdown = sessions.clone();
     daemon::run_server(server, listener, path, Some(pid_file), async move {
         tokio::select! {
             _ = term.recv() => {}
             _ = int.recv() => {}
         }
+        sessions_shutdown.shutdown_all().await;
     })
     .await;
     if let Some(pool) = pool {
         pool.abort();
     }
-    sessions.shutdown_all().await;
     let _ = std::fs::remove_file(runtime::socket_path(&data_dir));
     Ok(())
 }

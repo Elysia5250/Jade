@@ -11,7 +11,7 @@ use anyhow::{bail, Result};
 use envoy_proto::{Job, JobId, JobResult, JobState, SandboxPolicy, SubmitRequest, DEFAULT_GROUP};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Notify;
@@ -46,7 +46,10 @@ struct Table {
 
 struct Inner {
     logs: JobLogs,
-    max_jobs: usize,
+    /// Cross-group cap on jobs in `Running`. Also the per-group default.
+    max_jobs: AtomicUsize,
+    /// Once set, `schedule` starts nothing and `submit` fails.
+    shutting_down: AtomicBool,
     table: Mutex<Table>,
     persist_lock: Mutex<()>,
     /// Wakes log followers and anything else waiting on job state.
@@ -79,45 +82,66 @@ impl Jobs {
         table.groups.insert(DEFAULT_GROUP.to_string(), max_jobs);
 
         let state_path = logs.dir().join(STATE_FILE);
+        // A corrupt state must not be treated as an empty table: pruning would
+        // delete every existing log before the next id is ever used.
+        let mut state_loaded = false;
         if let Ok(text) = std::fs::read_to_string(&state_path) {
-            if let Ok(jobs) = serde_json::from_str::<Vec<Job>>(&text) {
-                for mut job in jobs {
-                    if !job.state.is_done() {
-                        job.state = JobState::Done {
-                            at_ms: now_ms(),
-                            result: JobResult::Errored {
-                                error: "daemon restarted while the job was in flight".into(),
+            match serde_json::from_str::<Vec<Job>>(&text) {
+                Ok(jobs) => {
+                    state_loaded = true;
+                    for mut job in jobs {
+                        if !job.state.is_done() {
+                            job.state = JobState::Done {
+                                at_ms: now_ms(),
+                                result: JobResult::Errored {
+                                    error: "daemon restarted while the job was in flight".into(),
+                                },
+                            };
+                            job.pid = None;
+                        }
+                        table.next_id = table.next_id.max(job.id + 1);
+                        table.jobs.insert(
+                            job.id,
+                            Entry {
+                                job,
+                                env: Vec::new(),
+                                timeout_s: 0,
+                                sandbox: SandboxPolicy::Off,
+                                pid_slot: None,
+                                cancel: None,
+                                cancelled: false,
                             },
-                        };
-                        job.pid = None;
+                        );
                     }
-                    table.next_id = table.next_id.max(job.id + 1);
-                    table.jobs.insert(
-                        job.id,
-                        Entry {
-                            job,
-                            env: Vec::new(),
-                            timeout_s: 0,
-                            sandbox: SandboxPolicy::Off,
-                            pid_slot: None,
-                            cancel: None,
-                            cancelled: false,
-                        },
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "job state.json is unreadable; log file ids are preserved"
                     );
                 }
             }
+        }
+        // Never reuse an id that already has a log file. A corrupt or missing
+        // state.json used to reset `next_id` to 1 and overwrite `1.log`.
+        let floor = max_existing_log_id(&logs.dir());
+        if floor >= table.next_id {
+            table.next_id = floor + 1;
         }
 
         let jobs = Self {
             inner: Arc::new(Inner {
                 logs,
-                max_jobs,
+                max_jobs: AtomicUsize::new(max_jobs),
+                shutting_down: AtomicBool::new(false),
                 table: Mutex::new(table),
                 persist_lock: Mutex::new(()),
                 wake: Arc::new(Notify::new()),
             }),
         };
-        jobs.prune();
+        if state_loaded {
+            jobs.prune();
+        }
         jobs
     }
 
@@ -130,13 +154,26 @@ impl Jobs {
         self.inner.wake.clone()
     }
 
-    /// Apply a live policy change to the default group's concurrency limit.
-    /// Lowering it never kills running jobs; it only stops starting new ones.
+    /// Apply a live policy change to every group's concurrency limit and the
+    /// cross-group cap. Lowering it never kills running jobs; it only stops
+    /// starting new ones.
     pub fn set_max_jobs(&self, max_jobs: usize) {
         let max_jobs = max_jobs.max(1);
+        let previous = self.inner.max_jobs.swap(max_jobs, Ordering::SeqCst);
         let changed = {
             let mut t = self.inner.table.lock().unwrap();
-            t.groups.insert(DEFAULT_GROUP.to_string(), max_jobs) != Some(max_jobs)
+            let mut changed = previous != max_jobs;
+            if t.groups.is_empty() {
+                t.groups.insert(DEFAULT_GROUP.to_string(), max_jobs);
+                changed = true;
+            }
+            for limit in t.groups.values_mut() {
+                if *limit != max_jobs {
+                    *limit = max_jobs;
+                    changed = true;
+                }
+            }
+            changed
         };
         if changed {
             self.schedule();
@@ -145,6 +182,9 @@ impl Jobs {
 
     /// Enqueue a job and start it as soon as its group has a slot.
     pub fn submit(&self, req: SubmitRequest, owner: &str) -> Result<Job> {
+        if self.inner.shutting_down.load(Ordering::SeqCst) {
+            bail!("job table is shutting down");
+        }
         let SubmitRequest {
             spec,
             cwd,
@@ -255,21 +295,47 @@ impl Jobs {
         Ok(())
     }
 
-    /// Kill every running job (daemon shutdown). Orphaned children would
-    /// otherwise keep running with no way to reach them.
+    /// Stop accepting work, kill what is running, and persist terminal states.
+    ///
+    /// The short pause lets in-flight tasks record their own result on a
+    /// multi-thread runtime. Whatever is still open is then forced to
+    /// `Killed` so `state.json` does not claim a live job after exit.
     pub fn shutdown(&self) {
-        let pids: Vec<u32> = {
+        self.inner.shutting_down.store(true, Ordering::SeqCst);
+        let ids: Vec<JobId> = {
             let t = self.inner.table.lock().unwrap();
             t.jobs
-                .values()
-                .filter(|e| matches!(e.job.state, JobState::Running { .. }))
-                .filter_map(|e| e.pid_slot.as_ref().map(|s| s.load(Ordering::SeqCst)))
-                .filter(|p| *p > 0)
+                .iter()
+                .filter(|(_, e)| !e.job.state.is_done())
+                .map(|(id, _)| *id)
                 .collect()
         };
-        for pid in pids {
-            exec::kill_group(pid);
+        for id in ids {
+            let _ = self.cancel(id);
         }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        while std::time::Instant::now() < deadline {
+            let busy = {
+                let t = self.inner.table.lock().unwrap();
+                t.jobs.values().any(|e| !e.job.state.is_done())
+            };
+            if !busy {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let stuck: Vec<JobId> = {
+            let t = self.inner.table.lock().unwrap();
+            t.jobs
+                .iter()
+                .filter(|(_, e)| !e.job.state.is_done())
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        for id in stuck {
+            self.finish(id, JobResult::Killed);
+        }
+        self.persist();
     }
 
     fn snapshot(&self, entry: &Entry) -> Job {
@@ -286,9 +352,14 @@ impl Jobs {
         job
     }
 
-    /// Start every queued job whose group has capacity.
+    /// Start every queued job whose group has capacity and whose start would
+    /// not push the process-wide running count past `max_jobs`.
     fn schedule(&self) {
+        if self.inner.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
         type ScheduledStart = (JobId, Job, Vec<(String, String)>, u64, SandboxPolicy);
+        let global_limit = self.inner.max_jobs.load(Ordering::SeqCst).max(1);
         let starts: Vec<ScheduledStart> = {
             let mut t = self.inner.table.lock().unwrap();
             let queued: Vec<JobId> = t
@@ -299,13 +370,21 @@ impl Jobs {
                 .collect();
             let mut starts = Vec::new();
             for id in queued {
+                let total_running = t
+                    .jobs
+                    .values()
+                    .filter(|e| matches!(e.job.state, JobState::Running { .. }))
+                    .count();
+                if total_running >= global_limit {
+                    break;
+                }
                 let (group, limit) = {
                     let e = t.jobs.get(&id).expect("id from the same map");
                     let limit = t
                         .groups
                         .get(&e.job.group)
                         .copied()
-                        .unwrap_or(self.inner.max_jobs);
+                        .unwrap_or(global_limit);
                     (e.job.group.clone(), limit.max(1))
                 };
                 let running = t
@@ -377,6 +456,10 @@ impl Jobs {
         let wake = self.inner.wake.clone();
         let jobs = self.clone();
         tokio::spawn(async move {
+            if jobs.inner.shutting_down.load(Ordering::SeqCst) {
+                jobs.finish(id, JobResult::Killed);
+                return;
+            }
             let result = match LogWriter::create(path, wake) {
                 Ok(log) => exec::run_job(spec, log, pid_slot, cancel).await,
                 Err(e) => JobResult::Errored {
@@ -455,8 +538,26 @@ impl Jobs {
             }
             t.jobs.keys().copied().collect()
         };
-        self.inner.logs.prune(&keep);
+        self.inner.logs.prune(&keep, |id| {
+            self.inner.table.lock().unwrap().jobs.contains_key(&id)
+        });
     }
+}
+
+fn max_existing_log_id(dir: &std::path::Path) -> JobId {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    rd.flatten()
+        .filter_map(|entry| {
+            entry
+                .path()
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| s.parse::<JobId>().ok())
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// Tail helper shared by the server and tests: read until nothing is left,
@@ -470,172 +571,5 @@ pub fn read_available(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use envoy_proto::TaskSpec;
-    use std::time::Duration;
-
-    fn tmpdir(tag: &str) -> PathBuf {
-        let n = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let p = std::env::temp_dir().join(format!("envoy-jobs-{tag}-{n}"));
-        std::fs::create_dir_all(&p).unwrap();
-        p
-    }
-
-    fn shell(command: &str) -> SubmitRequest {
-        SubmitRequest {
-            spec: TaskSpec::Shell {
-                command: command.into(),
-            },
-            cwd: None,
-            env: Vec::new(),
-            label: None,
-            group: DEFAULT_GROUP.into(),
-            timeout_s: 10,
-            sandbox: SandboxPolicy::Off,
-        }
-    }
-
-    async fn wait_done(jobs: &Jobs, id: JobId) -> Job {
-        for _ in 0..600 {
-            let job = jobs.get(id).expect("job exists");
-            if job.is_done() {
-                return job;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("job {id} never finished");
-    }
-
-    #[tokio::test]
-    async fn submit_returns_before_the_command_finishes() {
-        let dir = tmpdir("detached");
-        let jobs = Jobs::open(dir.clone(), 2);
-        let job = jobs.submit(shell("sleep 0.3; echo late"), "local").unwrap();
-        assert!(job.id > 0);
-        // The call returned while the child is still running.
-        assert!(!job.is_done(), "{:?}", job.state);
-        let done = wait_done(&jobs, job.id).await;
-        assert_eq!(done.state.exit_code(), Some(0));
-
-        let (records, _) = log::read_from(&jobs.logs().path(job.id), 0, 64 * 1024).unwrap();
-        let text: String = records
-            .iter()
-            .map(|r| String::from_utf8_lossy(&r.data).to_string())
-            .collect();
-        assert!(text.contains("late"), "{text}");
-        assert!(done.log_bytes > 0);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn the_group_limit_queues_instead_of_dropping() {
-        let dir = tmpdir("queue");
-        let jobs = Jobs::open(dir.clone(), 1);
-        let a = jobs.submit(shell("sleep 0.25"), "local").unwrap();
-        let b = jobs.submit(shell("echo second"), "local").unwrap();
-        assert!(matches!(
-            jobs.get(a.id).unwrap().state,
-            JobState::Running { .. }
-        ));
-        assert!(matches!(
-            jobs.get(b.id).unwrap().state,
-            JobState::Queued { .. }
-        ));
-
-        let done_b = wait_done(&jobs, b.id).await;
-        assert_eq!(done_b.state.exit_code(), Some(0));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn raising_the_limit_starts_queued_jobs() {
-        let dir = tmpdir("limit");
-        let jobs = Jobs::open(dir.clone(), 1);
-        let a = jobs.submit(shell("sleep 0.2"), "local").unwrap();
-        let b = jobs.submit(shell("echo second"), "local").unwrap();
-        assert!(matches!(
-            jobs.get(b.id).unwrap().state,
-            JobState::Queued { .. }
-        ));
-
-        jobs.set_max_jobs(2);
-        for _ in 0..200 {
-            if matches!(
-                jobs.get(b.id).unwrap().state,
-                JobState::Running { .. } | JobState::Done { .. }
-            ) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(wait_done(&jobs, b.id).await.state.exit_code(), Some(0));
-        assert_eq!(wait_done(&jobs, a.id).await.state.exit_code(), Some(0));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn cancel_kills_a_running_job_and_marks_it_killed() {
-        let dir = tmpdir("cancel");
-        let jobs = Jobs::open(dir.clone(), 2);
-        let job = jobs.submit(shell("sleep 30"), "local").unwrap();
-        // Wait until the pid is published.
-        for _ in 0..200 {
-            if jobs.get(job.id).and_then(|j| j.pid).is_some() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        jobs.cancel(job.id).unwrap();
-        let done = wait_done(&jobs, job.id).await;
-        assert!(
-            matches!(done.state.result(), Some(JobResult::Killed)),
-            "{:?}",
-            done.state
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn cancel_of_a_queued_job_never_spawns_it() {
-        let dir = tmpdir("cancel-queued");
-        let jobs = Jobs::open(dir.clone(), 1);
-        let running = jobs.submit(shell("sleep 0.3"), "local").unwrap();
-        let queued = jobs
-            .submit(shell("touch /tmp/should-not-exist-envoy"), "local")
-            .unwrap();
-        jobs.cancel(queued.id).unwrap();
-        let done = wait_done(&jobs, queued.id).await;
-        assert!(matches!(done.state.result(), Some(JobResult::Killed)));
-        wait_done(&jobs, running.id).await;
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn state_survives_reopen_and_orphans_are_marked() {
-        let dir = tmpdir("persist");
-        let jobs = Jobs::open(dir.clone(), 2);
-        let done = jobs.submit(shell("echo persisted"), "local").unwrap();
-        wait_done(&jobs, done.id).await;
-        drop(jobs);
-
-        let reopened = Jobs::open(dir.clone(), 2);
-        let job = reopened.get(done.id).expect("job survived the restart");
-        assert_eq!(job.state.exit_code(), Some(0));
-        assert!(job.command().contains("persisted"));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[tokio::test]
-    async fn failures_are_reported_not_hidden() {
-        let dir = tmpdir("fail");
-        let jobs = Jobs::open(dir.clone(), 2);
-        let job = jobs.submit(shell("exit 7"), "local").unwrap();
-        let done = wait_done(&jobs, job.id).await;
-        assert_eq!(done.state.result(), Some(&JobResult::Failed { code: 7 }));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
+#[path = "job_tests.rs"]
+mod job_tests;

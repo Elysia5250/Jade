@@ -88,13 +88,14 @@ pub fn load_mcp_configs(data_dir: &Path, cwd: &Path) -> McpConfigReport {
         &data_dir.join("mcp.json"),
         McpScope::User,
         cwd,
+        true,
         &mut by_name,
     );
 
     let project_candidates = [cwd.join(".mcp.json"), cwd.join(".envoy").join("mcp.json")];
     if is_workspace_trusted(data_dir, cwd) {
         for path in project_candidates {
-            load_file(&path, McpScope::Project, cwd, &mut by_name);
+            load_file(&path, McpScope::Project, cwd, false, &mut by_name);
         }
     } else {
         for path in project_candidates {
@@ -112,6 +113,7 @@ fn load_file(
     path: &Path,
     scope: McpScope,
     workspace_cwd: &Path,
+    allow_overwrite: bool,
     out: &mut BTreeMap<String, McpServerConfig>,
 ) {
     let Ok(text) = std::fs::read_to_string(path) else {
@@ -121,6 +123,14 @@ fn load_file(
         return;
     };
     for (name, raw) in parsed.mcp_servers {
+        if !allow_overwrite && out.contains_key(&name) {
+            tracing::warn!(
+                server = %name,
+                path = %path.display(),
+                "ignoring project MCP server overriding higher-scope config"
+            );
+            continue;
+        }
         let kind = raw
             .kind
             .as_deref()
@@ -200,7 +210,10 @@ pub fn qualify_tool_name(server: &str, tool: &str) -> String {
     format!("{}{}", &full[..keep], suffix)
 }
 
-pub fn safe_stdio_env(declared: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+pub fn safe_stdio_env(
+    declared: &BTreeMap<String, String>,
+    scope: McpScope,
+) -> BTreeMap<String, String> {
     const SAFE_HOST_VARS: &[&str] = &[
         "PATH",
         "HOME",
@@ -220,12 +233,15 @@ pub fn safe_stdio_env(declared: &BTreeMap<String, String>) -> BTreeMap<String, S
         }
     }
     for (k, v) in declared {
-        out.insert(k.clone(), expand_env_vars(v));
+        if scope == McpScope::Project && envoy_core::sandbox::is_dangerous_env_var(k) {
+            continue;
+        }
+        out.insert(k.clone(), expand_env_vars(v, scope, SAFE_HOST_VARS));
     }
     out
 }
 
-fn expand_env_vars(input: &str) -> String {
+fn expand_env_vars(input: &str, scope: McpScope, safe_vars: &[&str]) -> String {
     let mut out = String::with_capacity(input.len());
     let mut rest = input;
     while let Some(start) = rest.find("${") {
@@ -233,8 +249,11 @@ fn expand_env_vars(input: &str) -> String {
         let after = &rest[start + 2..];
         if let Some(end) = after.find('}') {
             let var_name = &after[..end];
-            if let Ok(val) = std::env::var(var_name) {
-                out.push_str(&val);
+            let allowed = scope == McpScope::User || safe_vars.contains(&var_name);
+            if allowed {
+                if let Ok(val) = std::env::var(var_name) {
+                    out.push_str(&val);
+                }
             }
             rest = &after[end + 1..];
         } else {

@@ -68,6 +68,9 @@ impl App {
             agent_retry_at: Instant::now(),
             agent_offline: false,
             agent_ready: false,
+            daemon_incarnation: 0,
+            snapshot: None,
+            skip_replay_tokens: false,
             pending_ask: None,
             queued: VecDeque::new(),
             outbox: VecDeque::new(),
@@ -308,6 +311,8 @@ impl App {
         self.jobs.clear();
         self.job_selected = 0;
         self.shell_watches.clear();
+        let id = self.session.id.clone();
+        self.sync_agent(AgentReq::SetTarget { id, target: target.clone() });
         self.set_toast(format!("target: {target}"), false);
     }
 }

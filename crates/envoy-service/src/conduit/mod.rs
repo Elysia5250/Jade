@@ -34,7 +34,7 @@ use tracing::debug;
 
 mod accept;
 mod ws;
-pub use accept::spawn_accept_pool;
+pub use accept::{spawn_accept_pool, AcceptPool};
 pub use ws::WsByteStream;
 
 /// The service id envoy registers with conduit.
@@ -345,23 +345,26 @@ impl ConduitClient {
         let (tx, rx) = tokio::sync::watch::channel(Some(initial));
         tokio::spawn(async move {
             loop {
-                match ws.next().await {
-                    Some(Ok(Message::Text(text))) => {
-                        if let Some(status) = parse_status_event(text.as_str()) {
-                            if tx.send(Some(status)).is_err() {
-                                break;
+                tokio::select! {
+                    _ = tx.closed() => break,
+                    frame = ws.next() => match frame {
+                        Some(Ok(Message::Text(text))) => {
+                            if let Some(status) = parse_status_event(text.as_str()) {
+                                if tx.send(Some(status)).is_err() {
+                                    break;
+                                }
                             }
                         }
-                    }
-                    Some(Ok(Message::Ping(payload))) => {
-                        ws.send(Message::Pong(payload)).await.ok();
-                    }
-                    Some(Ok(_)) => {}
-                    Some(Err(e)) => {
-                        debug!(error = %e, "/v1/events stream ended");
-                        break;
-                    }
-                    None => break,
+                        Some(Ok(Message::Ping(payload))) => {
+                            ws.send(Message::Pong(payload)).await.ok();
+                        }
+                        Some(Ok(_)) => {}
+                        Some(Err(e)) => {
+                            debug!(error = %e, "/v1/events stream ended");
+                            break;
+                        }
+                        None => break,
+                    },
                 }
             }
             let _ = tx.send(None);
@@ -507,6 +510,9 @@ fn parse_http_response(raw: &[u8]) -> Result<HttpResponse> {
     Ok(HttpResponse { status, body })
 }
 
+const MAX_CHUNKED_BODY: usize = 16 * 1024 * 1024;
+const MAX_CHUNK_HEX_DIGITS: usize = 8;
+
 fn decode_chunked(data: &[u8]) -> Result<Vec<u8>> {
     let mut rest = data;
     let mut out = Vec::new();
@@ -515,17 +521,30 @@ fn decode_chunked(data: &[u8]) -> Result<Vec<u8>> {
             bail!("truncated chunk header");
         };
         let line = std::str::from_utf8(&rest[..end])?;
-        let size = usize::from_str_radix(line.split(';').next().unwrap_or("0").trim(), 16)
-            .context("bad chunk size")?;
-        rest = &rest[end + 2..];
+        let token = line.split(';').next().unwrap_or("0").trim();
+        if token.is_empty() || token.len() > MAX_CHUNK_HEX_DIGITS || !token.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            bail!("bad chunk size");
+        }
+        let size = usize::from_str_radix(token, 16).context("bad chunk size")?;
+        let header_end = end.checked_add(2).context("chunk header overflow")?;
+        if rest.len() < header_end {
+            bail!("truncated chunk header");
+        }
+        rest = &rest[header_end..];
         if size == 0 {
             break;
         }
-        if rest.len() < size + 2 {
+        let body_end = size.checked_add(2).context("chunk length overflow")?;
+        if rest.len() < body_end {
             bail!("truncated chunk body");
         }
+        let new_len = out.len().checked_add(size).context("chunk length overflow")?;
+        if new_len > MAX_CHUNKED_BODY {
+            bail!("chunked body exceeded {MAX_CHUNKED_BODY} bytes");
+        }
         out.extend_from_slice(&rest[..size]);
-        rest = &rest[size + 2..];
+        rest = &rest[body_end..];
     }
     Ok(out)
 }
@@ -574,6 +593,16 @@ mod tests {
         let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n";
         let response = parse_http_response(raw).unwrap();
         assert_eq!(response.body, b"{}");
+    }
+
+    #[test]
+    fn huge_chunk_length_is_an_explicit_error() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n0\r\n\r\n";
+        let Err(err) = parse_http_response(raw) else {
+            panic!("oversized chunk length was accepted");
+        };
+        let text = format!("{err:#}");
+        assert!(text.contains("chunk") || text.contains("bad chunk"), "{text}");
     }
 
     #[test]

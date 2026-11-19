@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use envoy_proto::GrepHit;
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const SKIP_DIRS: &[&str] = &[
     ".git",
@@ -16,6 +16,9 @@ const SKIP_DIRS: &[&str] = &[
     ".ssh",
     ".aws",
     ".envoy",
+    ".conduit",
+    ".gnupg",
+    ".kube",
     ".codex",
     ".agents",
 ];
@@ -57,6 +60,36 @@ fn normalize_cap(max_results: u32) -> usize {
     }
 }
 
+fn is_protected_search_root(canon: &Path) -> bool {
+    let raw = canon.to_string_lossy();
+    if matches!(raw.as_ref(), "/etc/shadow" | "/etc/gshadow" | "/etc/sudoers") {
+        return true;
+    }
+    for comp in canon.components() {
+        let Component::Normal(os) = comp else {
+            continue;
+        };
+        let name = os.to_string_lossy();
+        if matches!(
+            name.as_ref(),
+            ".git"
+                | ".ssh"
+                | ".aws"
+                | ".envoy"
+                | ".conduit"
+                | ".gnupg"
+                | ".kube"
+                | ".codex"
+                | ".agents"
+        ) {
+            return true;
+        }
+    }
+    crate::sandbox::user_secret_paths()
+        .iter()
+        .any(|secret| canon == secret || canon.starts_with(secret))
+}
+
 fn resolve_root(root: &str) -> Result<PathBuf> {
     let raw = if root.trim().is_empty() {
         "."
@@ -66,6 +99,9 @@ fn resolve_root(root: &str) -> Result<PathBuf> {
     let resolved = crate::fs::resolve(raw);
     let canon = std::fs::canonicalize(&resolved)
         .with_context(|| format!("search root {}", resolved.display()))?;
+    if is_protected_search_root(&canon) {
+        anyhow::bail!("refusing to search protected path {}", canon.display());
+    }
     if !canon.is_dir() {
         anyhow::bail!("{} is not a directory", canon.display());
     }
@@ -100,7 +136,7 @@ fn walk_files(root: &Path) -> Vec<(String, PathBuf)> {
                 }
                 dirs.push_back(path);
             } else if ft.is_file() {
-                if name == ".env" || name.starts_with(".env.") {
+                if crate::sandbox::is_env_filename(&name) {
                     continue;
                 }
                 if let Ok(rel) = path.strip_prefix(root) {
@@ -540,6 +576,7 @@ mod tests {
         std::fs::write(dir.join("src/sub/util.rs"), "pub fn help() {}\n").unwrap();
         std::fs::write(dir.join("README.md"), "# doc\n").unwrap();
         std::fs::write(dir.join(".env"), "SECRET=1\n").unwrap();
+        std::fs::write(dir.join(".ENV.local"), "SECRET=2\n").unwrap();
         std::fs::write(dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         std::fs::write(dir.join("target/out.rs"), "ignored\n").unwrap();
 
@@ -552,7 +589,12 @@ mod tests {
             .await
             .unwrap();
         assert!(brace.contains(&"README.md".to_string()));
-        assert!(!brace.iter().any(|p| p.contains(".env")));
+        assert!(!brace
+            .iter()
+            .any(|p| p.to_ascii_lowercase().contains(".env")));
+
+        let blocked = glob_files(dir.join(".git").to_str().unwrap(), "*", 10).await;
+        assert!(blocked.is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

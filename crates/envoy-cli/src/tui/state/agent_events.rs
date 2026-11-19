@@ -199,6 +199,10 @@ impl App {
                 input_tokens,
                 output_tokens,
                 context_tokens,
+                cache_read_tokens,
+                cache_create_tokens,
+                calibration_factor,
+                ..
             } => {
                 if let Some(id) = self.active_assistant_id {
                     if let Some(TranscriptItem::Assistant { done, .. }) =
@@ -207,11 +211,20 @@ impl App {
                         *done = true;
                     }
                 }
-                self.session.messages = messages;
-                self.session.input_tokens += input_tokens;
-                self.session.output_tokens += output_tokens;
+                if !messages.is_empty() {
+                    self.session.messages = messages;
+                }
+                if !self.skip_replay_tokens {
+                    self.session.input_tokens += input_tokens;
+                    self.session.output_tokens += output_tokens;
+                }
                 if context_tokens > 0 {
                     self.session.prompt_tokens = context_tokens;
+                }
+                self.session.cache_read_tokens += cache_read_tokens;
+                self.session.cache_create_tokens += cache_create_tokens;
+                if (0.65..=1.65).contains(&calibration_factor) {
+                    self.session.calibration_factor = calibration_factor;
                 }
                 self.session.touch();
                 self.persist_session();
@@ -256,7 +269,9 @@ impl App {
                 summary: _,
                 auto,
             } => {
-                self.session.messages = messages;
+                if !messages.is_empty() {
+                    self.session.messages = messages;
+                }
                 self.session.prompt_tokens = after_tokens;
                 let tag = if auto { "auto-compacted" } else { "compacted" };
                 let note = format!(
@@ -293,7 +308,8 @@ impl App {
                         tool_calls: Vec::new(),
                         tool_call_id: None,
                         tool_name: None,
-                    },
+                    
+                        reasoning_blocks: Vec::new(),},
                     ChatMessage {
                         role: ChatRole::Assistant,
                         content: "Ready to continue from the handoff summary.".into(),
@@ -301,7 +317,8 @@ impl App {
                         tool_calls: Vec::new(),
                         tool_call_id: None,
                         tool_name: None,
-                    },
+                    
+                        reasoning_blocks: Vec::new(),},
                 ];
                 let notice_id = fresh.alloc_id();
                 fresh.items.push(TranscriptItem::Notice {

@@ -49,6 +49,12 @@ where
     };
     match first {
         Reply::Hello(hello) => Ok(Conn { stream, hello }),
+        Reply::VersionMismatch {
+            server_version,
+            client_version,
+        } => bail!(
+            "{peer} wire protocol mismatch: server v{server_version}, client v{client_version}. Stop the old daemon with `envoy daemon stop` and start this binary"
+        ),
         Reply::Denied { reason } => bail!("{peer} refused: {reason}"),
         Reply::Failed { error } => bail!("{peer} failed: {error}"),
         other => bail!("{peer} sent an unexpected handshake reply: {other:?}"),
@@ -397,8 +403,12 @@ mod tests {
     async fn serve_one(server: &AgentServer, caller: &str) -> tokio::io::DuplexStream {
         let (client, peer) = tokio::io::duplex(256 * 1024);
         let srv = server.clone();
-        let caller = caller.to_string();
-        tokio::spawn(async move { srv.serve_stream(&caller, peer).await });
+        let caller = if caller == envoy_proto::LOCAL_CALLER {
+            crate::Caller::Local
+        } else {
+            crate::Caller::Remote(caller.to_string())
+        };
+        tokio::spawn(async move { srv.serve_stream(caller, peer).await });
         client
     }
 

@@ -3,15 +3,23 @@
 use super::{
     compact_preview, merge_hook_state_delta, run, PreparedTask, SubagentHost, SubagentTaskReport,
 };
-use crate::permissions::{is_workspace_trusted, set_workspace_trusted};
+use crate::permissions::{is_workspace_trusted, set_workspace_trusted, PermissionMode};
 use crate::worktree::task::{self, PendingTree};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-pub(super) fn isolation_applies(target: &str, cwd: &std::path::Path, writers: usize) -> bool {
-    writers >= 2 && (target.is_empty() || target == "local") && task::repo_ready(cwd)
+pub(super) fn isolation_applies(
+    mode: PermissionMode,
+    target: &str,
+    cwd: &std::path::Path,
+    writers: usize,
+) -> bool {
+    mode != PermissionMode::Plan
+        && writers >= 2
+        && (target.is_empty() || target == "local")
+        && task::repo_ready(cwd)
 }
 
 pub(super) async fn run_tasks(
@@ -22,11 +30,27 @@ pub(super) async fn run_tasks(
     parent_tx: &mpsc::UnboundedSender<crate::agent::events::AgentEvent>,
     total: usize,
 ) -> (Vec<SubagentTaskReport>, BTreeMap<String, Value>) {
+    let mode = host.permissions.mode();
     let writers = runnable
         .iter()
         .filter(|task| !task.spec.is_readonly())
         .count();
-    if !isolation_applies(&host.target, &host.cwd, writers) {
+    let local = host.target.is_empty() || host.target == "local";
+    if mode != PermissionMode::Plan && writers >= 2 && local {
+        if let Some(reason) = task::isolation_refusal(&host.cwd) {
+            return refuse_writers(
+                host,
+                parent_call_id,
+                runnable,
+                hook_state,
+                parent_tx,
+                total,
+                reason,
+            )
+            .await;
+        }
+    }
+    if !isolation_applies(mode, &host.target, &host.cwd, writers) {
         return run_plain(host, parent_call_id, runnable, hook_state, parent_tx, total).await;
     }
     let session = host.cwd.clone();
@@ -35,6 +59,10 @@ pub(super) async fn run_tasks(
     let mut reports = Vec::new();
     let mut jobs = Vec::new();
     let mut pending = Vec::new();
+    let mut cleanup = WorktreeCleanup {
+        paths: Vec::new(),
+        armed: true,
+    };
     for task in runnable {
         if task.spec.is_readonly() {
             jobs.push((task, host.clone()));
@@ -50,11 +78,13 @@ pub(super) async fn run_tasks(
                 child.cwd = created.path.clone();
                 let mut task = task;
                 task.input.prompt.push_str(&isolation_note(&created.path));
+                cleanup.paths.push(created.path.clone());
                 pending.push(PendingTree {
                     index: task.index,
                     path: created.path,
                     branch: created.branch,
                     message,
+                    ok: false,
                 });
                 jobs.push((task, child));
             }
@@ -67,7 +97,15 @@ pub(super) async fn run_tasks(
     for (_, child_state) in &states {
         merge_hook_state_delta(&base, child_state, &mut hook_state);
     }
-    for item in task::settle_trees(&session, &pending) {
+    for tree in &mut pending {
+        tree.ok = reports
+            .iter()
+            .find(|report| report.index == tree.index)
+            .is_some_and(|report| report.ok);
+    }
+    let settled = task::settle_trees(&session, &pending);
+    cleanup.armed = false;
+    for item in settled {
         if item.removed {
             let _ = set_workspace_trusted(&data_dir, &item.path, false);
         }
@@ -182,6 +220,48 @@ fn commit_message(task: &PreparedTask) -> String {
     }
 }
 
+async fn refuse_writers(
+    host: &SubagentHost,
+    parent_call_id: &str,
+    runnable: Vec<PreparedTask>,
+    hook_state: BTreeMap<String, Value>,
+    parent_tx: &mpsc::UnboundedSender<crate::agent::events::AgentEvent>,
+    total: usize,
+    reason: String,
+) -> (Vec<SubagentTaskReport>, BTreeMap<String, Value>) {
+    let mut reports = Vec::new();
+    let mut readonly = Vec::new();
+    for task in runnable {
+        if task.spec.is_readonly() {
+            readonly.push(task);
+        } else {
+            reports.push(failed_report(&task, reason.clone()));
+        }
+    }
+    if readonly.is_empty() {
+        return (reports, hook_state);
+    }
+    let (ran, state) = run_plain(host, parent_call_id, readonly, hook_state, parent_tx, total).await;
+    reports.extend(ran);
+    (reports, state)
+}
+
+struct WorktreeCleanup {
+    paths: Vec<std::path::PathBuf>,
+    armed: bool,
+}
+
+impl Drop for WorktreeCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        for path in &self.paths {
+            let _ = task::remove_tree_at(path);
+        }
+    }
+}
+
 fn failed_report(task: &PreparedTask, error: String) -> SubagentTaskReport {
     let description = task
         .input
@@ -248,16 +328,17 @@ mod tests {
         ));
         std::fs::create_dir_all(&plain).unwrap();
         std::fs::write(plain.join(".git"), "x").unwrap();
-        assert!(!isolation_applies("local", &plain, 2));
+        assert!(!isolation_applies(PermissionMode::Auto, "local", &plain, 2));
         let _ = std::fs::remove_dir_all(&plain);
 
         let root = init_repo();
-        assert!(!isolation_applies("local", &root, 1));
-        assert!(!isolation_applies("laptop", &root, 2));
-        assert!(isolation_applies("local", &root, 2));
-        assert!(isolation_applies("", &root, 2));
+        assert!(!isolation_applies(PermissionMode::Auto, "local", &root, 1));
+        assert!(!isolation_applies(PermissionMode::Auto, "laptop", &root, 2));
+        assert!(!isolation_applies(PermissionMode::Plan, "local", &root, 2));
+        assert!(isolation_applies(PermissionMode::Auto, "local", &root, 2));
+        assert!(isolation_applies(PermissionMode::Default, "", &root, 2));
         git(&root, &["checkout", "--detach"]);
-        assert!(!isolation_applies("local", &root, 2));
+        assert!(!isolation_applies(PermissionMode::Auto, "local", &root, 2));
         let _ = std::fs::remove_dir_all(&root);
     }
 

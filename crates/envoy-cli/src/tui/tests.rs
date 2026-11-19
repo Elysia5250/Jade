@@ -366,7 +366,8 @@ async fn context_budget_compacted_and_handoff_render_cleanly() {
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 tool_name: None,
-            }],
+            
+                reasoning_blocks: Vec::new(),}],
             before_tokens: 50_000,
             after_tokens: 4_000,
             summary: "ok".into(),

@@ -1,14 +1,12 @@
 //! Anthropic Messages streaming.
-use super::sse::SseParser;
 use super::StreamReply;
 use crate::agent::effort;
 use crate::agent::events::AgentEvent;
 use crate::agent::tools::{anthropic_tools_json_filtered, ToolFilter};
 use crate::auth::{Credential, StoredProvider};
 use crate::permissions::PermissionEngine;
-use crate::session::{ChatMessage, ChatRole, ToolCall};
-use anyhow::{bail, Context, Result};
-use futures::StreamExt;
+use crate::session::{ChatMessage, ReasoningBlock, ToolCall};
+use anyhow::{bail, Result};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -37,60 +35,16 @@ pub(crate) async fn stream_anthropic(
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<StreamReply> {
     let url = format!("{}/messages", provider.base_url.trim_end_matches('/'));
-    let mut msgs: Vec<Value> = Vec::new();
-    let mut pending_tool_results: Vec<Value> = Vec::new();
-
-    for m in history {
-        if m.role != ChatRole::Tool && !pending_tool_results.is_empty() {
-            msgs.push(json!({
-                "role": "user",
-                "content": std::mem::take(&mut pending_tool_results),
-            }));
-        }
-        match m.role {
-            ChatRole::System => {}
-            ChatRole::User => {
-                msgs.push(json!({ "role": "user", "content": m.content }));
-            }
-            ChatRole::Assistant => {
-                let mut blocks = Vec::new();
-                if !m.content.is_empty() {
-                    blocks.push(json!({ "type": "text", "text": m.content }));
-                }
-                for tc in &m.tool_calls {
-                    let input: Value =
-                        serde_json::from_str(&tc.arguments).unwrap_or_else(|_| json!({}));
-                    blocks.push(json!({
-                        "type": "tool_use",
-                        "id": tc.id,
-                        "name": tc.name,
-                        "input": input,
-                    }));
-                }
-                if blocks.is_empty() {
-                    blocks.push(json!({ "type": "text", "text": "" }));
-                }
-                msgs.push(json!({ "role": "assistant", "content": blocks }));
-            }
-            ChatRole::Tool => {
-                pending_tool_results.push(json!({
-                    "type": "tool_result",
-                    "tool_use_id": m.tool_call_id.as_deref().unwrap_or(""),
-                    "content": m.content,
-                }));
-            }
-        }
-    }
-    if !pending_tool_results.is_empty() {
-        msgs.push(json!({ "role": "user", "content": pending_tool_results }));
-    }
+    let msgs = super::anthropic_body::anthropic_messages(history);
+    let mut tools = anthropic_tools_json_filtered(permissions, tool_filter, extra_tools);
+    super::anthropic_body::mark_last_tool(&mut tools);
 
     let mut body = json!({
         "model": model,
         "max_tokens": max_tokens.max(256),
-        "system": system,
+        "system": super::anthropic_body::system_blocks(system),
         "messages": msgs,
-        "tools": anthropic_tools_json_filtered(permissions, tool_filter, extra_tools),
+        "tools": tools,
         "stream": true,
     });
     effort::apply(&mut body, provider.protocol, &provider.id, model, data_dir);
@@ -114,107 +68,162 @@ pub(crate) async fn stream_anthropic(
     }
     req = super::apply_opencode_session(req, provider, session_id);
 
-    let resp = req
-        .json(&body)
-        .send()
-        .await
-        .context("calling Anthropic API")?;
+    let resp = super::send_with_retry(req, &body, "calling Anthropic API").await?;
     let status = resp.status();
     if !status.is_success() {
         let err_body = resp.text().await.unwrap_or_default();
         bail!("Anthropic API error ({status}): {err_body}");
     }
 
-    let mut text = String::new();
-    let mut reasoning = String::new();
-    let mut blocks: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
-    let mut input_tokens = 0u64;
-    let mut output_tokens = 0u64;
+    let mut acc = AnthropicAcc::default();
+    super::for_each_sse(resp.bytes_stream(), |ev| {
+        let data = ev.data.trim();
+        if data.is_empty() {
+            return Ok(());
+        }
+        let Ok(v) = serde_json::from_str::<Value>(data) else {
+            return Ok(());
+        };
+        acc.on_event(&v, tx)?;
+        Ok(())
+    })
+    .await?;
+    Ok(acc.into_reply())
+}
 
-    let mut sse = SseParser::default();
-    let mut bytes = resp.bytes_stream();
-    while let Some(chunk) = bytes.next().await {
-        let chunk = chunk?;
-        for ev in sse.feed(&chunk) {
-            let data = ev.data.trim();
-            if data.is_empty() {
-                continue;
+#[derive(Default)]
+struct AnthropicAcc {
+    text: String,
+    reasoning: String,
+    tools: BTreeMap<usize, (String, String, String)>,
+    thinking: BTreeMap<usize, (String, String)>,
+    redacted: Vec<String>,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_create_tokens: u64,
+}
+
+impl AnthropicAcc {
+    fn on_event(&mut self, v: &Value, tx: &mpsc::UnboundedSender<AgentEvent>) -> Result<()> {
+        match v["type"].as_str().unwrap_or("") {
+            "message_start" => self.read_usage(&v["message"]["usage"], true),
+            "message_delta" => self.read_usage(&v["usage"], false),
+            "content_block_start" => self.on_block_start(v),
+            "content_block_delta" => self.on_delta(v, tx),
+            "error" => {
+                let msg = v["error"]["message"]
+                    .as_str()
+                    .unwrap_or("Anthropic stream error");
+                bail!("{msg}");
             }
-            let Ok(v) = serde_json::from_str::<Value>(data) else {
-                continue;
-            };
-            match v["type"].as_str().unwrap_or("") {
-                "message_start" => {
-                    input_tokens = v["message"]["usage"]["input_tokens"]
-                        .as_u64()
-                        .unwrap_or(input_tokens);
-                }
-                "content_block_start" => {
-                    let idx = v["index"].as_u64().unwrap_or(0) as usize;
-                    let cb = &v["content_block"];
-                    if cb["type"].as_str() == Some("tool_use") {
-                        let id = cb["id"].as_str().unwrap_or("").to_string();
-                        let name = cb["name"].as_str().unwrap_or("").to_string();
-                        blocks.insert(idx, (id, name, String::new()));
-                    }
-                }
-                "content_block_delta" => {
-                    let idx = v["index"].as_u64().unwrap_or(0) as usize;
-                    let d = &v["delta"];
-                    match d["type"].as_str().unwrap_or("") {
-                        "text_delta" => {
-                            if let Some(t) = d["text"].as_str() {
-                                text.push_str(t);
-                                let _ = tx.send(AgentEvent::TextDelta(t.to_string()));
-                            }
-                        }
-                        "thinking_delta" => {
-                            if let Some(t) = d["thinking"].as_str() {
-                                reasoning.push_str(t);
-                                let _ = tx.send(AgentEvent::ReasoningDelta(t.to_string()));
-                            }
-                        }
-                        "input_json_delta" => {
-                            if let Some(j) = d["partial_json"].as_str() {
-                                if let Some(entry) = blocks.get_mut(&idx) {
-                                    entry.2.push_str(j);
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                "message_delta" => {
-                    output_tokens = v["usage"]["output_tokens"]
-                        .as_u64()
-                        .unwrap_or(output_tokens);
-                }
-                "error" => {
-                    let msg = v["error"]["message"]
-                        .as_str()
-                        .unwrap_or("Anthropic stream error");
-                    bail!("{msg}");
-                }
-                _ => {}
-            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn read_usage(&mut self, usage: &Value, start: bool) {
+        if start {
+            self.input_tokens = usage["input_tokens"].as_u64().unwrap_or(self.input_tokens);
+        } else {
+            self.output_tokens = usage["output_tokens"].as_u64().unwrap_or(self.output_tokens);
+        }
+        if let Some(n) = usage["cache_read_input_tokens"].as_u64() {
+            self.cache_read_tokens = n;
+        }
+        if let Some(n) = usage["cache_creation_input_tokens"].as_u64() {
+            self.cache_create_tokens = n;
         }
     }
 
-    let tool_calls = blocks
-        .into_values()
-        .map(|(id, name, args)| ToolCall {
-            id,
-            name,
-            arguments: if args.is_empty() { "{}".into() } else { args },
-        })
-        .filter(|tc| !tc.name.is_empty())
-        .collect();
+    fn on_block_start(&mut self, v: &Value) {
+        let idx = v["index"].as_u64().unwrap_or(0) as usize;
+        let block = &v["content_block"];
+        match block["type"].as_str().unwrap_or("") {
+            "tool_use" => {
+                let id = block["id"].as_str().unwrap_or("").to_string();
+                let name = block["name"].as_str().unwrap_or("").to_string();
+                self.tools.insert(idx, (id, name, String::new()));
+            }
+            "thinking" => {
+                let signature = block["signature"].as_str().unwrap_or("").to_string();
+                self.thinking.insert(idx, (String::new(), signature));
+            }
+            "redacted_thinking" => {
+                if let Some(data) = block["data"].as_str() {
+                    if !data.is_empty() {
+                        self.redacted.push(data.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 
-    Ok(StreamReply {
-        text,
-        reasoning,
-        tool_calls,
-        input_tokens,
-        output_tokens,
-    })
+    fn on_delta(&mut self, v: &Value, tx: &mpsc::UnboundedSender<AgentEvent>) {
+        let idx = v["index"].as_u64().unwrap_or(0) as usize;
+        let delta = &v["delta"];
+        match delta["type"].as_str().unwrap_or("") {
+            "text_delta" => {
+                if let Some(t) = delta["text"].as_str() {
+                    self.text.push_str(t);
+                    let _ = tx.send(AgentEvent::TextDelta(t.to_string()));
+                }
+            }
+            "thinking_delta" => {
+                if let Some(t) = delta["thinking"].as_str() {
+                    self.reasoning.push_str(t);
+                    self.thinking.entry(idx).or_default().0.push_str(t);
+                    let _ = tx.send(AgentEvent::ReasoningDelta(t.to_string()));
+                }
+            }
+            "signature_delta" => {
+                if let Some(sig) = delta["signature"].as_str() {
+                    self.thinking.entry(idx).or_default().1.push_str(sig);
+                }
+            }
+            "input_json_delta" => {
+                if let Some(j) = delta["partial_json"].as_str() {
+                    if let Some(entry) = self.tools.get_mut(&idx) {
+                        entry.2.push_str(j);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn into_reply(self) -> StreamReply {
+        let tool_calls = self
+            .tools
+            .into_values()
+            .map(|(id, name, args)| ToolCall {
+                id,
+                name,
+                arguments: if args.is_empty() { "{}".into() } else { args },
+            })
+            .filter(|tc| !tc.name.is_empty())
+            .collect();
+        let mut reasoning_blocks = Vec::new();
+        for (_idx, (text, signature)) in self.thinking {
+            if text.is_empty() && signature.is_empty() {
+                continue;
+            }
+            reasoning_blocks.push(ReasoningBlock::Thinking { text, signature });
+        }
+        for data in self.redacted {
+            reasoning_blocks.push(ReasoningBlock::Redacted { data });
+        }
+        StreamReply {
+            text: self.text,
+            reasoning: self.reasoning,
+            tool_calls,
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cache_read_tokens: self.cache_read_tokens,
+            cache_create_tokens: self.cache_create_tokens,
+            reasoning_blocks,
+            calibrate: true,
+        }
+    }
 }

@@ -66,8 +66,9 @@ struct PreparedTask {
 
 pub(crate) type DelegateFuture<'a> = std::pin::Pin<
     Box<
-        dyn std::future::Future<Output = Result<(String, bool, BTreeMap<String, Value>)>>
-            + Send
+        dyn std::future::Future<
+                Output = Result<(String, bool, BTreeMap<String, Value>, u64, u64)>,
+            > + Send
             + 'a,
     >,
 >;
@@ -176,20 +177,25 @@ pub(crate) fn execute_delegate<'a>(
 
         reports.sort_by_key(|r| r.index);
         let all_ok = reports.iter().all(|r| r.ok);
-        Ok((format_reports(&reports), all_ok, hook_state))
+        let input_tokens = reports.iter().map(|r| r.input_tokens).sum();
+        let output_tokens = reports.iter().map(|r| r.output_tokens).sum();
+        Ok((
+            format_reports(&reports),
+            all_ok,
+            hook_state,
+            input_tokens,
+            output_tokens,
+        ))
     })
 }
 
+/// Apply keys the child actually changed. A missing child key must not delete
+/// the parent value, and an unchanged key must not clobber a sibling's update.
 pub(super) fn merge_hook_state_delta(
     base: &BTreeMap<String, Value>,
     child: &BTreeMap<String, Value>,
     target: &mut BTreeMap<String, Value>,
 ) {
-    for key in base.keys() {
-        if !child.contains_key(key) {
-            target.remove(key);
-        }
-    }
     for (k, v) in child {
         if base.get(k) != Some(v) {
             target.insert(k.clone(), v.clone());
@@ -255,6 +261,21 @@ mod tests {
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn hook_state_merge_keeps_keys_the_child_omitted() {
+        let base = BTreeMap::from([
+            ("keep".into(), serde_json::json!(1)),
+            ("shared".into(), serde_json::json!("base")),
+        ]);
+        let mut target = base.clone();
+        target.insert("sibling".into(), serde_json::json!(true));
+        let child = BTreeMap::from([("shared".into(), serde_json::json!("child"))]);
+        merge_hook_state_delta(&base, &child, &mut target);
+        assert_eq!(target.get("keep"), Some(&serde_json::json!(1)));
+        assert_eq!(target.get("shared"), Some(&serde_json::json!("child")));
+        assert_eq!(target.get("sibling"), Some(&serde_json::json!(true)));
+    }
 
     #[tokio::test]
     async fn delegate_runs_parallel_readonly_batch_and_blocks_nesting() {
@@ -371,7 +392,7 @@ mod tests {
             },
         ];
 
-        let (out, all_ok, _) = execute_delegate(&host, "call_1", tasks, BTreeMap::new(), &tx)
+        let (out, all_ok, _, _, _) = execute_delegate(&host, "call_1", tasks, BTreeMap::new(), &tx)
             .await
             .unwrap();
         assert!(all_ok);

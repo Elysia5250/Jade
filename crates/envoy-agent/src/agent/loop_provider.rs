@@ -33,7 +33,7 @@ pub(crate) async fn call_provider_with_overflow_retry(
     step: usize,
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<StreamReply> {
-    let max_tokens = turn_max_tokens(cfg);
+    let mut max_tokens = turn_max_tokens(cfg);
     let first = dispatch_stream(
         http,
         provider,
@@ -83,7 +83,7 @@ pub(crate) async fn call_provider_with_overflow_retry(
                 messages,
                 calibration,
                 plan,
-                tools_overhead(extra_tools.len()),
+                tools_overhead(extra_tools),
                 true,
                 tx,
             )
@@ -101,7 +101,7 @@ pub(crate) async fn call_provider_with_overflow_retry(
                 messages,
                 calibration,
                 plan,
-                tools_overhead(extra_tools.len()),
+                tools_overhead(extra_tools),
                 true,
                 None,
                 Some(tx),
@@ -123,7 +123,8 @@ pub(crate) async fn call_provider_with_overflow_retry(
         auto: true,
     });
 
-    dispatch_stream(
+    max_tokens = turn_max_tokens(cfg);
+    let mut reply = dispatch_stream(
         http,
         provider,
         &cfg.model.model_id,
@@ -136,7 +137,9 @@ pub(crate) async fn call_provider_with_overflow_retry(
         &cfg.data_dir,
         tx,
     )
-    .await
+    .await?;
+    reply.calibrate = false;
+    Ok(reply)
 }
 
 fn turn_max_tokens(cfg: &TurnConfig) -> u32 {
@@ -245,7 +248,8 @@ pub(super) async fn finalize_step_limit(
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: None,
-    });
+    
+        reasoning_blocks: Vec::new(),});
     let no_tools = ToolFilter {
         depth: 0,
         allowed: Some(Vec::new()),
@@ -293,12 +297,16 @@ pub(super) async fn finalize_step_limit(
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: None,
-    });
+    
+        reasoning_blocks: Vec::new(),});
     Ok(LoopOutcome {
         messages,
         input_tokens: total_in,
         output_tokens: total_out,
         context_tokens,
+        cache_read_tokens: 0,
+        cache_create_tokens: 0,
+        calibration_factor: 1.0,
         hook_state: hook_session.state.clone(),
     })
 }

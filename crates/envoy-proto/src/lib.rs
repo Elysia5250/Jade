@@ -8,10 +8,11 @@
 //!   stream: `Probe`, `Submit`, `Jobs`, `JobStatus`, `JobLog`, `JobCancel`, and
 //!   the synchronous file operations.
 //!
-//! Every stream opens with one [`ClientMsg::Call`]; its `version` doubles as the
-//! handshake. The agent answers [`Reply::Hello`] (or `Denied` / `Failed`) and
-//! then the replies for that one request. Closing the stream detaches a log
-//! follower — it never cancels a job.
+//! Every stream opens with one [`ClientMsg::Call`]. A fixed `ENVY` header carries
+//! the protocol version before the postcard body, so a mismatch answers
+//! [`Reply::VersionMismatch`] instead of a decode failure. The agent then answers
+//! [`Reply::Hello`] (or `Denied` / `Failed`) and the replies for that one request.
+//! Closing the stream detaches a log follower — it never cancels a job.
 
 pub mod codec;
 
@@ -21,7 +22,46 @@ use serde::{Deserialize, Serialize};
 pub const AGENT_SERVICE_ID: u16 = 16;
 
 /// Protocol generation. Bumped only for incompatible changes.
-pub const AGENT_VERSION: u8 = 2;
+/// The framed header uses the same number as [`WIRE_VERSION`].
+pub const AGENT_VERSION: u8 = 4;
+/// Fixed header version. Checked before the postcard body is decoded.
+pub const WIRE_VERSION: u16 = 4;
+/// Magic that opens every framed payload (`ENVY`).
+pub const WIRE_MAGIC: [u8; 4] = *b"ENVY";
+/// `WIRE_MAGIC` plus a little-endian [`WIRE_VERSION`].
+pub const WIRE_HEADER_LEN: usize = 6;
+
+const _: () = assert!(WIRE_HEADER_LEN == 6);
+const _: () = assert!(WIRE_VERSION == AGENT_VERSION as u16);
+
+/// Raised by [`codec::read_framed`] when the fixed header is not this build.
+#[derive(Debug, Clone)]
+pub struct VersionMismatch {
+    /// Version this process speaks ([`WIRE_VERSION`]).
+    pub local_version: u16,
+    /// Version in the peer header. `0` means the magic was not [`WIRE_MAGIC`].
+    pub peer_version: u16,
+}
+
+impl std::fmt::Display for VersionMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.peer_version == 0 {
+            write!(
+                f,
+                "wire protocol mismatch: this process speaks v{}, and the peer frame has no ENVY header. Stop the old daemon with `envoy daemon stop` and start this binary",
+                self.local_version
+            )
+        } else {
+            write!(
+                f,
+                "wire protocol mismatch: this process speaks v{}, peer speaks v{}. Stop the old daemon with `envoy daemon stop` and start this binary",
+                self.local_version, self.peer_version
+            )
+        }
+    }
+}
+
+impl std::error::Error for VersionMismatch {}
 /// Payload ceiling for one output/log chunk.
 pub const AGENT_CHUNK: usize = 32 * 1024;
 /// Maximum length of a single framed message (8 MiB).
@@ -417,12 +457,19 @@ pub enum Reply {
         code: i32,
         ms: u64,
     },
+    /// The peer header or `Call::version` is not [`AGENT_VERSION`].
+    /// `client_version` is 0 when the frame magic was not `ENVY`.
+    VersionMismatch {
+        server_version: u16,
+        client_version: u16,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::codec::{read_framed, write_framed};
+    use tokio::io::AsyncWriteExt;
 
     #[test]
     fn call_survives_a_postcard_roundtrip() {
@@ -537,5 +584,62 @@ mod tests {
                 op: Op::Probe
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn oversized_length_is_rejected_before_the_body() {
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        let len = ((MAX_FRAME_BYTES as u32) + 1).to_be_bytes();
+        writer.write_all(&len).await.unwrap();
+        let read = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            read_framed::<_, ClientMsg>(&mut reader),
+        );
+        let err = read
+            .await
+            .expect("length check waited for a body")
+            .unwrap_err();
+        assert!(err.to_string().contains("exceeds max"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn version_mismatch_is_reported_before_decode() {
+        let (mut writer, mut reader) = tokio::io::duplex(256);
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&WIRE_MAGIC);
+        payload.extend_from_slice(&99u16.to_le_bytes());
+        payload.extend_from_slice(b"not-postcard");
+        writer
+            .write_all(&(payload.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        writer.write_all(&payload).await.unwrap();
+        let err = read_framed::<_, ClientMsg>(&mut reader).await.unwrap_err();
+        let Some(mismatch) = err.downcast_ref::<VersionMismatch>() else {
+            panic!("expected VersionMismatch, got {err}");
+        };
+        assert_eq!(mismatch.local_version, WIRE_VERSION);
+        assert_eq!(mismatch.peer_version, 99);
+        let text = err.to_string();
+        assert!(text.contains("v99"), "{text}");
+        assert!(text.contains("envoy daemon stop"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn trailing_bytes_are_rejected() {
+        let body = postcard::to_stdvec(&ClientMsg::End).unwrap();
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&WIRE_MAGIC);
+        payload.extend_from_slice(&WIRE_VERSION.to_le_bytes());
+        payload.extend_from_slice(&body);
+        payload.push(0xAB);
+        let (mut writer, mut reader) = tokio::io::duplex(256);
+        writer
+            .write_all(&(payload.len() as u32).to_be_bytes())
+            .await
+            .unwrap();
+        writer.write_all(&payload).await.unwrap();
+        let err = read_framed::<_, ClientMsg>(&mut reader).await.unwrap_err();
+        assert!(err.to_string().contains("trailing"), "{err}");
     }
 }

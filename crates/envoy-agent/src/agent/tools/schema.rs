@@ -294,6 +294,14 @@ pub(crate) struct ToolFilter {
 }
 
 impl ToolFilter {
+    /// Summary and other no-tool requests. An empty allow-list matches nothing.
+    pub(crate) fn none() -> Self {
+        Self {
+            depth: 0,
+            allowed: Some(Vec::new()),
+        }
+    }
+
     pub(crate) fn allows(&self, name: &str) -> bool {
         if self.depth > 0 && matches!(name, "delegate" | "monitor") {
             return false;

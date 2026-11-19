@@ -13,16 +13,16 @@ pub(crate) async fn delegate_tool(
     args: &Value,
     hook_state: BTreeMap<String, Value>,
     tx: &mpsc::UnboundedSender<AgentEvent>,
-) -> Result<(String, Option<i32>, BTreeMap<String, Value>)> {
+) -> Result<(String, Option<i32>, BTreeMap<String, Value>, u64, u64)> {
     let Some(host) = host else {
         bail!("nested subagent delegation is disabled (max depth 1)");
     };
 
     let tasks = parse_tasks(args)?;
-    let (summary, all_ok, next_state) =
+    let (summary, all_ok, next_state, input_tokens, output_tokens) =
         execute_delegate(host, call_id, tasks, hook_state, tx).await?;
     let exit_code = if all_ok { None } else { Some(1) };
-    Ok((summary, exit_code, next_state))
+    Ok((summary, exit_code, next_state, input_tokens, output_tokens))
 }
 
 pub(crate) fn summarize_delegate(args: &Value) -> (String, String) {

@@ -2,32 +2,34 @@
 //!
 //! The profile starts permissive, then takes write access away and punches
 //! holes for the workspace and a private scratch directory. Later rules win,
-//! so protected directories and secret files stay closed after those holes.
-//! A per-command scratch directory is `$TMPDIR` for that process only.
+//! so protected directories, user secrets/control sockets, and `.env*` files
+//! stay closed after those holes. A per-command scratch directory is
+//! `$TMPDIR` for that process only.
 
-use anyhow::{bail, Context, Result};
+use crate::sandbox::{
+    create_scratch_dir, user_control_dirs, user_secret_paths, PROTECTED_DIRS,
+};
+use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-const PROTECTED_DIRS: &[&str] = &[".git", ".envoy", ".codex", ".agents", ".ssh", ".aws"];
-
-static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
+const WORKSPACE_READ_DENY_DIRS: &[&str] = &[".ssh", ".aws", ".envoy"];
+const CONTROL_SOCKET_NAMES: &[&str] = &["envoy.sock", "agent.sock", "control.sock"];
 
 pub struct SeatbeltCommand {
     pub argv: Vec<String>,
     pub scratch_dir: PathBuf,
 }
 
+#[cfg(target_os = "macos")]
 pub fn find_sandbox_exec() -> Option<PathBuf> {
     let fixed = Path::new("/usr/bin/sandbox-exec");
-    if is_executable(fixed) {
+    if crate::sandbox::is_executable(fixed) {
         return Some(fixed.to_path_buf());
     }
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join("sandbox-exec");
-        if is_executable(&candidate) {
+        if crate::sandbox::is_executable(&candidate) {
             return Some(candidate);
         }
     }
@@ -42,7 +44,7 @@ pub fn wrap(
     writable_cwd: bool,
     allow_net: bool,
 ) -> Result<SeatbeltCommand> {
-    let scratch = create_scratch()?;
+    let scratch = create_scratch_dir()?;
     let profile = match build_profile(cwd, extra_rw, writable_cwd, allow_net, &scratch) {
         Ok(profile) => profile,
         Err(err) => {
@@ -66,19 +68,6 @@ pub fn wrap(
         argv: out,
         scratch_dir: scratch,
     })
-}
-
-fn create_scratch() -> Result<PathBuf> {
-    let n = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir =
-        std::env::temp_dir().join(format!("envoy-scratch-{}-{nanos}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).context("creating sandbox scratch directory")?;
-    crate::fs::set_mode(&dir, 0o700);
-    std::fs::canonicalize(&dir).context("canonicalizing sandbox scratch directory")
 }
 
 fn build_profile(
@@ -127,29 +116,59 @@ fn build_profile(
     }
     for root in &inspect {
         for name in PROTECTED_DIRS {
-            lines.push(format!(
-                "(deny file-write* (subpath {}))",
-                embed_path(&root.join(name))?
-            ));
+            if WORKSPACE_READ_DENY_DIRS.contains(name) {
+                lines.push(format!(
+                    "(deny file-read* file-write* (subpath {}))",
+                    embed_path(&root.join(name))?
+                ));
+            } else {
+                lines.push(format!(
+                    "(deny file-write* (subpath {}))",
+                    embed_path(&root.join(name))?
+                ));
+            }
         }
     }
-    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        let home = std::fs::canonicalize(&home).unwrap_or(home);
-        for name in [".ssh", ".aws"] {
-            lines.push(format!(
-                "(deny file-read* file-write* (subpath {}))",
-                embed_path(&home.join(name))?
-            ));
-        }
+    for secret in user_secret_paths() {
+        lines.push(format!(
+            "(deny file-read* file-write* (subpath {}))",
+            embed_path(&secret)?
+        ));
     }
     for root in &inspect {
         let body = regex_env_body(&root.display().to_string());
-        lines.push(format!("(deny file-read* (regex \"{body}\"))"));
+        lines.push(format!("(deny file-read* file-write* (regex \"{body}\"))"));
     }
     if !allow_net {
         lines.push("(deny network*)".to_string());
+    } else {
+        for sock in control_socket_paths() {
+            lines.push(format!(
+                "(deny network-outbound (remote unix-socket (path-literal {})))",
+                embed_path(&sock)?
+            ));
+        }
     }
     Ok(lines.join("\n"))
+}
+
+fn control_socket_paths() -> Vec<PathBuf> {
+    let mut sockets = Vec::new();
+    for dir in user_control_dirs() {
+        for name in CONTROL_SOCKET_NAMES {
+            let p = dir.join(name);
+            if !sockets.iter().any(|existing| existing == &p) {
+                sockets.push(p);
+            }
+        }
+    }
+    if let Some(val) = std::env::var_os("CONDUIT_CONTROL_SOCK").filter(|s| !s.is_empty()) {
+        let p = crate::fs::resolve(&val.to_string_lossy());
+        if !sockets.iter().any(|existing| existing == &p) {
+            sockets.push(p);
+        }
+    }
+    sockets
 }
 
 fn canonical_existing(path: &Path) -> Option<PathBuf> {
@@ -181,23 +200,58 @@ fn regex_env_body(root: &str) -> String {
         }
         escaped.push(c);
     }
-    format!("^{escaped}/\\.env($|\\.[^/]*)$")
+    format!("^{escaped}/(.*/)?\\.[Ee][Nn][Vv]($|\\.[^/]*)$")
 }
 
-fn is_executable(path: &Path) -> bool {
-    let Ok(meta) = std::fs::metadata(path) else {
-        return false;
-    };
-    if !meta.is_file() {
-        return false;
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_regex_matches_nested_and_uppercase_names() {
+        let body = regex_env_body("/tmp/proj.v1");
+        assert!(body.starts_with("^/tmp/proj\\.v1/(.*/)?\\.[Ee][Nn][Vv]"));
+        assert!(body.ends_with("($|\\.[^/]*)$"));
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        meta.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        true
+
+    #[test]
+    fn profile_blocks_envoy_conduit_and_rw_env_files() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("envoy-seatbelt-unit-{n}"));
+        let scratch = std::env::temp_dir().join(format!("envoy-seatbelt-scratch-{n}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&scratch).unwrap();
+        let canon_dir = std::fs::canonicalize(&dir).unwrap();
+        let canon_scratch = std::fs::canonicalize(&scratch).unwrap();
+        let profile = build_profile(&dir, &[], true, true, &canon_scratch).unwrap();
+
+        let envoy_rule = format!(
+            "(deny file-read* file-write* (subpath \"{}\"))",
+            canon_dir.join(".envoy").display()
+        );
+        let ssh_rule = format!(
+            "(deny file-read* file-write* (subpath \"{}\"))",
+            canon_dir.join(".ssh").display()
+        );
+        let env_rule_prefix = format!(
+            "(deny file-read* file-write* (regex \"^{}/(.*/)?\\.[Ee][Nn][Vv]",
+            canon_dir.display()
+        );
+        assert!(profile.contains(&envoy_rule), "{profile}");
+        assert!(profile.contains(&ssh_rule), "{profile}");
+        assert!(profile.contains(&env_rule_prefix), "{profile}");
+        if std::env::var_os("HOME").is_some() {
+            assert!(profile.contains("/.envoy\")"), "{profile}");
+            assert!(profile.contains("/.conduit\")"), "{profile}");
+            assert!(
+                profile.contains("(deny network-outbound (remote unix-socket (path-literal"),
+                "{profile}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 }

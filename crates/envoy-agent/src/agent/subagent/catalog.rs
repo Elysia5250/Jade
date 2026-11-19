@@ -107,12 +107,16 @@ impl SubagentSpec {
         if !self.mode.is_readonly() {
             return false;
         }
-        // If a custom preset explicitly adds mutating tools, don't classify as pure readonly.
-        !self
-            .tools
-            .iter()
-            .any(|t| matches!(t.as_str(), "write" | "edit" | "exec"))
+        // Job, todo, monitor, and MCP tools mutate state outside the worktree diff.
+        !self.tools.iter().any(|t| tool_mutates(t))
     }
+}
+
+fn tool_mutates(name: &str) -> bool {
+    matches!(
+        name,
+        "write" | "edit" | "exec" | "job" | "todo" | "monitor"
+    ) || name.starts_with("mcp__")
 }
 
 pub(crate) fn builtin_agents() -> Vec<SubagentSpec> {
@@ -471,5 +475,26 @@ mod tests {
         assert!(xml.contains("name=\"perf\""));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn job_todo_monitor_and_mcp_are_not_readonly() {
+        let mut spec = SubagentSpec {
+            name: "look".into(),
+            description: String::new(),
+            mode: SubagentMode::ReadOnly,
+            model: "fast".into(),
+            tools: vec!["read".into(), "grep".into()],
+            max_steps: 4,
+            timeout_s: 30,
+            system_prompt: String::new(),
+            scope: AgentScope::User,
+            source_path: None,
+        };
+        assert!(spec.is_readonly());
+        for tool in ["job", "todo", "monitor", "mcp__fs__write", "exec"] {
+            spec.tools = vec![tool.into()];
+            assert!(!spec.is_readonly(), "{tool}");
+        }
     }
 }

@@ -67,10 +67,8 @@ pub fn load_todos(data_dir: &Path, session_id: &str) -> Vec<TodoItem> {
 
 pub(crate) fn save_todos(data_dir: &Path, session_id: &str, items: &[TodoItem]) -> Result<()> {
     let path = todo_path(data_dir, session_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, serde_json::to_string_pretty(items)?)?;
+    let data = serde_json::to_string_pretty(items)?;
+    envoy_core::fs::write_atomic_sync(&path, data.as_bytes(), 0o600)?;
     Ok(())
 }
 
