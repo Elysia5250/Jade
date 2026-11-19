@@ -15,8 +15,10 @@
 mod commands;
 mod decrypt;
 mod diff;
+mod drive;
 mod edit_file;
 mod highlight;
+mod inputs;
 mod links;
 mod markdown;
 mod markdown_table;
@@ -95,6 +97,11 @@ pub(crate) use tokio::task::JoinHandle;
 
 pub(crate) const LEADER_TIMEOUT: Duration = Duration::from_secs(2);
 
+pub(crate) fn paint(frame: &mut Frame, app: &mut App) {
+    inputs::sync(app);
+    view::draw(frame, app);
+}
+
 pub(crate) type AnyDialer = Box<dyn AgentDialer>;
 
 /// True when the active provider has no usable model id, or still lists a
@@ -161,7 +168,7 @@ pub async fn run(
     {
         let app_ref = &mut app;
         let _ = execute!(stdout(), BeginSynchronizedUpdate);
-        tui.terminal.draw(|frame| view::draw(frame, app_ref))?;
+        tui.terminal.draw(|frame| paint(frame, app_ref))?;
         let _ = execute!(stdout(), EndSynchronizedUpdate);
     }
 
@@ -194,105 +201,7 @@ pub async fn run(
         app.spawn_model_refresh();
     }
 
-    loop {
-        while event::poll(Duration::ZERO)? {
-            match event::read()? {
-                Event::Key(key) => {
-                    if key.kind != KeyEventKind::Press {
-                        continue;
-                    }
-                    app.selection = None;
-                    let action = app.handle_key(key);
-                    match action {
-                        Action::Quit => {
-                            app.persist_session();
-                            return Ok(());
-                        }
-                        Action::None => {}
-                        Action::SubmitShell(req) => app.submit_shell(&remote, req).await,
-                        Action::SubmitAgent(prompt) => app.submit_agent(prompt),
-                        Action::SubmitAgentFollowup(prompt) => app.queue_followup(prompt),
-                        Action::Cancel => app.cancel_active(&remote).await,
-                        Action::CancelJob(id) => app.cancel_job(&remote, id).await,
-                        Action::Refresh => app.refresh(&remote).await,
-                        Action::Switch(target) => {
-                            app.switch_to(target);
-                            if app.target == "local" {
-                                daemon::ensure(&app.data_dir).await?;
-                            }
-                            remote = Remote::new(dialer_for(
-                                &app.data_dir,
-                                &app.target,
-                                app.conduit.clone(),
-                            ));
-                            app.refresh(&remote).await;
-                        }
-                        Action::AttachJob(job) => app.attach_job_card(&remote, job).await,
-                        Action::ToggleMouseCapture => {
-                            let next = !tui.mouse_capture;
-                            tui.set_mouse_capture(next);
-                            app.mouse_capture = next;
-                            app.set_toast(
-                                if next {
-                                    "mouse capture: on (drag to OSC52 copy, click links)"
-                                } else {
-                                    "mouse capture: off (native terminal selection)"
-                                },
-                                false,
-                            );
-                        }
-                        Action::SetMouseCapture(on) => {
-                            tui.set_mouse_capture(on);
-                            app.mouse_capture = on;
-                        }
-                        Action::EditFile(path) => {
-                            if let Err(err) = edit_file::run(&mut tui, &path) {
-                                app.set_toast(err, true);
-                            }
-                        }
-                    }
-                }
-                Event::Paste(text) => {
-                    app.selection = None;
-                    app.handle_paste(&text);
-                }
-                Event::Mouse(mouse) => {
-                    if let Some(Action::AttachJob(job)) = app.handle_mouse(mouse) {
-                        app.attach_job_card(&remote, job).await;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        app.drain_agent_events();
-        app.drain_ui_notices();
-        app.drain_login_events();
-        app.drain_model_events();
-
-        if app.welcome.is_none()
-            && app.agent_stream.is_none()
-            && Instant::now() >= app.agent_retry_at
-        {
-            app.spawn_agent_attach();
-        }
-
-        if app.last_refresh.elapsed() >= app.interval {
-            app.refresh(&remote).await;
-        }
-        app.poll_shell_cards(&remote).await;
-
-        let app_ref = &mut app;
-        let _ = execute!(stdout(), BeginSynchronizedUpdate);
-        tui.terminal.draw(|frame| view::draw(frame, app_ref))?;
-        let _ = execute!(stdout(), EndSynchronizedUpdate);
-        let frame_ms = if app.agent_running || !app.jobs.is_empty() {
-            25
-        } else {
-            33
-        };
-        tokio::time::sleep(Duration::from_millis(frame_ms)).await;
-    }
+    drive::console_loop(&mut app, &mut tui, &mut remote).await
 }
 
 // --------------------------------------------------------------------- themes
@@ -502,6 +411,11 @@ pub(crate) struct App {
     drag_start: Option<GridPos>,
     screen_lines: Vec<Vec<String>>,
     transcript_cache: HashMap<(u64, usize, usize), (usize, Vec<LinkedLine>)>,
+    inputs: inputs::Inputs,
+    /// While set, [`App::persist_session`] records one pending write.
+    persist_hold: std::cell::Cell<bool>,
+    persist_due: std::cell::Cell<bool>,
+    last_shell_poll: Instant,
 }
 
 #[cfg(test)]

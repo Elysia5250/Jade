@@ -26,6 +26,9 @@ Envoy is a daemon-owned agent with a thin terminal client.
   sequence and replays from it; a daemon restart emits `SessionReset`.
 - The TUI is a client. It renders state and sends requests; it does not run the
   agent loop.
+- `tui/view/` only reads in-memory snapshots. Catalog, preview, diff, and the
+  workspace index refresh outside `draw`. The console redraws on input, daemon
+  events, and animation ticks.
 - Wire types are postcard-compatible. Keep every field; `skip_serializing_if`
   shifts non-self-describing fields.
 - `agent.sock` and control sockets are local, mode `0600`.
@@ -60,10 +63,13 @@ crates/envoy-cli/src/
   cli_ops.rs              CLI status, device, and file subcommands
   headless/               non-interactive `envoy -p` / `envoy ask` mode
   tui/
-    mod.rs                terminal setup + run loop
+    mod.rs                terminal setup; paint syncs snapshots, then draws
+    drive.rs              event-driven console loop
+    inputs.rs             catalog, file preview, and diff snapshots
     commands.rs           slash command registry (/compact, /handoff, /budget, /permissions, /mcp, /skill, ...)
     state/                App state, split by concern
-    view/                 pure rendering, split by screen region
+    view/                 pure rendering over those snapshots
+    links.rs              workspace index, depth-capped, inode-deduped
     text.rs               wrapping/markdown helpers
     theme.rs              color tokens
 ```

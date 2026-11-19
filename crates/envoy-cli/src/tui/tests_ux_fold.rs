@@ -22,7 +22,7 @@ fn temp_workspace() -> PathBuf {
 
 fn draw_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-    terminal.draw(|frame| view::draw(frame, app)).unwrap();
+    terminal.draw(|frame| paint(frame, app)).unwrap();
     let buf = terminal.backend().buffer().clone();
     (0..height)
         .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())

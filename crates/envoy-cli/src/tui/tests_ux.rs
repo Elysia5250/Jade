@@ -189,7 +189,7 @@ async fn welcome_shows_resumes_tag_and_n_starts_fresh_session() {
     app.open_welcome();
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    terminal.draw(|frame| paint(frame, &mut app)).unwrap();
     let screen: String = terminal
         .backend()
         .buffer()
@@ -215,7 +215,7 @@ fn clicking_status_sign_in_opens_login_modal() {
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
     app.connected = true;
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    terminal.draw(|frame| paint(frame, &mut app)).unwrap();
 
     let region = app
         .hit_regions
@@ -376,7 +376,7 @@ fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice
     });
 
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    terminal.draw(|frame| paint(frame, &mut app)).unwrap();
     let collapsed: String = terminal
         .backend()
         .buffer()
@@ -405,7 +405,7 @@ fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice
         .unwrap()
         .rect;
     app.dispatch_click(grp.x, grp.y);
-    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    terminal.draw(|frame| paint(frame, &mut app)).unwrap();
     let expanded: String = terminal
         .backend()
         .buffer()
@@ -528,7 +528,7 @@ fn settled_turn_folds_edits_explores_and_commands() {
 
     let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
     let draw = |app: &mut App, terminal: &mut Terminal<TestBackend>| {
-        terminal.draw(|frame| view::draw(frame, app)).unwrap();
+        terminal.draw(|frame| paint(frame, app)).unwrap();
         terminal
             .backend()
             .buffer()

@@ -121,17 +121,17 @@ pub(super) fn draw_skills(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
         let mut prev = "";
         for (offset, skill) in welcome.skills.iter().skip(start).take(window).enumerate() {
             let idx = start + offset;
-            let kind = envoy_agent::skills::skill_root_kind(&app.data_dir, skill);
+            let flag = app.inputs.catalog.welcome_flags.get(idx);
+            let kind = flag.map(|flag| flag.kind).unwrap_or("user");
             if kind != prev {
                 push_dim(&mut lines, theme, &format!("  {kind}"));
                 prev = kind;
             }
-            let on =
-                if envoy_agent::skills::skill_is_injected(&app.data_dir, &app.session.cwd, skill) {
-                    "on"
-                } else {
-                    "off"
-                };
+            let on = if flag.is_some_and(|flag| flag.injected) {
+                "on"
+            } else {
+                "off"
+            };
             push_choice(
                 &mut lines,
                 theme,

@@ -62,7 +62,7 @@ fn composer_and_user_block_have_vertical_breathing_room() {
     });
 
     let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
-    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    terminal.draw(|frame| paint(frame, &mut app)).unwrap();
     let buf = terminal.backend().buffer();
     let rows: Vec<String> = (0..32u16)
         .map(|y| {

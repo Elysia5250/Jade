@@ -24,6 +24,7 @@ impl App {
             welcome.skills = skills;
             welcome.skill_count = len;
         }
+        self.inputs.invalidate_catalog();
     }
 
     pub(super) fn handle_welcome_skills(&mut self, key: KeyEvent) -> Action {
@@ -81,6 +82,7 @@ impl App {
         if let Some(welcome) = self.welcome.as_mut() {
             welcome.error = result.err();
         }
+        self.inputs.invalidate_catalog();
     }
 }
 

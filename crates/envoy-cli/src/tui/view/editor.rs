@@ -61,7 +61,7 @@ pub(super) fn draw_editor(
 
     let lines: Vec<Line> = if app.input.is_empty() {
         let placeholder = match app.mode {
-            InputMode::Agent if resolve_active_provider(&app.data_dir).is_none() => {
+            InputMode::Agent if !app.inputs.catalog.signed_in => {
                 "Sign in first (/login or press Enter to connect a provider)"
             }
             InputMode::Agent => "Message Envoy…",

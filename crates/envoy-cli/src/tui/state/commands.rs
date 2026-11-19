@@ -87,10 +87,13 @@ impl App {
             }
             Command::SetTrust(on) => {
                 match set_workspace_trusted(&self.data_dir, &self.session.cwd, on) {
-                    Ok(()) => self.set_toast(
-                        format!("workspace {}", if on { "trusted" } else { "untrusted" }),
-                        false,
-                    ),
+                    Ok(()) => {
+                        self.inputs.invalidate_catalog();
+                        self.set_toast(
+                            format!("workspace {}", if on { "trusted" } else { "untrusted" }),
+                            false,
+                        );
+                    }
                     Err(e) => self.set_toast(format!("{e:#}"), true),
                 }
                 Action::None

@@ -1,11 +1,10 @@
 //! Inspector Tab 3: Syntax-highlighted, line-numbered workspace file previewer.
 use super::push_linked_rows;
 use crate::tui::highlight::{highlight_code_line, Lang};
-use crate::tui::links::{normalize_display_path, LinkedSpan};
+use crate::tui::inputs::PreviewBody;
+use crate::tui::links::{display_rel, LinkedSpan};
 use crate::tui::*;
 use std::path::Path;
-
-const FILE_PREVIEW_LIMIT: usize = 512 * 1024;
 
 pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     if area.height < 3 {
@@ -39,14 +38,8 @@ pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
         return;
     };
 
-    let abs = if Path::new(&raw_path).is_absolute() {
-        Path::new(&raw_path).to_path_buf()
-    } else {
-        app.session.cwd.join(&raw_path)
-    };
-    let rel = normalize_display_path(&app.session.cwd, &abs);
-    let has_diff = app.find_changed_file_index(&rel).is_some()
-        || crate::tui::diff::load_git_pair(&app.session.cwd, &rel).is_some();
+    let (rel, body) = preview_text(app, &raw_path);
+    let has_diff = app.inputs.has_diff;
 
     let line_label = app
         .inspector
@@ -92,39 +85,24 @@ pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
         header_area,
     );
 
-    let Ok(bytes) = std::fs::read(&abs) else {
+    let FileBody::Text(text) = body else {
         app.inspector.max_scroll = 0;
         app.inspector.scroll = 0;
+        let (message, bad) = match body {
+            FileBody::Missing(path) => (format!("  cannot read {path}"), true),
+            FileBody::Loading => ("  loading preview".to_string(), false),
+            FileBody::Binary(bytes) => (format!("  binary file ({bytes} bytes)"), false),
+            FileBody::Text(_) => (String::new(), false),
+        };
+        let color = if bad { theme.bad } else { theme.dim };
         frame.render_widget(
-            Paragraph::new(Line::styled(
-                format!("  cannot read {}", abs.display()),
-                Style::default().fg(theme.bad),
-            )),
+            Paragraph::new(Line::styled(message, Style::default().fg(color))),
             body_area,
         );
         return;
     };
 
-    if bytes.iter().take(4096).any(|&b| b == 0) {
-        app.inspector.max_scroll = 0;
-        app.inspector.scroll = 0;
-        frame.render_widget(
-            Paragraph::new(Line::styled(
-                format!("  binary file ({} bytes)", bytes.len()),
-                Style::default().fg(theme.dim),
-            )),
-            body_area,
-        );
-        return;
-    }
-
-    let capped = if bytes.len() > FILE_PREVIEW_LIMIT {
-        &bytes[..FILE_PREVIEW_LIMIT]
-    } else {
-        &bytes
-    };
-    let text = String::from_utf8_lossy(capped);
-    let lang = Lang::from_path(&abs);
+    let lang = Lang::from_path(Path::new(&rel));
     let target_line = app.inspector.file_line;
 
     let mut lines: Vec<Line<'static>> = Vec::new();
@@ -167,4 +145,24 @@ pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
         Paragraph::new(lines).scroll((app.inspector.scroll, 0)),
         body_area,
     );
+}
+
+enum FileBody {
+    Missing(String),
+    Loading,
+    Binary(u64),
+    Text(String),
+}
+
+fn preview_text(app: &App, raw_path: &str) -> (String, FileBody) {
+    match &app.inputs.preview {
+        PreviewBody::Text { rel, body } => (rel.clone(), FileBody::Text(body.clone())),
+        PreviewBody::Binary { rel, bytes } => (rel.clone(), FileBody::Binary(*bytes)),
+        PreviewBody::Missing { rel } => (rel.clone(), FileBody::Missing(rel.clone())),
+        PreviewBody::Loading { rel } => (rel.clone(), FileBody::Loading),
+        PreviewBody::Absent => (
+            display_rel(&app.session.cwd, Path::new(raw_path)),
+            FileBody::Missing(raw_path.to_string()),
+        ),
+    }
 }

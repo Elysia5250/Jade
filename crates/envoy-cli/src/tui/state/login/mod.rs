@@ -63,14 +63,40 @@ impl App {
             )
         };
         self.push_notice(notice, false);
+        self.inputs.invalidate_catalog();
     }
 
-    pub(in crate::tui) fn drain_login_events(&mut self) {
-        let Some(mut rx) = self.login_rx.take() else {
-            return;
-        };
+    pub(in crate::tui) fn drain_login_events(&mut self) -> bool {
+        self.drain_login_from(None)
+    }
+
+    pub(in crate::tui) fn drain_login_from(&mut self, first: Option<LoginEvent>) -> bool {
+        let mut rx = self.login_rx.take();
+        let mut queued = Vec::new();
+        if let Some(ev) = first {
+            queued.push(ev);
+        }
+        let mut alive = true;
+        if let Some(rx) = rx.as_mut() {
+            loop {
+                match rx.try_recv() {
+                    Ok(ev) => queued.push(ev),
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        alive = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if queued.is_empty() {
+            if alive {
+                self.login_rx = rx;
+            }
+            return false;
+        }
         let mut keep = true;
-        while let Ok(ev) = rx.try_recv() {
+        for ev in queued {
             match ev {
                 LoginEvent::OpenAiDeviceStarted {
                     verification_url,
@@ -140,9 +166,10 @@ impl App {
                 }
             }
         }
-        if keep {
-            self.login_rx = Some(rx);
+        if keep && alive {
+            self.login_rx = rx;
         }
+        true
     }
 }
 

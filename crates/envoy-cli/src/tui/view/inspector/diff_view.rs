@@ -1,7 +1,7 @@
 //! Inspector Tab 2: Diff review view (Unified / Split + Hunk jump + git fallback).
 use super::push_linked_rows;
-use crate::tui::diff::{load_git_pair, render_diff, DiffLayout};
-use crate::tui::links::{normalize_display_path, LinkedSpan};
+use crate::tui::diff::{render_diff, DiffLayout};
+use crate::tui::links::{display_rel, LinkedSpan};
 use crate::tui::*;
 
 pub(super) fn draw_diff_view(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
@@ -42,13 +42,17 @@ pub(super) fn draw_diff_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
         return;
     };
 
-    let rel = normalize_display_path(&app.session.cwd, std::path::Path::new(&raw_path));
+    let rel = if app.inputs.diff_rel.is_empty() {
+        display_rel(&app.session.cwd, std::path::Path::new(&raw_path))
+    } else {
+        app.inputs.diff_rel.clone()
+    };
     let session_match = app
         .find_changed_file_index(&raw_path)
         .and_then(|idx| app.session.changed_files.get(idx))
         .map(|fc| (fc.before.clone(), fc.after.clone()));
 
-    let pair = session_match.or_else(|| load_git_pair(&app.session.cwd, &rel));
+    let pair = session_match.or_else(|| app.inputs.diff_git.clone());
 
     let Some((before, after)) = pair else {
         app.inspector.diff_hunk_lines.clear();

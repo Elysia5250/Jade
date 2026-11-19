@@ -76,6 +76,7 @@ impl App {
                         let chars = copied.chars().count();
                         self.set_toast(format!("copied {chars} chars"), false);
                     }
+                    self.screen_lines.clear();
                     return None;
                 }
                 self.selection = None;
@@ -300,24 +301,43 @@ fn copy_to_clipboard(text: &str) {
     let _ = write!(out, "\x1b]52;c;{encoded}\x07");
     let _ = out.flush();
 
+    let owned = text.to_string();
+    let _ = std::thread::Builder::new()
+        .name("envoy-clip".into())
+        .spawn(move || clipboard_process(&owned));
+}
+
+fn clipboard_process(text: &str) {
     for (cmd, args) in [
         ("wl-copy", &[][..]),
         ("xclip", &["-selection", "clipboard"][..]),
         ("xsel", &["--clipboard", "--input"][..]),
         ("pbcopy", &[][..]),
     ] {
-        if let Ok(mut child) = std::process::Command::new(cmd)
+        let Ok(mut child) = std::process::Command::new(cmd)
             .args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-        {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
+        else {
+            continue;
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if started.elapsed() >= Duration::from_secs(2) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                Err(_) => return,
             }
-            let _ = child.wait();
-            break;
         }
     }
 }

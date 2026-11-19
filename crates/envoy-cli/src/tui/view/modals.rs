@@ -102,13 +102,15 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
                 ])),
                 parts[0],
             );
-            let active = resolve_active_provider(&app.data_dir).map(|(_, mr)| mr);
+            let active_provider = app.inputs.catalog.provider_id.clone();
+            let active_model = app.inputs.catalog.model_id.clone();
+            let signed_in = app.inputs.catalog.signed_in;
             let rows: Vec<ListItem> = filtered
                 .iter()
                 .map(|item| {
-                    let is_active = active.as_ref().is_some_and(|a| {
-                        a.provider_id == item.provider_id && a.model_id == item.model_id
-                    });
+                    let is_active = signed_in
+                        && item.provider_id == active_provider
+                        && item.model_id == active_model;
                     let dot = if is_active { "* " } else { "  " };
                     ListItem::new(Line::from(vec![
                         Span::styled(

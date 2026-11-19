@@ -118,7 +118,7 @@ fn draw_home(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             &row_text(app, welcome, row, width),
         );
         if matches!(row, WelcomeRow::Account) {
-            let status = if daemon::socket_path(&app.data_dir).exists() {
+            let status = if app.inputs.catalog.daemon_online {
                 "daemon online"
             } else {
                 "daemon stopped"
@@ -165,9 +165,13 @@ fn row_text(app: &App, welcome: &Welcome, row: &WelcomeRow, width: usize) -> Str
 }
 
 fn account_text(app: &App) -> String {
-    match resolve_active_provider(&app.data_dir) {
-        Some((prov, model)) => format!("account   {}/{}", prov.id, model.model_id),
-        None => "account   sign in".to_string(),
+    if app.inputs.catalog.signed_in {
+        format!(
+            "account   {}/{}",
+            app.inputs.catalog.provider_id, app.inputs.catalog.model_id
+        )
+    } else {
+        "account   sign in".to_string()
     }
 }
 
@@ -189,17 +193,15 @@ pub(super) fn draw_welcome(frame: &mut Frame, app: &App, theme: &Theme, area: Re
         ]),
     ];
 
-    if let Some((prov, model)) = resolve_active_provider(&app.data_dir) {
-        let budget =
-            envoy_agent::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
+    if app.inputs.catalog.signed_in {
         rows.push(Line::from(vec![
             Span::styled("  model  ", Style::default().fg(theme.dim)),
             Span::styled(
                 format!(
                     "{}  ({} - compact {})",
-                    model.model_id,
-                    budget.tier,
-                    fmt_tokens(budget.compact_at)
+                    app.inputs.catalog.model_id,
+                    app.inputs.catalog.tier,
+                    fmt_tokens(app.inputs.catalog.compact_at)
                 ),
                 Style::default().fg(theme.secondary),
             ),
@@ -211,15 +213,13 @@ pub(super) fn draw_welcome(frame: &mut Frame, app: &App, theme: &Theme, area: Re
         ]));
     }
 
-    let mcp = envoy_agent::mcp::config::load_mcp_configs(&app.data_dir, &app.session.cwd);
-    let skills = envoy_agent::skills::discover_skills(&app.data_dir, &app.session.cwd);
     rows.push(Line::from(vec![
         Span::styled("  tools  ", Style::default().fg(theme.dim)),
         Span::styled(
             format!(
                 "{} mcp - {} skills - perm:{}",
-                mcp.servers.len(),
-                skills.len(),
+                app.inputs.catalog.mcp.len(),
+                app.inputs.catalog.skills.len(),
                 app.perm_mode.label()
             ),
             Style::default().fg(theme.text),

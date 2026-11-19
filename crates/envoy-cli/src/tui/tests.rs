@@ -43,7 +43,7 @@ fn opens_with_input_focused_and_welcome_screen() {
     assert_eq!(app.focus, Focus::Input);
 
     let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
-    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    terminal.draw(|frame| paint(frame, &mut app)).unwrap();
     let text: String = terminal
         .backend()
         .buffer()
@@ -97,7 +97,7 @@ fn status_line_shows_model_workspace_and_context() {
     assert_eq!(app.mode, InputMode::Agent);
 
     let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
-    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    terminal.draw(|frame| paint(frame, &mut app)).unwrap();
     let text: String = terminal
         .backend()
         .buffer()
@@ -244,7 +244,7 @@ fn renders_transcript_cards_and_sidebar() {
     });
 
     let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
-    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    terminal.draw(|frame| paint(frame, &mut app)).unwrap();
     let text: String = terminal
         .backend()
         .buffer()
@@ -324,7 +324,7 @@ async fn context_budget_compacted_and_handoff_render_cleanly() {
 
     let draw_text = |app: &mut App| -> String {
         let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
-        terminal.draw(|frame| view::draw(frame, app)).unwrap();
+        terminal.draw(|frame| paint(frame, app)).unwrap();
         let buf = terminal.backend().buffer().clone();
         let width = buf.area.width;
         let rows: Vec<String> = (0..buf.area.height)
@@ -412,7 +412,7 @@ fn permission_mode_cycles_on_shift_tab_and_renders_status_badge() {
     assert_eq!(app.perm_mode, PermissionMode::Plan);
 
     let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
-    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    terminal.draw(|frame| paint(frame, &mut app)).unwrap();
     let text: String = terminal
         .backend()
         .buffer()
@@ -497,7 +497,7 @@ async fn welcome_picker_selects_a_recent_workspace() {
     assert_eq!(app.welcome.as_ref().unwrap().selected, 0);
 
     let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
-    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    terminal.draw(|frame| paint(frame, &mut app)).unwrap();
     let text: String = terminal
         .backend()
         .buffer()
@@ -608,7 +608,7 @@ fn composer_and_turns_keep_vertical_room() {
     let width = 80u16;
     let height = 36u16;
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    terminal.draw(|frame| paint(frame, &mut app)).unwrap();
     let buf = terminal.backend().buffer().clone();
     let rows: Vec<String> = (0..height)
         .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())

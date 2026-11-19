@@ -118,58 +118,65 @@ impl App {
         });
     }
 
-    pub(in crate::tui) fn drain_ui_notices(&mut self) {
+    pub(in crate::tui) fn drain_ui_notices(&mut self) -> bool {
         let mut notices = Vec::new();
         while let Ok(notice) = self.notice_rx.try_recv() {
             notices.push(notice);
         }
+        let saw = !notices.is_empty();
         for notice in notices {
-            match notice {
-                UiNotice::DaemonReady => {
-                    self.last_refresh = Instant::now() - self.interval;
-                    self.agent_retry_at = Instant::now();
-                    if self.welcome.is_none() && self.agent_stream.is_none() {
-                        self.spawn_agent_attach();
-                    }
+            self.apply_notice(notice);
+        }
+        saw
+    }
+
+    pub(in crate::tui) fn apply_notice(&mut self, notice: UiNotice) {
+        match notice {
+            UiNotice::DaemonReady => {
+                self.last_refresh = Instant::now() - self.interval;
+                self.agent_retry_at = Instant::now();
+                self.inputs.invalidate_catalog();
+                if self.welcome.is_none() && self.agent_stream.is_none() {
+                    self.spawn_agent_attach();
                 }
-                UiNotice::ConduitWatch(rx) => {
-                    self.watch = Some(rx);
+            }
+            UiNotice::ConduitWatch(rx) => {
+                self.watch = Some(rx);
+            }
+            UiNotice::Requeue(items) => {
+                self.agent_offline = true;
+                self.agent_ready = false;
+                self.agent_stream = None;
+                self.agent_retry_at = Instant::now() + Duration::from_millis(750);
+                for item in items.into_iter().rev() {
+                    self.outbox.push_front(item);
                 }
-                UiNotice::Requeue(items) => {
-                    self.agent_offline = true;
-                    self.agent_ready = false;
-                    self.agent_stream = None;
-                    self.agent_retry_at = Instant::now() + Duration::from_millis(750);
-                    for item in items.into_iter().rev() {
-                        self.outbox.push_front(item);
-                    }
-                    self.set_toast("daemon offline - prompt queued", true);
+                self.set_toast("daemon offline - prompt queued", true);
+            }
+            UiNotice::Recalled(Some(text)) => {
+                // The daemon's copy is authoritative; this also catches
+                // follow-ups queued by an earlier console.
+                self.input = text;
+                self.input_cursor = self.input.chars().count();
+                self.focus = Focus::Input;
+            }
+            UiNotice::Recalled(None) => {}
+            UiNotice::Checkpoints(mut list) => {
+                if list.is_empty() {
+                    self.set_toast("no checkpoints recorded yet", false);
+                } else {
+                    list.reverse();
+                    self.modal = Some(Modal::Rewind(RewindModal {
+                        checkpoints: list,
+                        selected: 0,
+                    }));
                 }
-                UiNotice::Recalled(Some(text)) => {
-                    // The daemon's copy is authoritative; this also catches
-                    // follow-ups queued by an earlier console.
-                    self.input = text;
-                    self.input_cursor = self.input.chars().count();
-                    self.focus = Focus::Input;
-                }
-                UiNotice::Recalled(None) => {}
-                UiNotice::Checkpoints(mut list) => {
-                    if list.is_empty() {
-                        self.set_toast("no checkpoints recorded yet", false);
-                    } else {
-                        list.reverse();
-                        self.modal = Some(Modal::Rewind(RewindModal {
-                            checkpoints: list,
-                            selected: 0,
-                        }));
-                    }
-                }
-                UiNotice::Toast(msg, err) => {
-                    self.set_toast(msg, err);
-                }
-                UiNotice::Notice(msg, err) => {
-                    self.push_notice(msg, err);
-                }
+            }
+            UiNotice::Toast(msg, err) => {
+                self.set_toast(msg, err);
+            }
+            UiNotice::Notice(msg, err) => {
+                self.push_notice(msg, err);
             }
         }
     }
@@ -214,12 +221,25 @@ impl App {
         self.send_agent(prompt, SendMode::Prompt);
     }
 
-    pub(in crate::tui) fn drain_agent_events(&mut self) {
+    pub(in crate::tui) fn drain_agent_events(&mut self) -> bool {
+        self.drain_agent_batch(None)
+    }
+
+    /// Apply `first` (already taken off the stream) and any messages still queued.
+    /// Session JSON is written once for the whole batch. Returns whether any
+    /// message was applied.
+    pub(in crate::tui) fn drain_agent_batch(&mut self, first: Option<AgentResp>) -> bool {
+        self.persist_hold.set(true);
+        let mut first = first;
+        let mut saw = false;
         let mut disconnected = false;
         loop {
-            let message = {
+            let message = if let Some(message) = first.take() {
+                message
+            } else {
                 let Some(rx) = self.agent_stream.as_mut() else {
-                    return;
+                    self.release_persist();
+                    return saw;
                 };
                 match rx.try_recv() {
                     Ok(message) => message,
@@ -230,6 +250,7 @@ impl App {
                     }
                 }
             };
+            saw = true;
             match message {
                 AgentResp::SnapshotStart {
                     running,
@@ -272,6 +293,7 @@ impl App {
                 _ => {}
             }
         }
+        self.release_persist();
         if disconnected {
             self.agent_stream = None;
             self.agent_ready = false;
@@ -282,6 +304,7 @@ impl App {
                 self.set_toast("agent stream lost - reconnecting.", true);
             }
         }
+        saw
     }
 
     pub(in crate::tui) fn set_permission_mode(&mut self, mode: PermissionMode) {

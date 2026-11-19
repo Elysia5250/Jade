@@ -327,6 +327,10 @@ envoy-proto -> envoy-core -> envoy-service -> envoy-agent -> envoy-cli
 ### Phase 6：TUI 薄客户端化、零渲染 I/O 与 God `App` 拆解
 
 > **目标**：严格兑现 [ADR 003](../decisions/003-tui-as-thin-client.md) 与 `AGENTS.md`，使 `tui/view/` 零磁盘/网络/子进程阻塞，消除空转 redraw，修正闪退与终端恢复问题，拆解 59 字段 `App`。
+>
+> **执行顺序**以 [hardening-and-modernization.md](./hardening-and-modernization.md) 的 `P6-1a`–`P6-3c` 为准。一次只做一项，做完停。下面三段是原范围，子任务是它的切分，不新增目标。
+>
+> **进度（2026-11-20）**：P6-1a–P6-1e 已落地。`view/` 只读 `inputs` 里的目录与预览快照；`drive::console_loop` 在输入、daemon 事件和动画计时上重绘；工作区索引在 `links` 限深并用 `(dev, ino)` 去重。下一项是 **P6-2a**。
 
 #### P6-1：清零 `tui/view/` 同步 I/O，改为事件驱动渲染与后台任务
 - **文件**：`crates/envoy-cli/src/tui/{mod.rs,links.rs,diff.rs,mouse.rs}`、`crates/envoy-cli/src/tui/view/**`、`crates/envoy-cli/src/tui/state/{jobs.rs,agent_events.rs}`

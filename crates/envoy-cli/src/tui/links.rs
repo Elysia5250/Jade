@@ -4,12 +4,13 @@ use super::HitTarget;
 use envoy_agent::session::FileChange;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const INDEX_TTL: Duration = Duration::from_secs(5);
 const MAX_INDEXED_FILES: usize = 5000;
+const MAX_WALK_DEPTH: usize = 16;
 
 #[derive(Default)]
 pub(crate) struct WorkspaceIndex {
@@ -35,7 +36,8 @@ impl WorkspaceIndex {
         self.cwd = cwd.to_path_buf();
         self.files.clear();
         self.by_basename.clear();
-        walk_workspace(cwd, cwd, &mut self.files);
+        let mut seen = HashSet::new();
+        walk_workspace(cwd, cwd, 0, &mut seen, &mut self.files);
         for rel in &self.files {
             if let Some(name) = Path::new(rel).file_name().and_then(|s| s.to_str()) {
                 self.by_basename
@@ -158,9 +160,55 @@ pub(crate) fn is_subsequence(needle: &str, haystack: &str) -> bool {
     false
 }
 
-fn walk_workspace(root: &Path, dir: &Path, out: &mut Vec<String>) {
-    if out.len() >= MAX_INDEXED_FILES {
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir() -> std::path::PathBuf {
+        let mut bytes = [0u8; 4];
+        getrandom::fill(&mut bytes).unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "envoy-idx-{:02x}{:02x}{:02x}{:02x}",
+            bytes[0], bytes[1], bytes[2], bytes[3]
+        ));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn symlink_loop_indexes_each_inode_once() {
+        let dir = tmpdir();
+        std::fs::write(dir.join("sub/a.txt"), "hi").unwrap();
+        std::os::unix::fs::symlink(dir.join("sub/a.txt"), dir.join("sub/b.txt")).unwrap();
+        std::os::unix::fs::symlink(&dir, dir.join("sub/loop")).unwrap();
+        let mut index = WorkspaceIndex::default();
+        let started = Instant::now();
+        index.ensure_fresh(&dir);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let files = index.search_files("", 20);
+        let copies = files
+            .iter()
+            .filter(|path| path.ends_with("a.txt") || path.ends_with("b.txt"))
+            .count();
+        assert_eq!(copies, 1, "{files:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+fn walk_workspace(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    seen: &mut HashSet<(u64, u64)>,
+    out: &mut Vec<String>,
+) {
+    if depth > MAX_WALK_DEPTH || out.len() >= MAX_INDEXED_FILES {
         return;
+    }
+    if let Some(id) = directory_id(dir) {
+        if !seen.insert(id) {
+            return;
+        }
     }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -170,28 +218,109 @@ fn walk_workspace(root: &Path, dir: &Path, out: &mut Vec<String>) {
         if out.len() >= MAX_INDEXED_FILES {
             break;
         }
-        let path = entry.path();
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if path.is_dir() {
-            if matches!(
-                name_str.as_ref(),
-                ".git" | "target" | "node_modules" | ".venv" | "dist" | "build" | ".next"
-            ) {
-                continue;
-            }
-            dirs.push(path);
-        } else if path.is_file() {
-            if let Ok(rel) = path.strip_prefix(root) {
-                out.push(rel.to_string_lossy().replace('\\', "/"));
-            }
-        }
+        consider_entry(root, &entry, seen, out, &mut dirs);
     }
     for sub in dirs {
         if out.len() >= MAX_INDEXED_FILES {
             break;
         }
-        walk_workspace(root, &sub, out);
+        walk_workspace(root, &sub, depth + 1, seen, out);
+    }
+}
+
+fn consider_entry(
+    root: &Path,
+    entry: &std::fs::DirEntry,
+    seen: &mut HashSet<(u64, u64)>,
+    out: &mut Vec<String>,
+    dirs: &mut Vec<std::path::PathBuf>,
+) {
+    let path = entry.path();
+    let name = entry.file_name();
+    let name_str = name.to_string_lossy();
+    let Ok(kind) = entry.file_type() else {
+        return;
+    };
+    if kind.is_symlink() {
+        consider_symlink(root, &path, &name_str, seen, out, dirs);
+        return;
+    }
+    if kind.is_dir() {
+        if !skipped_dir(&name_str) {
+            dirs.push(path);
+        }
+        return;
+    }
+    if kind.is_file() && claim_file(&path, seen) {
+        push_rel(root, &path, out);
+    }
+}
+
+fn consider_symlink(
+    root: &Path,
+    path: &Path,
+    name: &str,
+    seen: &mut HashSet<(u64, u64)>,
+    out: &mut Vec<String>,
+    dirs: &mut Vec<std::path::PathBuf>,
+) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    let Some(id) = meta_id(&meta) else {
+        return;
+    };
+    if meta.is_dir() {
+        if skipped_dir(name) || seen.contains(&id) {
+            return;
+        }
+        dirs.push(path.to_path_buf());
+        return;
+    }
+    if meta.is_file() && seen.insert(id) {
+        push_rel(root, path, out);
+    }
+}
+
+fn claim_file(path: &Path, seen: &mut HashSet<(u64, u64)>) -> bool {
+    match std::fs::symlink_metadata(path).ok().as_ref().and_then(meta_id) {
+        Some(id) => seen.insert(id),
+        None => true,
+    }
+}
+
+fn push_rel(root: &Path, path: &Path, out: &mut Vec<String>) {
+    if let Ok(rel) = path.strip_prefix(root) {
+        out.push(rel.to_string_lossy().replace('\\', "/"));
+    }
+}
+
+fn skipped_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".git" | "target" | "node_modules" | ".venv" | "dist" | "build" | ".next"
+    )
+}
+
+fn directory_id(dir: &Path) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(dir).ok()?;
+    if meta.is_dir() {
+        meta_id(&meta)
+    } else {
+        None
+    }
+}
+
+fn meta_id(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
     }
 }
 
@@ -205,6 +334,19 @@ fn match_in_changed(cwd: &Path, changed: &[FileChange], candidate: &str) -> Opti
         }
     }
     None
+}
+
+/// Relative display form that does not touch the filesystem.
+pub(crate) fn display_rel(cwd: &Path, path: &Path) -> String {
+    if path.is_absolute() {
+        if let Ok(rel) = path.strip_prefix(cwd) {
+            let text = rel.to_string_lossy().replace('\\', "/");
+            if !text.is_empty() {
+                return text;
+            }
+        }
+    }
+    path.to_string_lossy().replace('\\', "/")
 }
 
 pub(crate) fn normalize_display_path(cwd: &Path, path: &Path) -> String {

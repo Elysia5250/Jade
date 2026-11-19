@@ -95,6 +95,10 @@ impl App {
             drag_start: None,
             screen_lines: Vec::new(),
             transcript_cache: HashMap::new(),
+            inputs: inputs::Inputs::default(),
+            persist_hold: std::cell::Cell::new(false),
+            persist_due: std::cell::Cell::new(false),
+            last_shell_poll: Instant::now(),
         }
     }
 
@@ -166,6 +170,8 @@ impl App {
         self.session.cwd = cwd;
         self.workspace_index.invalidate();
         self.transcript_cache.clear();
+        self.inputs.invalidate_catalog();
+        self.inputs.preview_key_clear();
     }
 
     pub(in crate::tui) fn open_file_in_inspector(&mut self, raw_path: &str, line: Option<usize>) {
@@ -260,7 +266,18 @@ impl App {
     }
 
     pub(in crate::tui) fn persist_session(&self) {
+        if self.persist_hold.get() {
+            self.persist_due.set(true);
+            return;
+        }
         let _ = save_session(&self.data_dir, &self.session);
+    }
+
+    pub(in crate::tui) fn release_persist(&self) {
+        self.persist_hold.set(false);
+        if self.persist_due.take() {
+            self.persist_session();
+        }
     }
 
     pub(in crate::tui) fn save_ui_prefs(&self) {

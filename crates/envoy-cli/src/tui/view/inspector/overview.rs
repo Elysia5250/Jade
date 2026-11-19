@@ -1,6 +1,6 @@
 //! Inspector Tab 1: Overview (Changed Files, Todos, Context, MCP/Skills, Jobs).
 use super::push_linked_rows;
-use crate::tui::links::{normalize_display_path, LinkedSpan};
+use crate::tui::links::LinkedSpan;
 use crate::tui::*;
 
 pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
@@ -21,7 +21,7 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
         )));
     } else {
         for (idx, fc) in app.session.changed_files.iter().enumerate().rev().take(12) {
-            let rel = normalize_display_path(&app.session.cwd, std::path::Path::new(&fc.path));
+            let rel = links::display_rel(&app.session.cwd, std::path::Path::new(&fc.path));
             let stats = format!(" +{} -{}", fc.added, fc.removed);
             let name_budget = w.saturating_sub(display_width(&stats) + 4).max(8);
             let shown = truncate_width(&rel, name_budget);
@@ -58,30 +58,36 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
     rows.push(LinkedLine::from_line(Line::from("")));
 
     // 2. Active Todos
-    let todos = envoy_agent::agent::tools::todo::load_todos(&app.data_dir, &app.session.id);
-    if !todos.is_empty() {
-        let done = todos
-            .iter()
-            .filter(|t| {
-                matches!(
-                    t.status,
-                    envoy_agent::agent::tools::todo::TodoStatus::Completed
-                )
-            })
-            .count();
+    let todo_len = app.inputs.catalog.todos.len();
+    let todo_done = app
+        .inputs
+        .catalog
+        .todos
+        .iter()
+        .filter(|todo| todo.mark == crate::tui::inputs::TodoMark::Completed)
+        .count();
+    let todos: Vec<(crate::tui::inputs::TodoMark, String)> = app
+        .inputs
+        .catalog
+        .todos
+        .iter()
+        .take(10)
+        .map(|todo| (todo.mark, todo.content.clone()))
+        .collect();
+    if todo_len > 0 {
         push_section_header(
             &mut rows,
             "TODOS",
-            &format!("{done}/{}", todos.len()),
+            &format!("{todo_done}/{todo_len}"),
             theme,
         );
-        for t in todos.iter().take(10) {
-            let (glyph, color) = match t.status {
-                envoy_agent::agent::tools::todo::TodoStatus::Completed => ("✓", theme.ok),
-                envoy_agent::agent::tools::todo::TodoStatus::InProgress => ("*", theme.accent),
-                envoy_agent::agent::tools::todo::TodoStatus::Pending => ("o", theme.dim),
+        for (mark, content) in &todos {
+            let (glyph, color) = match mark {
+                crate::tui::inputs::TodoMark::Completed => ("✓", theme.ok),
+                crate::tui::inputs::TodoMark::InProgress => ("*", theme.accent),
+                crate::tui::inputs::TodoMark::Pending => ("o", theme.dim),
             };
-            let text = truncate_width(&t.content, w.saturating_sub(5));
+            let text = truncate_width(content, w.saturating_sub(5));
             rows.push(LinkedLine::from_line(Line::from(vec![
                 Span::styled(format!("  {glyph} "), Style::default().fg(color)),
                 Span::styled(text, Style::default().fg(theme.text)),
@@ -92,16 +98,17 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
 
     // 3. Context & Session
     push_section_header(&mut rows, "SESSION & CONTEXT", "", theme);
-    if let Some((prov, model)) = resolve_active_provider(&app.data_dir) {
+    if app.inputs.catalog.signed_in {
         let (used, est) = context_used(&app.session);
-        let budget =
-            envoy_agent::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
-        let (filled, empty) = context_bar(used, budget.compact_at);
+        let window = app.inputs.catalog.compact_at;
+        let tier = app.inputs.catalog.tier.clone();
+        let model_id = app.inputs.catalog.model_id.clone();
+        let (filled, empty) = context_bar(used, window);
         let mark = if est { "~" } else { "" };
         rows.push(LinkedLine::from_line(Line::from(vec![
             Span::styled("  model   ", Style::default().fg(theme.dim)),
             Span::styled(
-                truncate_width(&model.model_id, w.saturating_sub(10)),
+                truncate_width(&model_id, w.saturating_sub(10)),
                 Style::default().fg(theme.secondary),
             ),
         ])));
@@ -113,8 +120,8 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
                 format!(
                     " {mark}{}/{} ({})",
                     fmt_tokens(used),
-                    fmt_tokens(budget.compact_at),
-                    budget.tier
+                    fmt_tokens(window),
+                    tier
                 ),
                 Style::default().fg(theme.text),
             ),
@@ -139,37 +146,50 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
     rows.push(LinkedLine::from_line(Line::from("")));
 
     // 4. MCP & Skills
-    let mcp = envoy_agent::mcp::config::load_mcp_configs(&app.data_dir, &app.session.cwd);
-    let skills = envoy_agent::skills::discover_skills(&app.data_dir, &app.session.cwd);
+    let mcp_len = app.inputs.catalog.mcp.len();
+    let skill_len = app.inputs.catalog.skills.len();
+    let mcp: Vec<(String, String, bool)> = app
+        .inputs
+        .catalog
+        .mcp
+        .iter()
+        .take(6)
+        .map(|srv| (srv.name.clone(), srv.scope.clone(), srv.disabled))
+        .collect();
+    let skill_names: Vec<String> = app
+        .inputs
+        .catalog
+        .skills
+        .iter()
+        .take(4)
+        .map(|skill| skill.name.clone())
+        .collect();
     push_section_header(
         &mut rows,
         "MCP & SKILLS",
-        &format!("{} mcp - {} skills", mcp.servers.len(), skills.len()),
+        &format!("{mcp_len} mcp - {skill_len} skills"),
         theme,
     );
-    if mcp.servers.is_empty() && skills.is_empty() {
+    if mcp_len == 0 && skill_len == 0 {
         rows.push(LinkedLine::from_line(Line::styled(
             "  none configured (/mcp, /skill)",
             Style::default().fg(theme.dim),
         )));
     } else {
-        for srv in mcp.servers.iter().take(6) {
-            let color = if srv.disabled { theme.dim } else { theme.ok };
+        for (name, scope, disabled) in &mcp {
+            let color = if *disabled { theme.dim } else { theme.ok };
             rows.push(LinkedLine::from_line(Line::from(vec![
                 Span::styled("  * ", Style::default().fg(color)),
                 Span::styled(
-                    truncate_width(&srv.name, w.saturating_sub(14)),
+                    truncate_width(name, w.saturating_sub(14)),
                     Style::default().fg(theme.text),
                 ),
-                Span::styled(
-                    format!("  [{}]", srv.scope.label()),
-                    Style::default().fg(theme.dim),
-                ),
+                Span::styled(format!("  [{scope}]"), Style::default().fg(theme.dim)),
             ])));
         }
-        if !skills.is_empty() {
-            let names: Vec<&str> = skills.iter().take(4).map(|s| s.name.as_str()).collect();
-            let suffix = if skills.len() > 4 { "." } else { "" };
+        if skill_len > 0 {
+            let names: Vec<&str> = skill_names.iter().map(String::as_str).collect();
+            let suffix = if skill_len > 4 { "." } else { "" };
             rows.push(LinkedLine::from_line(Line::from(vec![
                 Span::styled("  * skills: ", Style::default().fg(theme.secondary)),
                 Span::styled(

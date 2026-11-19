@@ -44,44 +44,60 @@ impl App {
         true
     }
 
-    pub(in crate::tui) fn drain_model_events(&mut self) {
+    pub(in crate::tui) fn drain_model_events(&mut self) -> bool {
         let Some(mut rx) = self.models_rx.take() else {
-            return;
+            return false;
         };
         match rx.try_recv() {
             Ok((provider_id, fetched)) => {
-                if !provider_id.is_empty() {
-                    match envoy_agent::agent::context::store_listed_models(
-                        &self.data_dir,
-                        &provider_id,
-                        &fetched,
-                    ) {
-                        Ok(Some(mref)) => {
-                            if fetched.is_empty() {
-                                self.set_toast("model list came back empty", true);
-                            } else {
-                                self.set_toast(format!("models: {}", mref.display()), false);
-                            }
-                        }
-                        Ok(None) if !fetched.is_empty() => {}
-                        Ok(None) => self.set_toast("could not refresh the model list", true),
-                        Err(e) => self.set_toast(format!("{e:#}"), true),
-                    }
-                }
-                if let Some(Modal::Models(m)) = self.modal.as_mut() {
-                    m.fetching = false;
-                    m.models = available_models(&self.data_dir);
-                    m.selected = m.selected.min(m.models.len().saturating_sub(1));
-                }
+                self.apply_listed_models(provider_id, fetched);
+                true
             }
             Err(oneshot::error::TryRecvError::Empty) => {
                 self.models_rx = Some(rx);
+                false
             }
             Err(_) => {
-                if let Some(Modal::Models(m)) = self.modal.as_mut() {
-                    m.fetching = false;
-                }
+                self.model_fetch_failed();
+                true
             }
+        }
+    }
+
+    pub(in crate::tui) fn apply_listed_models(
+        &mut self,
+        provider_id: String,
+        fetched: Vec<envoy_agent::agent::context::ListedModel>,
+    ) {
+        if !provider_id.is_empty() {
+            match envoy_agent::agent::context::store_listed_models(
+                &self.data_dir,
+                &provider_id,
+                &fetched,
+            ) {
+                Ok(Some(mref)) => {
+                    if fetched.is_empty() {
+                        self.set_toast("model list came back empty", true);
+                    } else {
+                        self.set_toast(format!("models: {}", mref.display()), false);
+                    }
+                }
+                Ok(None) if !fetched.is_empty() => {}
+                Ok(None) => self.set_toast("could not refresh the model list", true),
+                Err(e) => self.set_toast(format!("{e:#}"), true),
+            }
+        }
+        if let Some(Modal::Models(m)) = self.modal.as_mut() {
+            m.fetching = false;
+            m.models = available_models(&self.data_dir);
+            m.selected = m.selected.min(m.models.len().saturating_sub(1));
+        }
+        self.inputs.invalidate_catalog();
+    }
+
+    pub(in crate::tui) fn model_fetch_failed(&mut self) {
+        if let Some(Modal::Models(m)) = self.modal.as_mut() {
+            m.fetching = false;
         }
     }
 

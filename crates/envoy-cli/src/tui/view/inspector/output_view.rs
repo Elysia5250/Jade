@@ -181,8 +181,27 @@ pub(super) fn draw_inspect_view(frame: &mut Frame, app: &mut App, theme: &Theme,
         }
     } else {
         // Show workspace skills & MCP servers details as general inspect view
-        let mcp = envoy_agent::mcp::config::load_mcp_configs(&app.data_dir, &app.session.cwd);
-        let skills = envoy_agent::skills::discover_skills(&app.data_dir, &app.session.cwd);
+        let trusted = app.inputs.catalog.trusted;
+        let mcp: Vec<(String, String, bool)> = app
+            .inputs
+            .catalog
+            .mcp
+            .iter()
+            .map(|srv| (srv.name.clone(), srv.scope.clone(), srv.disabled))
+            .collect();
+        let skills: Vec<(String, String, String)> = app
+            .inputs
+            .catalog
+            .skills
+            .iter()
+            .map(|skill| {
+                (
+                    skill.name.clone(),
+                    skill.scope.clone(),
+                    skill.description.clone(),
+                )
+            })
+            .collect();
         lines.push(Line::styled(
             " WORKSPACE INSPECTOR",
             Style::default()
@@ -194,24 +213,19 @@ pub(super) fn draw_inspect_view(frame: &mut Frame, app: &mut App, theme: &Theme,
             Style::default().fg(theme.text),
         ));
         lines.push(Line::styled(
-            format!(
-                "   trusted : {}",
-                is_workspace_trusted(&app.data_dir, &app.session.cwd)
-            ),
+            format!("   trusted : {trusted}"),
             Style::default().fg(theme.dim),
         ));
         lines.push(Line::from(""));
         lines.push(Line::styled(
-            format!(" MCP SERVERS ({})", mcp.servers.len()),
+            format!(" MCP SERVERS ({})", mcp.len()),
             Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
         ));
-        for srv in &mcp.servers {
+        for (name, scope, disabled) in &mcp {
             lines.push(Line::styled(
                 format!(
-                    "   * {} [{}]{}",
-                    srv.name,
-                    srv.scope.label(),
-                    if srv.disabled { " (disabled)" } else { "" }
+                    "   * {name} [{scope}]{}",
+                    if *disabled { " (disabled)" } else { "" }
                 ),
                 Style::default().fg(theme.text),
             ));
@@ -221,9 +235,9 @@ pub(super) fn draw_inspect_view(frame: &mut Frame, app: &mut App, theme: &Theme,
             format!(" SKILLS ({})", skills.len()),
             Style::default().fg(theme.dim).add_modifier(Modifier::BOLD),
         ));
-        for sk in &skills {
+        for (name, scope, description) in &skills {
             for wrapped in wrap_text(
-                &format!("{} [{}]: {}", sk.name, sk.scope.label(), sk.description),
+                &format!("{name} [{scope}]: {description}"),
                 w.saturating_sub(4),
             ) {
                 lines.push(Line::styled(

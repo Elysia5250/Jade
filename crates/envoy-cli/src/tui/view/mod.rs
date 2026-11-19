@@ -30,7 +30,6 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     let theme = app.theme();
     let area = frame.area();
     app.hit_regions.clear();
-    app.workspace_index.ensure_fresh(&app.session.cwd);
 
     frame.render_widget(Block::default().style(Style::default().bg(theme.bg)), area);
 
@@ -181,7 +180,11 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
 
     let buf = frame.buffer_mut();
     apply_selection_highlight(buf, app.selection.as_ref(), theme.selection);
-    snapshot_screen_lines(buf, &mut app.screen_lines);
+    if app.selection.as_ref().is_some_and(|sel| sel.active) {
+        snapshot_screen_lines(buf, &mut app.screen_lines);
+    } else {
+        app.screen_lines.clear();
+    }
 }
 
 fn apply_selection_highlight(

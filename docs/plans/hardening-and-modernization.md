@@ -2,7 +2,7 @@
 
 - Status: active
 - Owner: Elysia
-- Last updated: 2026-11-19
+- Last updated: 2026-11-20
 - Baseline: `dda2b42` (`v0.3.0`)
 
 ## Goal
@@ -24,7 +24,7 @@
 | Phase 3 | 执行层、流式 Provider、Runtime 并发与 Worktree 止血 | `P0/P1` | 全工作区 + `scripts/` + `benchmarks/` | 2–3 PR | 可与 Phase 2 并行 |
 | Phase 4 | 线协议演进、版本握手与状态同步 | `P1` | `envoy-proto`, `envoy-service`, `envoy-agent`, `envoy-cli` | 1–2 PR | 依赖 Phase 3 |
 | Phase 5 | 现代 LLM Harness 对齐（Prompt Caching、压缩、Reasoning） | `P1` | `envoy-agent` | 2 PR | 依赖 Phase 3 SSE/Provider |
-| Phase 6 | TUI 薄客户端化、零渲染 I/O 与 God `App` 拆解 | `P1` | `envoy-cli` | 2 PR | 依赖 Phase 4 同步协议 |
+| Phase 6 | TUI 薄客户端化、零渲染 I/O 与 God `App` 拆解 | `P1` | `envoy-cli` | 13 个可停子项（`P6-1a`–`P6-3c`） | 依赖 Phase 4 同步协议 |
 | Phase 7 | 架构瘦身（消自环 IPC、合并工具层、单模型表、替手写轮子） | `P2` | 全工作区 | 3 PR | 依赖 Phase 2 / 4 / 5 |
 | Phase 8 | 非官方 OAuth 隔离、Skills/Memory 完善、运维轮转与 CI 卫生 | `P2` | `envoy-agent`, `envoy-cli`, `scripts/`, `.github/` | 1–2 PR | 可穿插收尾 |
 
@@ -190,23 +190,78 @@
 > 目标：严格落实 ADR 003 与 `AGENTS.md`，使 TUI 达到低 CPU 空载、高响应帧率、无阻塞/崩溃且清晰可维护的薄客户端架构。
 > 目标 commit scope：`refactor(cli): remove view I/O, move to event-driven loop, fix TUI crashes, and decompose App`
 
-- [ ] **P6-1** `[P1/性能与架构]` 清零 `tui/view/` 同步 I/O，改为事件驱动渲染与后台任务
-  - **位置**：`crates/envoy-cli/src/tui/{mod.rs:280-295, links.rs:27-48, 76, 161-214, diff.rs:330-357, mouse.rs:297-323}`、`crates/envoy-cli/src/tui/view/**`、`crates/envoy-cli/src/tui/state/{jobs.rs:131-144, agent_events.rs}`
-  - **现状问题**：TUI 主循环以 25–33ms 无条件空转重绘；`view::draw` 内部每帧同步执行 `git show` 子进程、无大小检查直接 `std::fs::read`（开大文件 OOM，且远程模式读错本机磁盘）、每帧重复多次读盘解析 `auth.json`/`model.json`/`model_caps.json`/`skills`/`mcp`/`todos`/`bwrap` 存在性；每 5s 同步遍历工作区且 `walk_workspace` 无防 symlink 死循环；每帧克隆 `TranscriptItem` 并分配上万屏幕字符 `String`；`poll_shell_cards` 在渲染循环以 40 RPC/s 直接 `.await`；`copy_to_clipboard` 同步 `child.wait()` 可能永远死锁；`agent_events` 每步写 pretty JSON 全量刷盘。
-  - **改造动作**：把所有状态快照（provider/budget/sandbox_label/MCP/skills/todos/工作区索引/补全列表/文件预览与 git diff 内容）移出 `view/` 到后台异步任务，仅通过 channel 更新到内存渲染视图模型；打开文件预览前先做远程/本地分流并用 `File::take(FILE_PREVIEW_LIMIT)` 限制读取字节；`walk_workspace` 加深度与 inode 去重防环并移入后台；`snapshot_screen_lines` 仅在鼠标拖拽选中期间生成，消除 `render_single_item` 全量 `clone()`；主循环改用 `tokio::select!` 事件驱动重绘（无动画/无输入时不空转，仅动画运行期按帧刷新）；将 `refresh`、`poll_shell_cards`（对齐刷新节拍/推送）和 `copy_to_clipboard`（带超时）全部放后台任务；节流或交由 daemon 异步写会话。
-  - **回归验证**：静态审查/测试确认 `tui/view/` 下零 `std::fs`/`std::process::Command`/`auth`/`mcp`/`skills` 调用；打开 100 MB 大文件预览不 OOM；idle 状态下 CPU 接近 0%。
+一次只做下面一项，做完停下来检视。子任务是原 `P6-1` / `P6-2` / `P6-3` 的切分，不新增目标。`P6-3b` 只搬家，不和带行为变化的项混在同一次实现里。
 
-- [ ] **P6-2** `[P1/稳定与交互]` TUI 终端生命周期、崩溃与交互 Bug 清零
-  - **位置**：`crates/envoy-cli/src/tui/{terminal.rs:42-88, edit_file.rs:13-52, text.rs:127-133, mod.rs:389-405, 490, mouse.rs:219-224}`、`crates/envoy-cli/src/tui/state/{input.rs:97-222, edit.rs:294-298, commands.rs:27-36, agent.rs:60-163, modals.rs:379-490, ops.rs:190-201, jobs.rs:228-259, login/methods.rs:48-108}`、`crates/envoy-cli/src/tui/view/{transcript.rs:233, inspector/mod.rs:129-133, mod.rs:204-220, status.rs:81-209, modals.rs:355-587}`
-  - **现状问题**：`Tui::enter` 中途失败或 panic/`SIGTERM`/`SIGHUP` 会泄漏 raw mode 与 CSI-u 标志；`edit_file` 挂起未 pop/re-push 键盘增强标志；滚动偏移用 `u16` 在 65,535 行后回绕；`push_linked_rows` 与 `apply_selection_highlight` 在极端宽高下越界 panic；`Instant::now() - Duration` 在启动 <1s 容器里 panic；`Ctrl+U` 清空输入被全局向上滚动遮蔽成死代码；`NewSession` 未清 `transcript_cache`/`expanded_explore_groups`/`inspector` 致跨会话显示串台且缓存无限涨；`UiNotice` 无 `session_id` 串台、并发 `dispatch_agent` 乱序、可删活跃会话导致复活、OAuth 备用端口 `redirect_uri` 失配、`/rewind` 错把 Shell 算作 Turn、Picker 禁输 `j`/`k`、`char_width` vs `display_width` 不一致导致组合字符光标偏移、鼠标只处理 `AttachJob`、登录弹窗高未 clamp；`cancel_active` 提前写死 `agent_running = false` 抢占 daemon 权威。
-  - **改造动作**：在 `terminal.rs` 安装全局 panic hook、清理 guard 与 `SIGTERM`/`SIGHUP` 信号退出清理；`edit_file` 挂起前按需对称 pop/re-push `KeyboardEnhancementFlags` 并提示非零退出码；所有滚动字段与计算改用 `usize`；补全切片边界 `min` 保护、`area.width == 0` 早退、`checked_sub` 替代 `Instant` 直接减法；恢复 `Focus::Input` 下 `Ctrl+U` 语义；抽取单一 `reset_session_view()` 供新建/切换/handoff 共用并为 `transcript_cache` 加 LRU/容量上限；`UiNotice` 绑定 `session_id`、`dispatch_agent` 用串行队列保序、禁止在 `/sessions` 删除当前活跃会话、通过 `LoginEvent` 回传实际回调端口、`/rewind` 正确过滤非代理回合、Picker 空输入时不拦截字母检索、对齐 `char_width` 与 `UnicodeWidth`、分发完整鼠标 `Action`、弹窗/状态栏按屏幕尺寸安全裁剪；`cancel_active` 仅发 `Interrupt` 并等待 daemon 终结事件确认。
-  - **回归验证**：`tui/tests*.rs` 新增针对 70,000 行滚动、`NewSession` 缓存隔离、`Focus::Input` `Ctrl+U`、`area.width == 0` 渲染、含 Shell 记录的 `/rewind` 与跨 session `UiNotice` 过滤的测试；按 `docs/MANUAL-TEST.md` 跑通 PTY 冒烟测试。
+#### P6-1 清零 `tui/view/` 同步 I/O，改为事件驱动渲染
 
-- [ ] **P6-3** `[P2/结构]` 拆解 59 字段 God `App` 并收口 TUI 薄客户端边界
-  - **位置**：`crates/envoy-cli/src/tui/mod.rs:324-491`、`crates/envoy-cli/src/tui/types.rs:46-179`、`crates/envoy-cli/src/tui/commands.rs`、`crates/envoy-cli/src/tui/state/{commands.rs:208-474, command_ops.rs:96-98, modals.rs:31-38, login/**}`、`crates/envoy-cli/Cargo.toml:24`
-  - **现状问题**：`App` 堆了 59 个扁平字段与 18 个 `impl App` 文件；`Welcome` 用 5 个布尔表示互斥页面；`SLASH_COMMANDS` 与 `run_slash` 漂移（`/jobs`、`/logs`、`/output` 隐身）；TUI 直接依赖 `reqwest` 拉 `/models`/`models.dev`、跑 OAuth 与 `/mcp probe` 子进程。
-  - **改造动作**：按照 `AGENTS.md` 把 `App` 拆分为 `AgentState`、`SessionState`、`JobState`、`LoginState`、`UiState` 组合结构；`Welcome` 5 布尔重构为 `WelcomeMode` enum；合并命令表与分发入口，让斜杠命令定义与实现单一来源；将 `/mcp probe`、模型目录拉取与凭据操作迁入 daemon RPC（或 CLI 独立子命令调用路径），从 `envoy-cli` 移除直接 `reqwest` 依赖。
-  - **回归验证**：`cargo check --workspace --all-targets` 与全量 TUI 测试通过，确认 `envoy-cli/Cargo.toml` 不再需要 `reqwest`。
+- [x] **P6-1a** `[P1]` 目录类读盘离开 `view::draw`
+  - **位置**：`crates/envoy-cli/src/tui/view/{status.rs,sidebar.rs,welcome.rs,mod.rs}`
+  - **动作**：增加内存快照，装 provider、budget、sandbox 标签、skills、mcp、todos，以及 bwrap 是否存在。绘制只读这份快照。后台在启动、切目录和对应事件时刷新，绘制路径不再打开 `auth.json`、`model.json`、`model_caps.json`。
+  - **验证**：`tui/view/` 不再读取这些目录文件。现有 TUI 测试通过。
+
+- [x] **P6-1b** `[P1]` 文件预览和 diff 离开绘制帧
+  - **位置**：`crates/envoy-cli/src/tui/diff.rs`、`crates/envoy-cli/src/tui/view/inspector/{file_view.rs,diff_view.rs}`
+  - **动作**：预览和 diff 正文由后台写入快照。本地用 `File::take(FILE_PREVIEW_LIMIT)`。远程走已有的远程读，不读控制端本机磁盘。`git show` 不在 `draw` 里执行。
+  - **验证**：超过上限的文件只保留前缀。`TestBackend` 能画已经填好的预览。
+
+- [x] **P6-1c** `[P1]` 工作区索引移到后台
+  - **位置**：`crates/envoy-cli/src/tui/links.rs` 的 `walk_workspace`
+  - **动作**：遍历离开绘制路径。限制深度，用 `(dev, ino)` 去重，遇到 symlink 环就跳过。结果留在补全和链接用的内存索引里。
+  - **验证**：临时目录中的 symlink 环在有限时间内结束，同一 inode 不重复进入索引。
+
+- [x] **P6-1d** `[P1]` 主循环改为事件驱动
+  - **位置**：`crates/envoy-cli/src/tui/mod.rs` 主循环
+  - **动作**：用 `tokio::select!` 等键盘、鼠标、daemon 事件和后台快照。没有动画也没有输入时，不再按 25–33ms 空转重绘。解密和进行中动画才打开帧计时器。`snapshot_screen_lines` 只在鼠标选中期间生成，平时不为每条 transcript 克隆全量字符串。
+  - **验证**：空闲路径不注册周期重绘。选区结束后不保留整屏字符缓存。现有渲染测试通过。
+
+- [x] **P6-1e** `[P1]` 剪贴板、shell 卡片和会话刷盘离开绘制
+  - **位置**：`crates/envoy-cli/src/tui/mouse.rs`、`crates/envoy-cli/src/tui/state/jobs.rs`、`crates/envoy-cli/src/tui/state/agent_events.rs`
+  - **动作**：剪贴板子进程放到后台并带超时，`wait` 不能卡住主循环。shell 卡片对齐事件或推送刷新，不在绘制里连续 RPC。会话 JSON 节流；历史仍以 daemon 为准。
+  - **验证**：`tui/view/` 下没有 `std::fs`、`std::process::Command`，也没有 `auth`、`mcp`、`skills` 调用。这是 P6-1 的收口。
+
+#### P6-2 终端生命周期、崩溃与交互
+
+- [ ] **P6-2a** `[P1]` 恢复终端，覆盖 panic 和信号
+  - **位置**：`crates/envoy-cli/src/tui/terminal.rs`、`crates/envoy-cli/src/tui/edit_file.rs`
+  - **动作**：安装 panic hook 和 `Drop` guard，处理 `SIGTERM` / `SIGHUP`，退出时恢复 raw mode、alternate screen 和键盘增强标志。`edit_file` 挂起前按需对称 pop / re-push `KeyboardEnhancementFlags`，外部编辑器非零退出要有提示。
+  - **验证**：进入中途失败或 panic 后，终端标志被恢复。用 guard 单测，不依赖人工 PTY。
+
+- [ ] **P6-2b** `[P1]` 滚动和几何边界
+  - **位置**：滚动偏移字段、`crates/envoy-cli/src/tui/view/transcript.rs`、`crates/envoy-cli/src/tui/text.rs`
+  - **动作**：滚动改为 `usize`。`area.width == 0` 早退。切片用 `min`。`Instant` 减法改为 `checked_sub`。
+  - **验证**：70,000 行偏移不回绕。宽度为 0 的 `TestBackend` 渲染不 panic。
+
+- [ ] **P6-2c** `[P1]` 输入语义
+  - **位置**：`crates/envoy-cli/src/tui/state/input.rs`、picker、字符宽度
+  - **动作**：`Focus::Input` 下 `Ctrl+U` 清空输入。Picker 空输入不拦截 `j` / `k`。`char_width` 与 `UnicodeWidth` 一致。
+  - **验证**：三条状态或 `TestBackend` 测试分别覆盖这三种情况。
+
+- [ ] **P6-2d** `[P1]` 会话视图隔离，daemon 保持运行权威
+  - **位置**：`crates/envoy-cli/src/tui/state/{agent.rs,commands.rs,ops.rs,jobs.rs,modals.rs}`
+  - **动作**：抽出一个 `reset_session_view()`，新建、切换和 handoff 共用。清掉 `transcript_cache`、`expanded_explore_groups` 和 inspector 选中，并为缓存加上限。`UiNotice` 带 `session_id`。`dispatch_agent` 串行。`/sessions` 不能删除当前会话。`/rewind` 不计本机 shell。`cancel_active` 只发 `Interrupt`，等 daemon 的结束事件。
+  - **验证**：`NewSession` 不串台。含 shell 的 rewind 不算 turn。别的会话的 notice 被滤掉。取消之后 `agent_running` 仍由 daemon 事件决定。
+
+- [ ] **P6-2e** `[P1]` 登录端口、弹窗高度和鼠标动作
+  - **位置**：`crates/envoy-cli/src/tui/state/login/methods.rs`、`crates/envoy-cli/src/tui/view/{modals.rs,status.rs}`、`crates/envoy-cli/src/tui/mouse.rs`
+  - **动作**：OAuth 的 `redirect_uri` 使用实际监听端口。弹窗和状态栏按屏幕高度裁剪。鼠标分发完整 `Action`。
+  - **验证**：备用端口写进 `redirect_uri`。矮屏幕渲染不越界。`AttachJob` 以外的鼠标动作能到达对应命令。PTY 清单仍等有 TTY 时再跑 `docs/MANUAL-TEST.md`。
+
+#### P6-3 拆解 `App`，收口薄客户端
+
+- [ ] **P6-3a** `[P2]` `WelcomeMode` 和斜杠命令单源
+  - **位置**：welcome 的五个互斥布尔、`crates/envoy-cli/src/tui/commands.rs`、`SLASH_COMMANDS`
+  - **动作**：互斥页面改成 `WelcomeMode`。命令表和 `run_slash` 用同一张表，补全里出现 `/jobs`、`/logs`、`/output`。这一项不搬 `App` 字段。
+  - **验证**：补全能列出这三条。未知命令仍拒绝。现有 slash 测试通过。
+
+- [ ] **P6-3b** `[P2]` 把 `App` 拆成五个状态对象
+  - **位置**：`crates/envoy-cli/src/tui/mod.rs`、`crates/envoy-cli/src/tui/types.rs`、`crates/envoy-cli/src/tui/state/**`
+  - **动作**：`App` 改为组合 `AgentState`、`SessionState`、`JobState`、`LoginState`、`UiState`。只搬家，交互不变。
+  - **验证**：`cargo check --workspace --all-targets` 和现有 TUI 测试通过。没有源文件超过 700 行。
+
+- [ ] **P6-3c** `[P2]` `envoy-cli` 不再直接依赖 `reqwest`
+  - **位置**：`crates/envoy-cli/Cargo.toml`、登录、模型目录、`/mcp probe`
+  - **动作**：模型列表、OAuth 和 mcp probe 改走 daemon RPC，或改走 CLI 子命令。从 `envoy-cli` 去掉直接的 `reqwest` 依赖。
+  - **验证**：`crates/envoy-cli/Cargo.toml` 没有 `reqwest`。`cargo check --workspace --all-targets` 通过。
 
 ---
 
@@ -276,7 +331,9 @@
 
 ## Next
 
-**Phase 1 (`P1-1` ~ `P1-4`)、Phase 2 (`P2-1` ~ `P2-5`)、Phase 3 (`P3-1` ~ `P3-5`)、Phase 4 (`P4-1` ~ `P4-3`) 与 Phase 5 (`P5-1` ~ `P5-3`) 已完成。** Phase 5 本地门禁：`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`（347 passed, 0 failed）、`cargo check --workspace --all-targets`、`python3 scripts/check-file-sizes.py` 均为退出码 0。本机无 `rustfmt` / `shellcheck`，且当前会话无 TTY，未跑 `docs/MANUAL-TEST.md` 的 PTY 清单。多步前缀字节一致性由 `prefix_bytes_stay_identical_from_step_2_through_5_at_65_percent` 覆盖。接手后续阶段的 Agent 请阅读 [handoff-phase3-to-phase8.md](./handoff-phase3-to-phase8.md)，从 **Phase 6（`P6-1` ~ `P6-3`：TUI 薄客户端、零渲染 I/O 与 God `App` 拆解）** 开始。不要回退 Phase 1/2 的安全不变量，也不要回退 Phase 3 的并发/worktree 修复、Phase 4 的线协议版本与快照分片，以及 Phase 5 的前缀冻结、压缩保真与 reasoning 回传。
+**Phase 1–5 已提交为 `f7b9a4e`。P6-1 已完成，并包含在其后的这次提交里（未 push）。** P6-1 门禁：`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`（352 passed, 0 failed）、`cargo check --workspace --all-targets`、`python3 scripts/check-file-sizes.py` 均为退出码 0。本机无 `rustfmt` / `shellcheck`，且当时无 TTY，未跑 `docs/MANUAL-TEST.md` 的 PTY 清单。
+
+**下一项只做 P6-2a**（恢复终端，覆盖 panic 和信号）。做完停。顺序接着是 `P6-2b` → `P6-2e`，然后 `P6-3a` → `P6-3c`。不要回退 Phase 1/2 的安全不变量，也不要回退 Phase 3 的并发/worktree 修复、Phase 4 的线协议与快照分片、Phase 5 的前缀冻结、压缩保真与 reasoning 回传，以及 P6-1 的绘制路径。
 
 ## Verification
 

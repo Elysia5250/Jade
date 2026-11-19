@@ -14,7 +14,7 @@ fn tmpdir() -> PathBuf {
 }
 
 fn render_text(terminal: &mut Terminal<TestBackend>, app: &mut App) -> String {
-    terminal.draw(|frame| view::draw(frame, app)).unwrap();
+    terminal.draw(|frame| paint(frame, app)).unwrap();
     terminal
         .backend()
         .buffer()

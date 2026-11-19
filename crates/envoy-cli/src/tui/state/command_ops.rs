@@ -204,6 +204,7 @@ impl App {
         }
         let plan =
             envoy_agent::agent::context::resolve_budget(&self.data_dir, &prov.id, &model.model_id);
+        self.inputs.invalidate_catalog();
         self.set_toast(
             format!(
                 "budget: {} -> compact at {} (hard {})",

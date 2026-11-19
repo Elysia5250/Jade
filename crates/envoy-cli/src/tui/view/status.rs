@@ -10,12 +10,14 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
         InputMode::Shell => ("shell", theme.warn),
     };
 
+    let signed_in = app.inputs.catalog.signed_in;
+    let model_id = app.inputs.catalog.model_id.clone();
+    let compact_at = app.inputs.catalog.compact_at;
+    let hard_window = app.inputs.catalog.hard_window;
     let mut right_spans: Vec<Span> = Vec::new();
-    let unauthed = if let Some((prov, model)) = resolve_active_provider(&app.data_dir) {
+    let unauthed = if signed_in {
         let (used, estimated) = context_used(&app.session);
-        let budget =
-            envoy_agent::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
-        let window = budget.compact_at;
+        let window = compact_at;
         let ratio = if window == 0 {
             0.0
         } else {
@@ -42,7 +44,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
             right_spans.push(Span::raw("  "));
         }
         right_spans.push(Span::styled(
-            model.model_id.clone(),
+            model_id,
             Style::default().fg(theme.secondary),
         ));
         right_spans.push(Span::raw("  "));
@@ -50,8 +52,8 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
         right_spans.push(Span::styled(filled, Style::default().fg(bar_color)));
         right_spans.push(Span::styled(empty, Style::default().fg(theme.border)));
         let mark = if estimated { "~" } else { "" };
-        let cap_suffix = if budget.compact_at + 64_000 < budget.hard_window {
-            format!("~{}", fmt_tokens(budget.hard_window))
+        let cap_suffix = if compact_at + 64_000 < hard_window {
+            format!("~{}", fmt_tokens(hard_window))
         } else {
             String::new()
         };
@@ -100,8 +102,10 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
     };
     let sandbox_label = if remote {
         "sandbox:peer".to_string()
+    } else if app.inputs.catalog.bwrap_present {
+        "sandbox:bwrap".to_string()
     } else {
-        format!("sandbox:{}", envoy_core::sandbox::backend_label())
+        format!("sandbox:{}", app.inputs.catalog.sandbox_label)
     };
     let sandbox_color = if sandbox_label.ends_with(":none") || sandbox_label.ends_with(":off") {
         theme.warn

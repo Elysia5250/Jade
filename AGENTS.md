@@ -34,8 +34,9 @@ recall, interrupt, daemon survival).
   `mcp/`, `auth/`, `session`, `memory`, `worktree`, and `daemon`. No `ratatui`
   or TUI types.
 - `crates/envoy-cli`: `envoy` binary entrypoint, CLI dispatch, `headless/`,
-  and the `tui/` console client. Rendering must not perform I/O, call
-  providers, or mutate daemon state.
+  and the `tui/` console client. `tui/view/` reads snapshots from `inputs`
+  and must not perform I/O, call providers, or mutate daemon state. `drive`
+  redraws on events and animation ticks.
 
 Dependency direction is one-way and Cargo-enforced:
 `proto -> core -> service -> agent -> cli`. Do not make a lower layer depend
