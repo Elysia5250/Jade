@@ -21,7 +21,7 @@ envoy                 # 打开控制台；当前目录就是工作目录
 其它入口：
 
 ```bash
-envoy login           # 命令行连接 API Key / ChatGPT OAuth / Claude OAuth / Copilot / 自定义端点
+envoy login           # API Key（含 xAI、通义、智谱、Kimi、MiniMax、方舟、Mistral、Groq、硅基流动、AIHubMix、302.AI）/ ChatGPT、Claude、Copilot OAuth / 自定义端点
 envoy auth list       # 查看已连接账号与默认模型
 envoy -c              # 继续当前目录最近一次会话
 envoy --version

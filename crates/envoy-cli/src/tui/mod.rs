@@ -15,6 +15,7 @@
 mod commands;
 mod decrypt;
 mod diff;
+mod edit_file;
 mod highlight;
 mod links;
 mod markdown;
@@ -32,6 +33,8 @@ pub(crate) use text::*;
 pub(crate) use theme::{Theme, THEMES};
 pub(crate) use types::*;
 
+pub(crate) use crate::agent::checkpoint::CheckpointSummary;
+pub(crate) use crate::agent::MonitorInfo;
 #[allow(unused_imports)] // re-exported for the state and view modules
 pub(crate) use crate::auth::{
     anthropic_authorize_url, available_models, bind_openai_callback_listener, effective_providers,
@@ -44,8 +47,6 @@ pub(crate) use crate::auth::{
     BUILTIN_PROVIDERS,
 };
 pub(crate) use crate::daemon;
-pub(crate) use crate::agent::checkpoint::CheckpointSummary;
-pub(crate) use crate::agent::MonitorInfo;
 pub(crate) use crate::llm::{AgentEvent, AskOption};
 pub(crate) use crate::permissions::{
     is_workspace_trusted, set_workspace_trusted, PermissionEngine, PermissionMode, RuleScope,
@@ -240,6 +241,11 @@ pub async fn run(
                             tui.set_mouse_capture(on);
                             app.mouse_capture = on;
                         }
+                        Action::EditFile(path) => {
+                            if let Err(err) = edit_file::run(&mut tui, &path) {
+                                app.set_toast(err, true);
+                            }
+                        }
                     }
                 }
                 Event::Paste(text) => {
@@ -326,6 +332,8 @@ pub(crate) enum Action {
     /// Set mouse capture to an absolute value. The event loop applies it to
     /// the terminal; `run_command` only records the choice.
     SetMouseCapture(bool),
+    /// Suspend the console and open this file in `$VISUAL` or `$EDITOR`.
+    EditFile(PathBuf),
 }
 
 #[derive(Clone)]
@@ -658,8 +666,14 @@ impl Drop for Tui {
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_delegate;
+#[cfg(test)]
 mod tests_inspector;
 #[cfg(test)]
 mod tests_ux;
 #[cfg(test)]
 mod tests_ux_fold;
+#[cfg(test)]
+mod tests_welcome;
+#[cfg(test)]
+mod tests_worktree;

@@ -15,8 +15,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::task::JoinSet;
 
+mod isolate;
 mod run;
 
 const MAX_BATCH_TASKS: usize = 8;
@@ -168,59 +168,9 @@ pub(crate) fn execute_delegate<'a>(
             }
         }
 
-        let all_readonly = runnable.iter().all(|p| p.spec.is_readonly());
-        if all_readonly && runnable.len() > 1 {
-            let base_snapshot = hook_state.clone();
-            let mut set = JoinSet::new();
-            for task in runnable {
-                let host = host.clone();
-                let call_id = parent_call_id.to_string();
-                let tx = parent_tx.clone();
-                let child_state = base_snapshot.clone();
-                set.spawn(async move {
-                    run::run_single_subagent(task, total, &host, &call_id, child_state, &tx).await
-                });
-            }
-            let mut child_outcomes = Vec::new();
-            while let Some(joined) = set.join_next().await {
-                match joined {
-                    Ok((report, child_state)) => {
-                        let idx = report.index;
-                        reports.push(report);
-                        child_outcomes.push((idx, child_state));
-                    }
-                    Err(e) => reports.push(SubagentTaskReport {
-                        index: usize::MAX,
-                        agent: "subagent".into(),
-                        description: "task".into(),
-                        model: String::new(),
-                        ok: false,
-                        duration_ms: 0,
-                        input_tokens: 0,
-                        output_tokens: 0,
-                        summary: format!("subagent task panicked or cancelled: {e}"),
-                    }),
-                }
-            }
-            child_outcomes.sort_by_key(|(idx, _)| *idx);
-            for (_, child_state) in child_outcomes {
-                merge_hook_state_delta(&base_snapshot, &child_state, &mut hook_state);
-            }
-        } else {
-            for task in runnable {
-                let (report, next_state) = run::run_single_subagent(
-                    task,
-                    total,
-                    host,
-                    parent_call_id,
-                    hook_state,
-                    parent_tx,
-                )
-                .await;
-                hook_state = next_state;
-                reports.push(report);
-            }
-        }
+        let (ran, hook_state) =
+            isolate::run_tasks(host, parent_call_id, runnable, hook_state, parent_tx, total).await;
+        reports.extend(ran);
 
         reports.sort_by_key(|r| r.index);
         let all_ok = reports.iter().all(|r| r.ok);
@@ -228,7 +178,7 @@ pub(crate) fn execute_delegate<'a>(
     })
 }
 
-fn merge_hook_state_delta(
+pub(super) fn merge_hook_state_delta(
     base: &BTreeMap<String, Value>,
     child: &BTreeMap<String, Value>,
     target: &mut BTreeMap<String, Value>,

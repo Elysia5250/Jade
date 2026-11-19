@@ -85,8 +85,9 @@ fn local_sandbox_line(backend: &envoy_core::sandbox::SandboxBackend) -> String {
     }
 }
 
-/// Skills, agents, and todos. This changes during a session, so it stays out of
-/// the stable system prompt.
+/// Skills, long-term memory, agents, and todos. This changes during a session,
+/// so it stays out of the stable system prompt. Memory and the delegation
+/// rule are depth 0 only.
 #[allow(dead_code)]
 pub(crate) fn environment_note(data_dir: &Path, cwd: &Path, session_id: &str) -> Option<String> {
     environment_note_for_depth(data_dir, cwd, session_id, 0)
@@ -106,10 +107,14 @@ pub(crate) fn environment_note_for_depth(
         ));
     }
     if depth == 0 {
+        if let Some(memory) = crate::memory::prompt_block(data_dir) {
+            parts.push(memory);
+        }
         let agents = super::subagent::discover_agents(data_dir, cwd);
         if let Some(catalog) = super::subagent::format_agents_catalog(&agents) {
+            let rule = super::delegate_pref::instruction(data_dir);
             parts.push(format!(
-                "## Available subagents (invoke with `delegate`)\n{catalog}"
+                "## Available subagents (invoke with `delegate`)\n{rule}\n{catalog}"
             ));
         }
         if let Some(todos) = super::tools::todo::format_active_todos_xml(data_dir, session_id) {

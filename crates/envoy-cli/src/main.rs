@@ -15,11 +15,13 @@ mod headless;
 pub mod hooks;
 mod llm;
 pub mod mcp;
+mod memory;
 pub mod permissions;
 mod runtime;
 mod session;
 pub mod skills;
 mod tui;
+mod worktree;
 
 mod cli_args;
 pub(crate) use cli_args::{AuthCmd, Commands, DaemonCmd};

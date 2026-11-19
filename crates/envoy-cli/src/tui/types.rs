@@ -1,6 +1,8 @@
 //! Shared UI layout, hit-testing, inspector, and mouse selection types.
 use super::diff::DiffLayout;
 use super::links::LinkedSpan;
+use crate::memory::MemoryNote;
+use crate::skills::SkillSummary;
 use envoy_proto::JobId;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -163,6 +165,17 @@ pub(crate) struct Welcome {
     pub(crate) path: String,
     pub(crate) path_selected: usize,
     pub(crate) error: Option<String>,
+    pub(crate) folder_mode: bool,
+    pub(crate) skills_mode: bool,
+    pub(crate) memory_mode: bool,
+    pub(crate) naming: bool,
+    pub(crate) folder_parent: Option<PathBuf>,
+    pub(crate) draft: String,
+    pub(crate) list_selected: usize,
+    pub(crate) skills: Vec<SkillSummary>,
+    pub(crate) notes: Vec<MemoryNote>,
+    pub(crate) skill_count: usize,
+    pub(crate) memory_count: usize,
 }
 
 #[derive(Clone)]
@@ -170,4 +183,8 @@ pub(crate) enum WelcomeRow {
     Here(PathBuf, bool),
     Recent(PathBuf, String),
     OpenPath,
+    NewFolder,
+    Account,
+    Skills,
+    Memory,
 }

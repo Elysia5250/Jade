@@ -223,12 +223,18 @@ impl App {
                 self.delete_at_cursor();
                 Action::None
             }
-            KeyCode::Left if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            KeyCode::Left
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
                 self.move_cursor_word(-1);
                 Action::None
             }
             KeyCode::Right
-                if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
                 self.move_cursor_word(1);
                 Action::None
@@ -319,12 +325,12 @@ impl App {
     }
 
     pub(in crate::tui) fn handle_paste(&mut self, text: &str) {
-        if self.welcome.is_some() {
-            self.handle_welcome_paste(text);
-            return;
-        }
         if let Some(modal) = self.modal.take() {
             self.handle_modal_paste(modal, text);
+            return;
+        }
+        if self.welcome.is_some() {
+            self.handle_welcome_paste(text);
             return;
         }
         if self.pending_ask.is_some() {

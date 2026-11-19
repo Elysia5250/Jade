@@ -235,7 +235,7 @@ pub(crate) fn openai_tools_json() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "delegate",
-                "description": "Delegate one or more focused subtasks to isolated subagents (`explore`, `plan`, `review`, `coder`, or presets in `<available_agents>`). Pass `agent` + `prompt` for one subtask, or `tasks: [...]` to run multiple independent subtasks (read-only batches run in parallel).",
+                "description": "Delegate one or more focused subtasks to isolated subagents (`explore`, `plan`, `review`, `coder`, or presets in `<available_agents>`). Pass `agent` + `prompt` for one subtask, or `tasks: [...]` to run multiple independent subtasks (read-only batches run in parallel). In a local git checkout, two or more coding tasks each get a worktree, run in parallel, and are merged back into the current branch.",
                 "parameters": {
                     "type": "object",
                     "properties": {

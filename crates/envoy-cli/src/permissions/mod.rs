@@ -71,6 +71,7 @@ impl PermissionEngine {
         &self,
         mode: PermissionMode,
         inherit_session_allows: bool,
+        cwd: PathBuf,
     ) -> Arc<Self> {
         let session_allows = if inherit_session_allows {
             self.session_allows.lock().unwrap().clone()
@@ -79,7 +80,7 @@ impl PermissionEngine {
         };
         Arc::new(Self {
             data_dir: self.data_dir.clone(),
-            cwd: self.cwd.clone(),
+            cwd,
             session_id: self.session_id.clone(),
             target: self.target.clone(),
             mode: Mutex::new(mode),

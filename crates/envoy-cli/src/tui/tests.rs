@@ -492,7 +492,7 @@ async fn welcome_picker_selects_a_recent_workspace() {
 
     let mut app = App::new(dir.clone(), "local".into(), None, here.clone());
     app.open_welcome();
-    assert_eq!(app.welcome.as_ref().unwrap().rows.len(), 3);
+    assert_eq!(app.welcome.as_ref().unwrap().rows.len(), 7);
     assert_eq!(app.welcome.as_ref().unwrap().selected, 0);
 
     let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
@@ -580,7 +580,10 @@ fn composer_and_turns_keep_vertical_room() {
     app.connected = true;
     app.show_sidebar = false;
 
-    for (user, reply) in [("first-question", "alpha-reply"), ("second-question", "beta-reply")] {
+    for (user, reply) in [
+        ("first-question", "alpha-reply"),
+        ("second-question", "beta-reply"),
+    ] {
         let uid = app.session.alloc_id();
         app.session.items.push(TranscriptItem::User {
             id: uid,

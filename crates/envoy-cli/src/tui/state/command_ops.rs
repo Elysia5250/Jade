@@ -1,4 +1,4 @@
-//! Argument handlers for /permissions, /mcp, /skill, and /budget.
+//! Argument handlers for /permissions, /mcp, /skill, /budget, /delegate, and /worktree.
 use super::*;
 
 impl App {
@@ -209,5 +209,75 @@ impl App {
             ),
             false,
         );
+    }
+
+    pub(in crate::tui) fn run_delegate_command(&mut self, arg: &str) {
+        use crate::agent::delegate_pref::{self, DelegateLevel};
+        if arg.is_empty() {
+            let level = delegate_pref::load(&self.data_dir);
+            self.set_toast(format!("delegate: {level} (off, low, normal, high)"), false);
+            return;
+        }
+        let Some(level) = DelegateLevel::parse(arg) else {
+            self.set_toast("usage: /delegate [off|low|normal|high]", true);
+            return;
+        };
+        if let Err(err) = delegate_pref::set(&self.data_dir, level) {
+            self.set_toast(err, true);
+            return;
+        }
+        self.set_toast(
+            format!("delegate: {level} (applies on the next turn)"),
+            false,
+        );
+    }
+
+    pub(in crate::tui) fn run_worktree_command(&mut self, arg: &str) {
+        if !self.target.is_empty() && self.target != "local" {
+            self.set_toast("worktree is local only", true);
+            return;
+        }
+        if self.agent_running {
+            self.set_toast("wait for the active turn to finish", true);
+            return;
+        }
+        match crate::worktree::execute(&self.session.cwd, arg) {
+            Ok(crate::worktree::Effect::Listed(text)) => self.push_notice(text, false),
+            Ok(crate::worktree::Effect::Toast(text)) => self.set_toast(text, false),
+            Ok(crate::worktree::Effect::Enter {
+                path,
+                resume,
+                notice,
+                error,
+            }) => {
+                self.enter_linked_tree(path, resume);
+                self.set_toast(notice, error);
+            }
+            Err(err) => self.set_toast(err, true),
+        }
+    }
+
+    fn enter_linked_tree(&mut self, path: PathBuf, resume: bool) {
+        let loaded = if resume {
+            exact_session_for_cwd(&self.data_dir, &path)
+        } else {
+            None
+        };
+        if let Some(loaded) = loaded {
+            self.load_existing_session(loaded);
+            self.spawn_agent_attach();
+            return;
+        }
+        self.persist_session();
+        let target = self.session.target.clone();
+        self.session = Session::new(path, target);
+        self.selected_card = None;
+        self.follow = true;
+        self.expanded_explore_groups.clear();
+        self.transcript_cache.clear();
+        self.inspector = InspectorState::default();
+        self.workspace_index.invalidate();
+        self.reset_agent_view();
+        self.spawn_agent_attach();
     }
 }

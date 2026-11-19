@@ -2,9 +2,11 @@
 
 pub mod loader;
 
+pub mod prefs;
+
 pub use loader::{
-    discover_skills, format_skills_catalog, load_skill, prompt_skills, LoadedSkill, SkillScope,
-    SkillSummary,
+    discover_skills, format_skills_catalog, load_skill, prompt_skills, skill_is_injected,
+    skill_root_kind, LoadedSkill, SkillScope, SkillSummary,
 };
 
 #[cfg(test)]
@@ -131,6 +133,39 @@ mod tests {
 
         let loaded = load_skill(&data, &cwd, "from-claude").unwrap();
         assert!(loaded.body.contains("body"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn skill_pref_overrides_the_default_roots() {
+        let root = tmpdir("pref");
+        let data = root.join("data");
+        let cwd = root.join("repo");
+        for (rel, name) in [
+            ("skills/from-data", "from-data"),
+            (".envoy/skills/from-envoy", "from-envoy"),
+            (".claude/skills/from-claude", "from-claude"),
+        ] {
+            let dir = if rel.starts_with("skills/") {
+                data.join(rel)
+            } else {
+                cwd.join(rel)
+            };
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: {name} steps\n---\n\nbody\n"),
+            )
+            .unwrap();
+        }
+        set_workspace_trusted(&data, &cwd, true).unwrap();
+        prefs::set_inject(&data, "from-claude", true).unwrap();
+        prefs::set_inject(&data, "from-data", false).unwrap();
+        let prompted = prompt_skills(&data, &cwd);
+        let names: Vec<_> = prompted.iter().map(|skill| skill.name.as_str()).collect();
+        assert!(names.contains(&"from-claude"), "{names:?}");
+        assert!(names.contains(&"from-envoy"), "{names:?}");
+        assert!(!names.contains(&"from-data"), "{names:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

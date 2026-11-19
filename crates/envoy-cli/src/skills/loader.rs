@@ -6,8 +6,9 @@
 //! - Project scope (only when the workspace is trusted):
 //!   `<cwd>/.envoy/skills`, `<cwd>/.agents/skills`, `<cwd>/.claude/skills`
 //!
-//! The system prompt lists only Envoy roots (`<data_dir>/skills`,
-//! `~/.envoy/skills`, and a trusted `<cwd>/.envoy/skills`). The other roots
+//! The system prompt lists Envoy roots (`<data_dir>/skills`,
+//! `~/.envoy/skills`, and a trusted `<cwd>/.envoy/skills`) unless
+//! `<data_dir>/skills.json` turns a skill on or off by name. The other roots
 //! stay discoverable and loadable by name.
 
 use crate::permissions::is_workspace_trusted;
@@ -96,7 +97,7 @@ pub fn discover_skills(data_dir: &Path, cwd: &Path) -> Vec<SkillSummary> {
 }
 
 /// Skills that belong in the system prompt. Claude and Agents roots stay
-/// available through [`load_skill`] and `/skill`.
+/// available through [`load_skill`] and `/skill` until `skills.json` enables them.
 pub fn prompt_skills(data_dir: &Path, cwd: &Path) -> Vec<SkillSummary> {
     discover_skills(data_dir, cwd)
         .into_iter()
@@ -104,13 +105,40 @@ pub fn prompt_skills(data_dir: &Path, cwd: &Path) -> Vec<SkillSummary> {
         .collect()
 }
 
-fn skill_is_injected(data_dir: &Path, cwd: &Path, skill: &SkillSummary) -> bool {
+pub fn skill_is_injected(data_dir: &Path, cwd: &Path, skill: &SkillSummary) -> bool {
+    super::prefs::injected(
+        data_dir,
+        &skill.name,
+        envoy_skill_root(data_dir, cwd, skill),
+    )
+}
+
+fn envoy_skill_root(data_dir: &Path, cwd: &Path, skill: &SkillSummary) -> bool {
     let mut roots = vec![data_dir.join("skills")];
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         roots.push(home.join(".envoy").join("skills"));
     }
     roots.push(cwd.join(".envoy").join("skills"));
     roots.into_iter().any(|root| path_under(&root, &skill.dir))
+}
+
+/// `envoy`, `claude`, `agents`, or `user`, from the directory that won discovery.
+pub fn skill_root_kind(data_dir: &Path, skill: &SkillSummary) -> &'static str {
+    if path_under(&data_dir.join("skills"), &skill.dir) {
+        return "envoy";
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        if path_under(&home.join(".envoy").join("skills"), &skill.dir) {
+            return "envoy";
+        }
+        if path_under(&home.join(".claude").join("skills"), &skill.dir) {
+            return "claude";
+        }
+        if path_under(&home.join(".agents").join("skills"), &skill.dir) {
+            return "agents";
+        }
+    }
+    "user"
 }
 
 fn path_under(root: &Path, dir: &Path) -> bool {

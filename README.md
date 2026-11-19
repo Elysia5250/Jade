@@ -82,7 +82,9 @@ envoy models                           # list available models
 ```
 
 That is the main entry point: bare `envoy` starts the terminal console in
-**Agent** mode, with the current directory as the working directory. `/login`
+**Agent** mode, with the current directory as the working directory. Without
+`--cwd`, `-c`, `--session`, or `--new-session`, the console opens the home
+screen first; the current directory stays the first row. `/login`
 (or env vars like `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`) connects a model so
 prompts can call the tools in [Agent](#agent) on `local` or any `conduit` peer.
 `/mode` switches to **Shell**, where a command runs directly as a detached
@@ -133,10 +135,13 @@ the screen. One status line is the only chrome.
   `/help`, `/quit`); `/cd ` offers
   live subdirectory completion (`Tab` completes, `Enter` switches).
 - **Providers & OAuth (`/login`)**: API Keys (OpenAI, Anthropic, DeepSeek,
-  Gemini, OpenRouter, OpenCode Zen/Go), OAuth (ChatGPT Plus/Pro Browser PKCE &
-  Headless Device Flow, Anthropic Claude Pro/Max PKCE, GitHub Copilot Device
-  Flow), and custom OpenAI/Anthropic-compatible endpoints (Ollama, vLLM, relays).
-  Credentials are saved to `~/.envoy/auth.json` (`0600`).
+  Gemini, xAI, Qwen, Zhipu, Moonshot, MiniMax, Volcengine Ark, Mistral, Groq,
+  OpenRouter, SiliconFlow, AIHubMix, 302.AI, OpenCode Zen/Go), OAuth (ChatGPT
+  Plus/Pro Browser PKCE & Headless Device Flow, Anthropic Claude Pro/Max PKCE,
+  GitHub Copilot Device Flow), and custom OpenAI/Anthropic-compatible endpoints
+  (Ollama, vLLM, relays). The added vendors publish API keys, not a third-party
+  OAuth flow this client can use. Credentials are saved to `~/.envoy/auth.json`
+  (`0600`).
 
 | Key | Action |
 |---|---|
@@ -165,7 +170,11 @@ through `ask` (options with one recommended; after 300s the recommended option
 is taken). Detached jobs can be awaited with `job action=wait`.
 
 Bare commands run in the console's working directory (`--cwd` or `/cd` to
-change it). The agent reads `AGENTS.md` (or `ENVOY.md`) from that directory as
+change it). `/worktree [name [rev]]` creates or enters a git worktree beside
+the repository at `<repo>.worktrees/<name>`. `/worktree merge [name]` merges
+that branch into the branch checked out in the main worktree and switches the
+session there. `/worktree remove <name>` removes a clean tree and does not
+force it. The agent reads `AGENTS.md` (or `ENVOY.md`) from that directory as
 project instructions, replies in the language of your message, and renders
 Markdown with real tables, lists and inline emphasis. Tool output is stripped
 of ANSI escapes before it reaches the transcript. Sessions are saved under
@@ -187,7 +196,13 @@ conduit peer:
   `skills`, and — once the workspace is trusted — `.envoy/skills`.
   `~/.agents/skills`, `~/.claude/skills`, and the project's `.agents/skills`
   and `.claude/skills` stay loadable by name with `/skill` or the `skill` tool.
+  The home screen can turn a discovered user skill on or off in `skills.json`
+  without moving the files.
 - Subagents: `delegate` (`explore`, `plan`, `review`, `coder`, or a preset).
+  `/delegate off|low|normal|high` sets how readily the parent calls them.
+  The default is `low`, stored in `delegate.json`, and read on the next turn.
+  In a local git checkout, two or more coding tasks in one call each get a
+  worktree and are merged back into the current branch.
 - Conversation: `say`, `ask`, `todo`.
 
 Permission decisions use an explicit ladder: managed and local deny, the hard

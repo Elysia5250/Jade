@@ -45,6 +45,12 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         about: "inspect or set compaction tier (native/focused/balanced/max/tokens)",
     },
     SlashCommand {
+        name: "delegate",
+        aliases: &[],
+        args: "[off|low|normal|high]",
+        about: "how readily the agent calls subagents",
+    },
+    SlashCommand {
         name: "mode",
         aliases: &[],
         args: "",
@@ -85,6 +91,12 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         aliases: &[],
         args: "<dir>",
         about: "change working directory (with path completion)",
+    },
+    SlashCommand {
+        name: "worktree",
+        aliases: &[],
+        args: "[name [rev]|remove <name>|merge [name]]",
+        about: "create, enter, merge, or remove a git worktree",
     },
     SlashCommand {
         name: "machine",

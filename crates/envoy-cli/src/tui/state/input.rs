@@ -3,11 +3,17 @@ use super::*;
 
 impl App {
     pub(in crate::tui) fn handle_key(&mut self, key: KeyEvent) -> Action {
-        if self.welcome.is_some() {
-            return self.handle_welcome_key(key);
+        if self.welcome.is_some()
+            && key.code == KeyCode::Char('c')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            return Action::Quit;
         }
         if self.modal.is_some() {
             return self.handle_modal_key(key);
+        }
+        if self.welcome.is_some() {
+            return self.handle_welcome_key(key);
         }
         if self.pending_ask.is_some() {
             return self.handle_ask_key(key);

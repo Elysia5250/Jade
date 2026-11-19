@@ -7,6 +7,7 @@ mod asks;
 pub mod checkpoint;
 mod config;
 pub mod context;
+pub(crate) mod delegate_pref;
 mod events;
 mod r#loop;
 mod loop_hooks;

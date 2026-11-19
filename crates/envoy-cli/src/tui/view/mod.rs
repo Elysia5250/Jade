@@ -14,6 +14,7 @@ mod transcript_cards;
 mod transcript_fold;
 mod transcript_tool;
 mod welcome;
+mod welcome_panels;
 
 use ask::{ask_inline_height, draw_ask};
 use editor::draw_editor;
@@ -35,6 +36,9 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
 
     if app.welcome.is_some() {
         draw_workspace_picker(frame, app, &theme, area);
+        if app.modal.is_some() {
+            draw_modal(frame, app, &theme, area);
+        }
         return;
     }
 

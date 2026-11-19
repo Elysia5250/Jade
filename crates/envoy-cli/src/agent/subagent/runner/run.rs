@@ -55,9 +55,9 @@ pub(super) async fn run_single_subagent(
     );
 
     let perm_mode = spec.mode.permission_mode(host.permissions.mode());
-    let child_perm = host
-        .permissions
-        .fork_for_subagent(perm_mode, !spec.is_readonly());
+    let child_perm =
+        host.permissions
+            .fork_for_subagent(perm_mode, !spec.is_readonly(), host.cwd.clone());
     let cfg = TurnConfig {
         data_dir: host.data_dir.clone(),
         conduit: host.conduit.clone(),

@@ -1,8 +1,8 @@
 //! Subagent model target parsing and tier/cross-provider resolution.
 
 use super::{
-    default_model_for, effective_providers_with, is_retired_model, load_prefs,
-    Credential, ModelRef, ProviderProtocol, StoredProvider, BUILTIN_PROVIDERS,
+    default_model_for, effective_providers_with, is_retired_model, load_prefs, Credential,
+    ModelRef, ProviderProtocol, StoredProvider, BUILTIN_PROVIDERS,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -88,10 +88,7 @@ pub fn resolve_model_target(
             model_id,
         } => {
             if !is_retired_model(&parent_provider.id, &model_id)
-                && parent_provider
-                    .custom_models
-                    .iter()
-                    .any(|m| m == &model_id)
+                && parent_provider.custom_models.iter().any(|m| m == &model_id)
             {
                 return (
                     parent_provider.clone(),
@@ -131,14 +128,20 @@ pub fn resolve_model_target(
             }
             (parent_provider.clone(), parent_model.clone())
         }
-        ModelTargetSpec::Fast => {
-            pick_by_tier(parent_provider, &parent_model.model_id, &providers, Tier::Fast)
-                .unwrap_or_else(|| (parent_provider.clone(), parent_model.clone()))
-        }
-        ModelTargetSpec::Flagship => {
-            pick_by_tier(parent_provider, &parent_model.model_id, &providers, Tier::Flagship)
-                .unwrap_or_else(|| (parent_provider.clone(), parent_model.clone()))
-        }
+        ModelTargetSpec::Fast => pick_by_tier(
+            parent_provider,
+            &parent_model.model_id,
+            &providers,
+            Tier::Fast,
+        )
+        .unwrap_or_else(|| (parent_provider.clone(), parent_model.clone())),
+        ModelTargetSpec::Flagship => pick_by_tier(
+            parent_provider,
+            &parent_model.model_id,
+            &providers,
+            Tier::Flagship,
+        )
+        .unwrap_or_else(|| (parent_provider.clone(), parent_model.clone())),
     }
 }
 
@@ -171,10 +174,7 @@ fn pick_by_tier(
                 0
             };
             let score = base + if same_provider { 25 } else { 0 } + active_bonus;
-            let replace = best
-                .as_ref()
-                .map(|(s, _, _)| score > *s)
-                .unwrap_or(true);
+            let replace = best.as_ref().map(|(s, _, _)| score > *s).unwrap_or(true);
             if replace {
                 best = Some((score, prov.clone(), model_id.clone()));
             }
@@ -239,7 +239,18 @@ pub(crate) fn env_base_url_var(provider_id: &str) -> Option<&'static str> {
         "anthropic" => Some("ANTHROPIC_BASE_URL"),
         "deepseek" => Some("DEEPSEEK_BASE_URL"),
         "google" => Some("GEMINI_BASE_URL"),
+        "xai" => Some("XAI_BASE_URL"),
+        "qwen" => Some("DASHSCOPE_BASE_URL"),
+        "zhipu" => Some("ZHIPU_BASE_URL"),
+        "moonshot" => Some("MOONSHOT_BASE_URL"),
+        "minimax" => Some("MINIMAX_BASE_URL"),
+        "volcengine" => Some("ARK_BASE_URL"),
+        "mistral" => Some("MISTRAL_BASE_URL"),
+        "groq" => Some("GROQ_BASE_URL"),
         "openrouter" => Some("OPENROUTER_BASE_URL"),
+        "siliconflow" => Some("SILICONFLOW_BASE_URL"),
+        "aihubmix" => Some("AIHUBMIX_BASE_URL"),
+        "ai302" => Some("AI302_BASE_URL"),
         "opencode-zen" => Some("OPENCODE_BASE_URL"),
         "opencode-go" => Some("OPENCODE_GO_BASE_URL"),
         _ => None,
@@ -252,7 +263,17 @@ pub fn default_env_model(provider_id: &str) -> &'static str {
         "anthropic" => "claude-sonnet-4-5",
         "deepseek" => "deepseek-v3.2",
         "google" => "gemini-2.5-pro",
+        "xai" => "grok-4",
+        "qwen" => "qwen-plus",
+        "zhipu" => "glm-4-plus",
+        "moonshot" => "moonshot-v1-auto",
+        "minimax" => "MiniMax-Text-01",
+        "volcengine" => "doubao-seed-1-6",
+        "mistral" => "mistral-large-latest",
+        "groq" => "llama-3.3-70b-versatile",
         "openrouter" => "anthropic/claude-sonnet-4.5",
+        "siliconflow" => "deepseek-ai/DeepSeek-V3",
+        "aihubmix" | "ai302" => "gpt-4o",
         "opencode-zen" | "opencode-go" => "claude-sonnet-4-5",
         _ => "",
     }
@@ -351,6 +372,20 @@ fn infer_provider_id_from_model<'a>(
         providers.contains_key("openai").then_some("openai")
     } else if lower.starts_with("gemini") {
         providers.contains_key("google").then_some("google")
+    } else if lower.starts_with("grok") {
+        providers.contains_key("xai").then_some("xai")
+    } else if lower.starts_with("qwen") {
+        providers.contains_key("qwen").then_some("qwen")
+    } else if lower.starts_with("glm") {
+        providers.contains_key("zhipu").then_some("zhipu")
+    } else if lower.starts_with("kimi") || lower.starts_with("moonshot") {
+        providers.contains_key("moonshot").then_some("moonshot")
+    } else if lower.starts_with("minimax") {
+        providers.contains_key("minimax").then_some("minimax")
+    } else if lower.starts_with("doubao") {
+        providers.contains_key("volcengine").then_some("volcengine")
+    } else if lower.starts_with("mistral") {
+        providers.contains_key("mistral").then_some("mistral")
     } else if lower.starts_with("deepseek") {
         providers.contains_key("deepseek").then_some("deepseek")
     } else {
@@ -483,9 +518,9 @@ pub(crate) fn resolve_provider_with_env(
         None => default_pair()?,
     };
 
-    if let Some(base_url) = non_empty_env(env, "ENVOY_BASE_URL").or_else(|| {
-        env_base_url_var(&prov.id).and_then(|var| non_empty_env(env, var))
-    }) {
+    if let Some(base_url) = non_empty_env(env, "ENVOY_BASE_URL")
+        .or_else(|| env_base_url_var(&prov.id).and_then(|var| non_empty_env(env, var)))
+    {
         prov.base_url = base_url;
     }
     if let Some(proto) = non_empty_env(env, "ENVOY_PROTOCOL").and_then(|s| parse_env_protocol(&s)) {
@@ -551,8 +586,7 @@ mod tests {
         assert_eq!(p_flag.id, "anthropic");
         assert_eq!(m_flag.model_id, "claude-opus-5");
 
-        let (p_cross, m_cross) =
-            resolve_model_target(&dir, &ant, &parent_ref, "openai/gpt-5-mini");
+        let (p_cross, m_cross) = resolve_model_target(&dir, &ant, &parent_ref, "openai/gpt-5-mini");
         assert_eq!(p_cross.id, "openai");
         assert_eq!(m_cross.model_id, "gpt-5-mini");
 
