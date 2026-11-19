@@ -410,7 +410,6 @@ impl ConduitClient {
         serde_json::from_slice(&response.body)
             .with_context(|| format!("parsing the JSON from {path}"))
     }
-
 }
 
 fn parse_status_event(text: &str) -> Option<Status> {

@@ -1,7 +1,6 @@
 //! CLI parsing tests.
 use super::*;
 
-
 #[test]
 fn bare_envoy_opens_the_console() {
     let cli = Cli::try_parse_from(["envoy"]).expect("parse");
@@ -24,9 +23,7 @@ fn session_and_auth_flags_parse() {
     let cli = Cli::try_parse_from(["envoy", "auth", "list"]).expect("parse");
     assert!(matches!(
         cli.cmd,
-        Some(Commands::Auth {
-            cmd: AuthCmd::List
-        })
+        Some(Commands::Auth { cmd: AuthCmd::List })
     ));
 
     let cli = Cli::try_parse_from(["envoy", "models"]).expect("parse");

@@ -31,13 +31,11 @@ where
         },
     )
     .await?;
-    loop {
-        match next_reply(&mut conn.stream, peer).await? {
-            Reply::GlobMatches { paths } => return Ok(paths),
-            Reply::Done { .. } => return Ok(Vec::new()),
-            Reply::Failed { error } => bail!(error),
-            other => bail!("unexpected reply to a glob: {other:?}"),
-        }
+    match next_reply(&mut conn.stream, peer).await? {
+        Reply::GlobMatches { paths } => Ok(paths),
+        Reply::Done { .. } => Ok(Vec::new()),
+        Reply::Failed { error } => bail!(error),
+        other => bail!("unexpected reply to a glob: {other:?}"),
     }
 }
 
@@ -63,13 +61,11 @@ where
         },
     )
     .await?;
-    loop {
-        match next_reply(&mut conn.stream, peer).await? {
-            Reply::GrepMatches { matches } => return Ok(matches),
-            Reply::Done { .. } => return Ok(Vec::new()),
-            Reply::Failed { error } => bail!(error),
-            other => bail!("unexpected reply to a grep: {other:?}"),
-        }
+    match next_reply(&mut conn.stream, peer).await? {
+        Reply::GrepMatches { matches } => Ok(matches),
+        Reply::Done { .. } => Ok(Vec::new()),
+        Reply::Failed { error } => bail!(error),
+        other => bail!("unexpected reply to a grep: {other:?}"),
     }
 }
 

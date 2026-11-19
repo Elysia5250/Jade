@@ -1,5 +1,5 @@
 use super::*;
-use crate::session::OutputLine;
+use envoy_agent::session::OutputLine;
 
 fn tmpdir() -> PathBuf {
     let mut b = [0u8; 6];
@@ -64,7 +64,7 @@ fn opens_with_input_focused_and_welcome_screen() {
 
 #[test]
 fn status_line_shows_model_workspace_and_context() {
-    use crate::auth::{record_provider_login, Credential, ProviderProtocol, StoredProvider};
+    use envoy_agent::auth::{record_provider_login, Credential, ProviderProtocol, StoredProvider};
     use ratatui::backend::TestBackend;
 
     let dir = tmpdir();

@@ -5,12 +5,10 @@
 //! affecting the job and reattach later at its last cursor.
 
 use crate::transport::AgentHost;
+use anyhow::Result;
 use envoy_core::{audit, fs, gate, job, search, truncate, Jobs};
 use envoy_proto::codec::{read_framed, write_framed};
-use envoy_proto::{
-    Call, ClientMsg, Hello, JobId, Op, Reply, AGENT_CHUNK, AGENT_VERSION,
-};
-use anyhow::Result;
+use envoy_proto::{Call, ClientMsg, Hello, JobId, Op, Reply, AGENT_CHUNK, AGENT_VERSION};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -183,22 +181,50 @@ where
         Op::Probe => reply(wr, Reply::Done { code: 0, ms: 0 }).await,
         Op::Submit(req) => match inner.jobs.submit(req, caller) {
             Ok(job) => reply(wr, Reply::Accepted { job }).await,
-            Err(e) => reply(wr, Reply::Failed { error: format!("{e:#}") }).await,
+            Err(e) => {
+                reply(
+                    wr,
+                    Reply::Failed {
+                        error: format!("{e:#}"),
+                    },
+                )
+                .await
+            }
         },
-        Op::Jobs => reply(wr, Reply::Jobs { jobs: inner.jobs.list() }).await,
+        Op::Jobs => {
+            reply(
+                wr,
+                Reply::Jobs {
+                    jobs: inner.jobs.list(),
+                },
+            )
+            .await
+        }
         Op::JobStatus { id } => match inner.jobs.get(id) {
             Some(job) => reply(wr, Reply::Job { job }).await,
-            None => reply(wr, Reply::Failed { error: format!("no such job: {id}") }).await,
+            None => {
+                reply(
+                    wr,
+                    Reply::Failed {
+                        error: format!("no such job: {id}"),
+                    },
+                )
+                .await
+            }
         },
         Op::JobCancel { id } => match inner.jobs.cancel(id) {
             Ok(()) => reply(wr, Reply::Done { code: 0, ms: 0 }).await,
-            Err(e) => reply(wr, Reply::Failed { error: format!("{e:#}") }).await,
+            Err(e) => {
+                reply(
+                    wr,
+                    Reply::Failed {
+                        error: format!("{e:#}"),
+                    },
+                )
+                .await
+            }
         },
-        Op::JobLog {
-            id,
-            offset,
-            follow,
-        } => follow_log(inner, id, offset, follow, wr).await?,
+        Op::JobLog { id, offset, follow } => follow_log(inner, id, offset, follow, wr).await?,
         Op::Read {
             path,
             offset,
@@ -212,7 +238,15 @@ where
             replace_all,
         } => match fs::edit_file(&path, &old, &new, replace_all).await {
             Ok(replacements) => reply(wr, Reply::Edited { replacements }).await,
-            Err(e) => reply(wr, Reply::Failed { error: format!("{e:#}") }).await,
+            Err(e) => {
+                reply(
+                    wr,
+                    Reply::Failed {
+                        error: format!("{e:#}"),
+                    },
+                )
+                .await
+            }
         },
         Op::Write { path, mode } => serve_write(rd, wr, &path, mode).await?,
         Op::Glob {
@@ -239,7 +273,13 @@ async fn follow_log<W: AsyncWrite + Unpin>(
     wr: &mut W,
 ) -> Result<()> {
     let Some(path) = inner.jobs.log_path(id) else {
-        reply(wr, Reply::Failed { error: format!("no such job: {id}") }).await;
+        reply(
+            wr,
+            Reply::Failed {
+                error: format!("no such job: {id}"),
+            },
+        )
+        .await;
         return Ok(());
     };
     let wake = inner.jobs.wake();
@@ -503,7 +543,7 @@ async fn reply<W: AsyncWrite + Unpin>(wr: &mut W, event: Reply) {
 async fn send<W: AsyncWrite + Unpin>(wr: &mut W, event: Reply) -> std::io::Result<()> {
     write_framed(wr, &event)
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+        .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 fn hostname() -> String {

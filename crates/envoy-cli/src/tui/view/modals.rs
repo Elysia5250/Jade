@@ -83,7 +83,7 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
                 .min(20);
             let popup = centered_rect(area, width, height);
             frame.render_widget(Clear, popup);
-            let title = if m.fetching { " model " } else { " model " };
+            let title = " model ";
             let block = Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.accent))

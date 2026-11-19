@@ -58,11 +58,16 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
     rows.push(LinkedLine::from_line(Line::from("")));
 
     // 2. Active Todos
-    let todos = crate::agent::tools::todo::load_todos(&app.data_dir, &app.session.id);
+    let todos = envoy_agent::agent::tools::todo::load_todos(&app.data_dir, &app.session.id);
     if !todos.is_empty() {
         let done = todos
             .iter()
-            .filter(|t| matches!(t.status, crate::agent::tools::todo::TodoStatus::Completed))
+            .filter(|t| {
+                matches!(
+                    t.status,
+                    envoy_agent::agent::tools::todo::TodoStatus::Completed
+                )
+            })
             .count();
         push_section_header(
             &mut rows,
@@ -72,9 +77,9 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
         );
         for t in todos.iter().take(10) {
             let (glyph, color) = match t.status {
-                crate::agent::tools::todo::TodoStatus::Completed => ("✓", theme.ok),
-                crate::agent::tools::todo::TodoStatus::InProgress => ("*", theme.accent),
-                crate::agent::tools::todo::TodoStatus::Pending => ("o", theme.dim),
+                envoy_agent::agent::tools::todo::TodoStatus::Completed => ("✓", theme.ok),
+                envoy_agent::agent::tools::todo::TodoStatus::InProgress => ("*", theme.accent),
+                envoy_agent::agent::tools::todo::TodoStatus::Pending => ("o", theme.dim),
             };
             let text = truncate_width(&t.content, w.saturating_sub(5));
             rows.push(LinkedLine::from_line(Line::from(vec![
@@ -90,7 +95,7 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
     if let Some((prov, model)) = resolve_active_provider(&app.data_dir) {
         let (used, est) = context_used(&app.session);
         let budget =
-            crate::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
+            envoy_agent::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
         let (filled, empty) = context_bar(used, budget.compact_at);
         let mark = if est { "~" } else { "" };
         rows.push(LinkedLine::from_line(Line::from(vec![
@@ -134,8 +139,8 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
     rows.push(LinkedLine::from_line(Line::from("")));
 
     // 4. MCP & Skills
-    let mcp = crate::mcp::config::load_mcp_configs(&app.data_dir, &app.session.cwd);
-    let skills = crate::skills::discover_skills(&app.data_dir, &app.session.cwd);
+    let mcp = envoy_agent::mcp::config::load_mcp_configs(&app.data_dir, &app.session.cwd);
+    let skills = envoy_agent::skills::discover_skills(&app.data_dir, &app.session.cwd);
     push_section_header(
         &mut rows,
         "MCP & SKILLS",
@@ -182,12 +187,7 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
     // 5. Active & Recent Monitors
     if !app.active_monitors.is_empty() {
         let active_n = app.active_monitors.iter().filter(|m| m.active).count();
-        push_section_header(
-            &mut rows,
-            "MONITORS",
-            &format!("{active_n} active"),
-            theme,
-        );
+        push_section_header(&mut rows, "MONITORS", &format!("{active_n} active"), theme);
         for m in app.active_monitors.iter().take(8) {
             let (glyph, color) = if m.active {
                 ("*", theme.ok)

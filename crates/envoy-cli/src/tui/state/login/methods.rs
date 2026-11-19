@@ -53,9 +53,9 @@ impl App {
                     match bind_openai_callback_listener().await {
                         Ok((listener, port)) => {
                             let redirect_uri = format!("http://localhost:{port}/auth/callback");
-                            let url = crate::auth::openai_authorize_url(
+                            let url = envoy_agent::auth::openai_authorize_url(
                                 &redirect_uri,
-                                &crate::auth::Pkce {
+                                &envoy_agent::auth::Pkce {
                                     verifier: verifier.clone(),
                                     challenge,
                                 },

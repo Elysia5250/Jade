@@ -121,4 +121,3 @@ pub(crate) const THEMES: [(&str, Theme); 3] = [
         },
     ),
 ];
-

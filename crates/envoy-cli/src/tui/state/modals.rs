@@ -29,14 +29,15 @@ impl App {
         let dir = self.data_dir.clone();
         tokio::spawn(async move {
             let http = reqwest::Client::new();
-            crate::agent::context::refresh_models_dev_if_stale(&http, &dir).await;
+            envoy_agent::agent::context::refresh_models_dev_if_stale(&http, &dir).await;
         });
         let dir = self.data_dir.clone();
         let pid = prov.id.clone();
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
             let http = reqwest::Client::new();
-            let list = crate::agent::context::fetch_provider_models(&http, Some(&dir), &prov).await;
+            let list =
+                envoy_agent::agent::context::fetch_provider_models(&http, Some(&dir), &prov).await;
             let _ = tx.send((pid, list));
         });
         self.models_rx = Some(rx);
@@ -50,7 +51,7 @@ impl App {
         match rx.try_recv() {
             Ok((provider_id, fetched)) => {
                 if !provider_id.is_empty() {
-                    match crate::agent::context::store_listed_models(
+                    match envoy_agent::agent::context::store_listed_models(
                         &self.data_dir,
                         &provider_id,
                         &fetched,
@@ -233,7 +234,8 @@ impl App {
             self.set_toast("no provider connected - run /login first", true);
             return;
         };
-        let plan = crate::agent::context::resolve_budget(&self.data_dir, &prov.id, &model.model_id);
+        let plan =
+            envoy_agent::agent::context::resolve_budget(&self.data_dir, &prov.id, &model.model_id);
         let current = plan.tier.label();
         let tiers = ["native", "focused", "balanced", "max"];
         let selected = tiers.iter().position(|tier| *tier == current).unwrap_or(0);

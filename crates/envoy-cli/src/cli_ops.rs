@@ -1,7 +1,8 @@
 //! Top-level CLI subcommand handlers extracted from `main.rs`.
 
-use crate::{auth, daemon, mode_option, Ctx};
+use crate::{mode_option, Ctx};
 use anyhow::Result;
+use envoy_agent::{auth, daemon};
 use envoy_core::AgentConfigStore;
 use envoy_proto::{EntryKind, JobState, AGENT_VERSION};
 use envoy_service::ConduitClient;
@@ -97,10 +98,7 @@ pub(crate) async fn cmd_status(ctx: &Ctx) -> Result<()> {
                 None => println!("service:  envoy not registered (start `envoy serve`)"),
             }
         }
-        Err(_) => println!(
-            "conduit:  not running ({})",
-            conduit.socket().display()
-        ),
+        Err(_) => println!("conduit:  not running ({})", conduit.socket().display()),
     }
     println!("protocol: v{AGENT_VERSION}");
     println!("sandbox:  {}", envoy_core::sandbox::backend_label());
@@ -142,14 +140,19 @@ pub(crate) async fn cmd_devices(ctx: &Ctx) -> Result<()> {
             status
                 .peers
                 .into_iter()
-                .map(|peer| (peer.device_id.clone(), peer.has_service(envoy_proto::AGENT_SERVICE_ID)))
+                .map(|peer| {
+                    (
+                        peer.device_id.clone(),
+                        peer.has_service(envoy_proto::AGENT_SERVICE_ID),
+                    )
+                })
                 .collect()
         })
         .unwrap_or_default();
 
     println!(
-        "{:<20} {:<16} {:<16} {:<14} {:<8} {:<8} {}",
-        "ID", "NAME", "DNS", "VIP", "STATUS", "AGENT", "ME"
+        "{:<20} {:<16} {:<16} {:<14} {:<8} {:<8} ME",
+        "ID", "NAME", "DNS", "VIP", "STATUS", "AGENT"
     );
     for device in reply.devices {
         let agent = match live.iter().find(|(id, _)| id == &device.device_id) {
@@ -219,7 +222,13 @@ pub(crate) async fn cmd_ls(ctx: &Ctx, path: &str) -> Result<()> {
             EntryKind::Symlink => "symlink",
             EntryKind::Other => "other",
         };
-        println!("{:<8} {:>10} {:<5o} {}", kind, e.size, e.mode & 0o777, e.name);
+        println!(
+            "{:<8} {:>10} {:<5o} {}",
+            kind,
+            e.size,
+            e.mode & 0o777,
+            e.name
+        );
     }
     Ok(())
 }
@@ -237,9 +246,7 @@ pub(crate) async fn cmd_copy(
     let dst = ctx.remote_to(to).await?;
 
     let (_, src_mode, first) = src.read(from, from_path, 0, COPY_PAGE).await?;
-    let mut writer = dst
-        .open_write(to, to_path, mode.or(Some(src_mode)))
-        .await?;
+    let mut writer = dst.open_write(to, to_path, mode.or(Some(src_mode))).await?;
     let mut total = 0u64;
     let mut page = first;
     let mut offset = 0u64;
@@ -268,7 +275,7 @@ pub(crate) async fn cmd_models(data_dir: &Path) -> Result<()> {
         println!("No models available. Run `envoy login` or type `/login` in the console.");
         return Ok(());
     }
-    println!("{:<18} {:<30} {:<10} {}", "PROVIDER", "MODEL", "AUTH", "ACTIVE");
+    println!("{:<18} {:<30} {:<10} ACTIVE", "PROVIDER", "MODEL", "AUTH");
     for m in models {
         let is_active = active
             .as_ref()

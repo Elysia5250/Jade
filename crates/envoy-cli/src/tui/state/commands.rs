@@ -282,6 +282,10 @@ impl App {
                 self.run_delegate_command(arg);
                 Action::None
             }
+            "effort" => {
+                self.run_effort_command(arg);
+                Action::None
+            }
             "mode" => {
                 if arg.is_empty() {
                     self.open_mode_picker();
@@ -457,7 +461,7 @@ impl App {
             "theme" | "themes" => self.run_command(Command::OpenThemePicker),
             "help" => {
                 self.push_notice(
-                    "Shortcuts: Click underlined paths to review in right Inspector - Drag divider to resize - Alt+1..5 switch Inspector tabs - Ctrl+B toggle panel - Ctrl+O expand/collapse tools & thinking - Shift+Tab cycle permissions - /monitor [list|stop <id>] - /rewind [id|last] - /mouse - /diff /open - /delegate [off|low|normal|high] - /worktree [name|merge|remove]",
+                    "Shortcuts: Click underlined paths to review in right Inspector - Drag divider to resize - Alt+1..5 switch Inspector tabs - Ctrl+B toggle panel - Ctrl+O expand/collapse tools & thinking - Shift+Tab cycle permissions - /monitor [list|stop <id>] - /rewind [id|last] - /mouse - /diff /open - /delegate [off|low|normal|high] - /effort [level] - /worktree [name|merge|remove]",
                     false,
                 );
                 Action::None

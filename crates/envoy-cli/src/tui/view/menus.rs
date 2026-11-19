@@ -78,10 +78,7 @@ pub(super) fn draw_cd_menu(frame: &mut Frame, app: &App, theme: &Theme, editor: 
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    " directory ",
-                    Style::default().fg(theme.dim),
-                )),
+                .title(Span::styled(" directory ", Style::default().fg(theme.dim))),
         )
         .highlight_style(
             Style::default()

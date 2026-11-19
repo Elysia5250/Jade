@@ -54,9 +54,7 @@ pub(super) fn draw_editor(
         ),
         InputMode::Shell => Span::styled(
             "$ ",
-            Style::default()
-                .fg(theme.warn)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
         ),
     };
     let text_budget = inner.width.saturating_sub(2) as usize;

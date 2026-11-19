@@ -1,13 +1,13 @@
 //! Render one headless turn's event stream to stdout and stderr.
 
-use crate::agent::AgentEvent;
-use crate::runtime::SeqEvent;
+use envoy_agent::agent::AgentEvent;
+use envoy_agent::runtime::SeqEvent;
 use std::io::Write;
 
 use super::OutputFormat;
 
 pub(super) struct TurnStreamDone {
-    pub(super) messages: Vec<crate::session::ChatMessage>,
+    pub(super) messages: Vec<envoy_agent::session::ChatMessage>,
     pub(super) input_tokens: u64,
     pub(super) output_tokens: u64,
     pub(super) context_tokens: u64,

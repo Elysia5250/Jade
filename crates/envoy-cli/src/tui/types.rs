@@ -1,8 +1,8 @@
 //! Shared UI layout, hit-testing, inspector, and mouse selection types.
 use super::diff::DiffLayout;
 use super::links::LinkedSpan;
-use crate::memory::MemoryNote;
-use crate::skills::SkillSummary;
+use envoy_agent::memory::MemoryNote;
+use envoy_agent::skills::SkillSummary;
 use envoy_proto::JobId;
 use ratatui::layout::Rect;
 use ratatui::style::Style;

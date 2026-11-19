@@ -46,11 +46,11 @@ impl App {
             } else {
                 RuleScope::User
             };
-            match crate::permissions::rules::save_rule(
+            match envoy_agent::permissions::rules::save_rule(
                 &self.data_dir,
                 &self.session.cwd,
                 scope,
-                crate::permissions::Effect::Allow,
+                envoy_agent::permissions::Effect::Allow,
                 pat,
             ) {
                 Ok(()) => self.set_toast(format!("allowed: {pat}"), false),
@@ -68,11 +68,11 @@ impl App {
             } else {
                 RuleScope::User
             };
-            match crate::permissions::rules::save_rule(
+            match envoy_agent::permissions::rules::save_rule(
                 &self.data_dir,
                 &self.session.cwd,
                 scope,
-                crate::permissions::Effect::Deny,
+                envoy_agent::permissions::Effect::Deny,
                 pat,
             ) {
                 Ok(()) => self.set_toast(format!("denied: {pat}"), false),
@@ -87,14 +87,15 @@ impl App {
     }
 
     pub(in crate::tui) fn run_mcp_command(&mut self, arg: &str) {
-        let report = crate::mcp::config::load_mcp_configs(&self.data_dir, &self.session.cwd);
+        let report = envoy_agent::mcp::config::load_mcp_configs(&self.data_dir, &self.session.cwd);
         if arg.trim() == "probe" {
             let data_dir = self.data_dir.clone();
             let cwd = self.session.cwd.clone();
             let notice = self.notice_tx.clone();
             self.set_toast("probing MCP servers.", false);
             tokio::spawn(async move {
-                let mgr = crate::mcp::client::McpManager::connect_configured(&data_dir, &cwd).await;
+                let mgr =
+                    envoy_agent::mcp::client::McpManager::connect_configured(&data_dir, &cwd).await;
                 let mut lines = Vec::new();
                 for p in mgr.skipped_untrusted() {
                     lines.push(format!(
@@ -128,8 +129,8 @@ impl App {
         }
         for s in &report.servers {
             let kind = match s.transport {
-                crate::mcp::config::McpTransportConfig::Stdio { .. } => "stdio",
-                crate::mcp::config::McpTransportConfig::Http { .. } => "http",
+                envoy_agent::mcp::config::McpTransportConfig::Stdio { .. } => "stdio",
+                envoy_agent::mcp::config::McpTransportConfig::Http { .. } => "http",
             };
             lines.push(format!(
                 "{} [{} - {}]{}",
@@ -150,7 +151,7 @@ impl App {
     pub(in crate::tui) fn run_skill_command(&mut self, arg: &str) {
         let name = arg.trim();
         if name.is_empty() {
-            let skills = crate::skills::discover_skills(&self.data_dir, &self.session.cwd);
+            let skills = envoy_agent::skills::discover_skills(&self.data_dir, &self.session.cwd);
             if skills.is_empty() {
                 self.push_notice(
                     "Skills: none found (add ~/.envoy/skills/<name>/SKILL.md or trust project .envoy/skills)",
@@ -165,7 +166,7 @@ impl App {
             self.push_notice(lines.join("\n"), false);
             return;
         }
-        match crate::skills::load_skill(&self.data_dir, &self.session.cwd, name) {
+        match envoy_agent::skills::load_skill(&self.data_dir, &self.session.cwd, name) {
             Ok(loaded) => {
                 let preview: String = loaded.body.chars().take(600).collect();
                 self.push_notice(
@@ -191,15 +192,18 @@ impl App {
             self.open_budget_picker();
             return;
         }
-        let Some(tier) = crate::agent::CompactionTier::parse(arg) else {
+        let Some(tier) = envoy_agent::agent::CompactionTier::parse(arg) else {
             self.set_toast("usage: /budget [native|focused|balanced|max|400k]", true);
             return;
         };
-        if let Err(e) = crate::agent::context::set_budget_tier(&self.data_dir, tier, Some(&model)) {
+        if let Err(e) =
+            envoy_agent::agent::context::set_budget_tier(&self.data_dir, tier, Some(&model))
+        {
             self.set_toast(format!("{e:#}"), true);
             return;
         }
-        let plan = crate::agent::context::resolve_budget(&self.data_dir, &prov.id, &model.model_id);
+        let plan =
+            envoy_agent::agent::context::resolve_budget(&self.data_dir, &prov.id, &model.model_id);
         self.set_toast(
             format!(
                 "budget: {} -> compact at {} (hard {})",
@@ -212,7 +216,7 @@ impl App {
     }
 
     pub(in crate::tui) fn run_delegate_command(&mut self, arg: &str) {
-        use crate::agent::delegate_pref::{self, DelegateLevel};
+        use envoy_agent::agent::delegate_pref::{self, DelegateLevel};
         if arg.is_empty() {
             let level = delegate_pref::load(&self.data_dir);
             self.set_toast(format!("delegate: {level} (off, low, normal, high)"), false);
@@ -232,6 +236,40 @@ impl App {
         );
     }
 
+    pub(in crate::tui) fn run_effort_command(&mut self, arg: &str) {
+        use envoy_agent::agent::effort;
+        let level = effort::load(&self.data_dir);
+        let spec = resolve_active_provider(&self.data_dir).and_then(|(prov, model)| {
+            effort::advertised(&self.data_dir, &prov.id, &model.model_id).map(|spec| (prov, spec))
+        });
+        if arg.is_empty() {
+            let detail = match &spec {
+                Some((_, spec)) => effort::describe(Some(spec)),
+                None => effort::describe(None),
+            };
+            self.set_toast(format!("effort: {level} ({detail})"), false);
+            return;
+        }
+        let Some(level) = effort::normalize(arg) else {
+            self.set_toast("usage: /effort [level]", true);
+            return;
+        };
+        if let Some((prov, spec)) = &spec {
+            if !effort::accepts(spec, prov.protocol, &level) {
+                self.set_toast(effort::describe(Some(spec)), true);
+                return;
+            }
+        }
+        if let Err(err) = effort::set(&self.data_dir, &level) {
+            self.set_toast(err, true);
+            return;
+        }
+        self.set_toast(
+            format!("effort: {level} (applies on the next request)"),
+            false,
+        );
+    }
+
     pub(in crate::tui) fn run_worktree_command(&mut self, arg: &str) {
         if !self.target.is_empty() && self.target != "local" {
             self.set_toast("worktree is local only", true);
@@ -241,10 +279,10 @@ impl App {
             self.set_toast("wait for the active turn to finish", true);
             return;
         }
-        match crate::worktree::execute(&self.session.cwd, arg) {
-            Ok(crate::worktree::Effect::Listed(text)) => self.push_notice(text, false),
-            Ok(crate::worktree::Effect::Toast(text)) => self.set_toast(text, false),
-            Ok(crate::worktree::Effect::Enter {
+        match envoy_agent::worktree::execute(&self.session.cwd, arg) {
+            Ok(envoy_agent::worktree::Effect::Listed(text)) => self.push_notice(text, false),
+            Ok(envoy_agent::worktree::Effect::Toast(text)) => self.set_toast(text, false),
+            Ok(envoy_agent::worktree::Effect::Enter {
                 path,
                 resume,
                 notice,

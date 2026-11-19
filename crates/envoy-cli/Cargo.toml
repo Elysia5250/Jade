@@ -1,6 +1,6 @@
 [package]
 name = "envoy-cli"
-description = "Standalone CLI, daemon, and stdio MCP server for the Envoy agent"
+description = "Standalone CLI, daemon, and terminal console for the Envoy agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,29 +11,21 @@ name = "envoy"
 path = "src/main.rs"
 
 [dependencies]
+envoy-agent = { path = "../envoy-agent" }
 envoy-core = { path = "../envoy-core" }
 envoy-proto = { path = "../envoy-proto" }
 envoy-service = { path = "../envoy-service" }
 anyhow.workspace = true
 base64.workspace = true
-ratatui = "0.29"
 clap.workspace = true
 futures.workspace = true
 getrandom = "0.3"
+ratatui = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
 similar = { version = "2", features = ["inline"] }
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-tree-sitter = "0.25"
-tree-sitter-rust = "0.24"
 unicode-width = "0.2"
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
-[dev-dependencies]
-postcard.workspace = true

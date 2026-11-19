@@ -16,17 +16,13 @@ pub(super) fn draw_diff_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
     let body_area = chunks[1];
     app.inspector.height = body_area.height;
 
-    let selected_path = app
-        .inspector
-        .file_path
-        .clone()
-        .or_else(|| {
-            app.session
-                .changed_files
-                .get(app.inspector.selected_diff)
-                .or_else(|| app.session.changed_files.last())
-                .map(|fc| fc.path.clone())
-        });
+    let selected_path = app.inspector.file_path.clone().or_else(|| {
+        app.session
+            .changed_files
+            .get(app.inspector.selected_diff)
+            .or_else(|| app.session.changed_files.last())
+            .map(|fc| fc.path.clone())
+    });
 
     let Some(raw_path) = selected_path else {
         app.inspector.diff_hunk_lines.clear();
@@ -35,10 +31,7 @@ pub(super) fn draw_diff_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(""),
-                Line::styled(
-                    "  No modified files yet.",
-                    Style::default().fg(theme.dim),
-                ),
+                Line::styled("  No modified files yet.", Style::default().fg(theme.dim)),
                 Line::styled(
                     "  Click any edited file link or run /diff <path>.",
                     Style::default().fg(theme.dim),
@@ -107,18 +100,22 @@ pub(super) fn draw_diff_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
             LinkedSpan {
                 span: Span::styled(
                     format!(" {file_title}"),
-                    Style::default()
-                        .fg(theme.text)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
                 ),
                 target: None,
             },
             LinkedSpan {
-                span: Span::styled(format!(" +{}", rendered.added), Style::default().fg(theme.ok)),
+                span: Span::styled(
+                    format!(" +{}", rendered.added),
+                    Style::default().fg(theme.ok),
+                ),
                 target: None,
             },
             LinkedSpan {
-                span: Span::styled(format!(" -{}", rendered.removed), Style::default().fg(theme.bad)),
+                span: Span::styled(
+                    format!(" -{}", rendered.removed),
+                    Style::default().fg(theme.bad),
+                ),
                 target: None,
             },
         ]),

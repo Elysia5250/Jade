@@ -150,7 +150,11 @@ impl LogWriter {
 ///
 /// Returns the records and the cursor for the next call. A partially written
 /// trailing record is left untouched so the next call re-reads it whole.
-pub fn read_from(path: &Path, offset: u64, max_bytes: usize) -> std::io::Result<(Vec<LogRecord>, u64)> {
+pub fn read_from(
+    path: &Path,
+    offset: u64,
+    max_bytes: usize,
+) -> std::io::Result<(Vec<LogRecord>, u64)> {
     let mut file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), offset)),
@@ -260,7 +264,10 @@ mod tests {
         // Simulate a writer caught mid-record: header claims 10 bytes, only 3 exist.
         {
             use std::io::Write as _;
-            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
             f.write_all(&[0u8]).unwrap();
             f.write_all(&10u32.to_be_bytes()).unwrap();
             f.write_all(b"abc").unwrap();

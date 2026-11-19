@@ -176,16 +176,9 @@ impl JobResult {
 /// Lifecycle of a job. `Queued` waits for a free slot in its group.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JobState {
-    Queued {
-        since_ms: u64,
-    },
-    Running {
-        since_ms: u64,
-    },
-    Done {
-        at_ms: u64,
-        result: JobResult,
-    },
+    Queued { since_ms: u64 },
+    Running { since_ms: u64 },
+    Done { at_ms: u64, result: JobResult },
 }
 
 impl JobState {
@@ -272,14 +265,18 @@ pub enum Op {
     Submit(SubmitRequest),
     /// All known jobs, oldest first.
     Jobs,
-    JobStatus { id: JobId },
+    JobStatus {
+        id: JobId,
+    },
     /// Read (and optionally follow) a job's output log.
     JobLog {
         id: JobId,
         offset: u64,
         follow: bool,
     },
-    JobCancel { id: JobId },
+    JobCancel {
+        id: JobId,
+    },
     /// Read up to `limit` bytes at `offset` (`limit` 0 = [`READ_LIMIT`]).
     Read {
         path: String,
@@ -287,9 +284,14 @@ pub enum Op {
         limit: u64,
     },
     /// Write a file: `Data` frames follow the call, `End` commits it.
-    Write { path: String, mode: Option<u32> },
+    Write {
+        path: String,
+        mode: Option<u32>,
+    },
     /// One directory level, sorted, no filtering.
-    List { path: String },
+    List {
+        path: String,
+    },
     /// Replace an exact snippet in a text file, atomically.
     Edit {
         path: String,
@@ -362,12 +364,22 @@ pub enum ClientMsg {
 pub enum Reply {
     Hello(Hello),
     /// The target machine refused: agent disabled or caller not allowlisted.
-    Denied { reason: String },
-    Failed { error: String },
+    Denied {
+        reason: String,
+    },
+    Failed {
+        error: String,
+    },
     /// A submitted job was accepted; `job.state` may already be running.
-    Accepted { job: Job },
-    Jobs { jobs: Vec<Job> },
-    Job { job: Job },
+    Accepted {
+        job: Job,
+    },
+    Jobs {
+        jobs: Vec<Job>,
+    },
+    Job {
+        job: Job,
+    },
     /// A batch of output records. `next` is the cursor for the next call;
     /// `finished` is set once the job is done and nothing further will arrive.
     Log {
@@ -377,18 +389,34 @@ pub enum Reply {
         finished: Option<i32>,
     },
     /// Precedes `Read` payload: whole-file size and permission bits.
-    Meta { size: u64, mode: u32 },
-    Data { data: Vec<u8> },
-    Listing { entries: Vec<Entry> },
+    Meta {
+        size: u64,
+        mode: u32,
+    },
+    Data {
+        data: Vec<u8>,
+    },
+    Listing {
+        entries: Vec<Entry>,
+    },
     /// The file was rewritten in place; `replacements` is how many times the
     /// snippet was replaced.
-    Edited { replacements: usize },
+    Edited {
+        replacements: usize,
+    },
     /// Matching relative paths from `Op::Glob`.
-    GlobMatches { paths: Vec<String> },
+    GlobMatches {
+        paths: Vec<String>,
+    },
     /// Matching text hits from `Op::Grep`.
-    GrepMatches { matches: Vec<GrepHit> },
+    GrepMatches {
+        matches: Vec<GrepHit>,
+    },
     /// Terminal event for Probe/Read/List/Cancel/Write/Glob/Grep. `code` is 0 on success.
-    Done { code: i32, ms: u64 },
+    Done {
+        code: i32,
+        ms: u64,
+    },
 }
 
 #[cfg(test)]
@@ -424,7 +452,10 @@ mod tests {
                 assert_eq!(req.timeout_s, 7);
                 assert!(matches!(
                     req.sandbox,
-                    SandboxPolicy::WorkspaceWrite { allow_net: false, .. }
+                    SandboxPolicy::WorkspaceWrite {
+                        allow_net: false,
+                        ..
+                    }
                 ));
             }
             _ => panic!("wrong op"),

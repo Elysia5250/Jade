@@ -84,7 +84,7 @@ impl App {
             }
             return Action::None;
         }
-        if crate::permissions::paths::path_has_protected_component(&path) {
+        if envoy_agent::permissions::paths::path_has_protected_component(&path) {
             if let Some(welcome) = self.welcome.as_mut() {
                 welcome.error = Some("refusing to create a folder inside a protected path".into());
             }
@@ -114,14 +114,14 @@ pub(super) fn create_workspace_dir(parent: &Path, name: &str) -> Result<PathBuf,
     {
         return Err("folder name must be a single directory".into());
     }
-    if crate::permissions::paths::path_has_protected_component(Path::new(name)) {
+    if envoy_agent::permissions::paths::path_has_protected_component(Path::new(name)) {
         return Err("refusing a protected folder name".into());
     }
     if !parent.is_dir() {
         return Err("not a directory".into());
     }
     let parent = std::fs::canonicalize(parent).map_err(|_| "not a directory".to_string())?;
-    if crate::permissions::paths::path_has_protected_component(&parent) {
+    if envoy_agent::permissions::paths::path_has_protected_component(&parent) {
         return Err("refusing to create a folder inside a protected path".into());
     }
     let dest = parent.join(name);

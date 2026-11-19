@@ -14,16 +14,16 @@ pub mod transport;
 pub use client::{
     cancel, edit, jobs, list, logs, open, probe, read, status, submit, write, Conn, WriteStream,
 };
+pub use conduit::{
+    default_control_socket, spawn_accept_pool, ConduitClient, ConduitDialer, Device, DevicesReply,
+    Status, WsByteStream, DEFAULT_POOL,
+};
 pub use envoy_proto::{
     GrepHit, Hello, Job, JobId, JobResult, JobState, LogRecord, SandboxPolicy, SubmitRequest,
     TaskSpec,
 };
 pub use remote::{glob, grep, Remote};
 pub use server::AgentServer;
-pub use conduit::{
-    default_control_socket, spawn_accept_pool, ConduitClient, ConduitDialer, Device, DevicesReply,
-    Status, WsByteStream, DEFAULT_POOL,
-};
 pub use transport::{AgentDialer, AgentHost, AgentStream, BoxStream, StaticHost, StoreHost};
 
 #[cfg(unix)]

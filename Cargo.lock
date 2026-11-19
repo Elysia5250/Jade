@@ -368,7 +368,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
-name = "envoy-cli"
+name = "envoy-agent"
 version = "0.3.0"
 dependencies = [
  "anyhow",
@@ -381,7 +381,6 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
  "postcard",
- "ratatui",
  "reqwest",
  "serde",
  "serde_json",
@@ -389,9 +388,31 @@ dependencies = [
  "similar",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "tree-sitter",
  "tree-sitter-rust",
+]
+
+[[package]]
+name = "envoy-cli"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "envoy-agent",
+ "envoy-core",
+ "envoy-proto",
+ "envoy-service",
+ "futures",
+ "getrandom 0.3.4",
+ "ratatui",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "similar",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
  "unicode-width 0.2.0",
 ]
 

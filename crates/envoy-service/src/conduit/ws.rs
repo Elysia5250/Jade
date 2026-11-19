@@ -43,7 +43,7 @@ impl<S> WsByteStream<S> {
 fn ws_err(e: WsError) -> io::Error {
     match e {
         WsError::Io(e) => e,
-        other => io::Error::new(io::ErrorKind::Other, other.to_string()),
+        other => io::Error::other(other.to_string()),
     }
 }
 
@@ -147,7 +147,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WsByteStream<S> {
         if this.shutdown {
             return Poll::Ready(Ok(()));
         }
-        if let Poll::Pending = this.poll_send_buffer(cx) {
+        if this.poll_send_buffer(cx).is_pending() {
             return Poll::Pending;
         }
         let _ = Pin::new(&mut this.inner).start_send(Message::Close(None));
@@ -158,4 +158,3 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WsByteStream<S> {
         flushed
     }
 }
-

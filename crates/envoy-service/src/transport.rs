@@ -5,8 +5,8 @@
 //! [`AgentStream`] to `AgentServer::serve_stream` (server side). Any policy
 //! source implements [`AgentHost`].
 
-use envoy_core::{AgentConfig, AgentConfigStore};
 use anyhow::{Context, Result};
+use envoy_core::{AgentConfig, AgentConfigStore};
 use futures::future::BoxFuture;
 use std::io;
 use std::path::PathBuf;
@@ -58,7 +58,11 @@ impl AsyncWrite for BoxStream {
 
 /// A transport adapter: opens an agent stream to `peer` for `service_id`.
 pub trait AgentDialer: Send + Sync + 'static {
-    fn open_stream<'a>(&'a self, peer: &'a str, service_id: u16) -> BoxFuture<'a, Result<BoxStream>>;
+    fn open_stream<'a>(
+        &'a self,
+        peer: &'a str,
+        service_id: u16,
+    ) -> BoxFuture<'a, Result<BoxStream>>;
 }
 
 impl AgentDialer for Box<dyn AgentDialer> {

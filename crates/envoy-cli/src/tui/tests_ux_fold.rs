@@ -3,12 +3,7 @@ use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::MouseEvent;
 
 fn test_app(dir: &std::path::Path) -> App {
-    let mut app = App::new(
-        dir.to_path_buf(),
-        "local".into(),
-        None,
-        dir.to_path_buf(),
-    );
+    let mut app = App::new(dir.to_path_buf(), "local".into(), None, dir.to_path_buf());
     app.connected = true;
     app.show_sidebar = false;
     app
@@ -87,7 +82,12 @@ fn consecutive_failed_commands_and_non_edit_tools_fold_into_one_line() {
 
     push_tool(&mut app, "read", "read Cargo.toml", CardStatus::Done);
     push_tool(&mut app, "exec", "$ pwd; exit 7", CardStatus::Error);
-    push_tool(&mut app, "skill", "skill nonexistent-skill", CardStatus::Error);
+    push_tool(
+        &mut app,
+        "skill",
+        "skill nonexistent-skill",
+        CardStatus::Error,
+    );
     let mid_thought = app.session.alloc_id();
     app.session.items.push(TranscriptItem::Assistant {
         id: mid_thought,
@@ -98,8 +98,18 @@ fn consecutive_failed_commands_and_non_edit_tools_fold_into_one_line() {
         done: true,
         error: None,
     });
-    push_tool(&mut app, "webfetch", "fetch https://example.com", CardStatus::Done);
-    push_tool(&mut app, "delegate", "delegate explore workspace", CardStatus::Done);
+    push_tool(
+        &mut app,
+        "webfetch",
+        "fetch https://example.com",
+        CardStatus::Done,
+    );
+    push_tool(
+        &mut app,
+        "delegate",
+        "delegate explore workspace",
+        CardStatus::Done,
+    );
 
     let text = draw_rows(&mut app, 110, 32).join("\n");
     assert!(
@@ -365,11 +375,17 @@ fn running_tools_and_groups_render_progressive_phrases_with_decrypt_effect() {
         started_ms: now_ms(),
     });
 
-    assert_eq!(running_group_phrase(&app.session.items[1..3]), "Running commands");
+    assert_eq!(
+        running_group_phrase(&app.session.items[1..3]),
+        "Running commands"
+    );
 
     let rendered = draw_rows(&mut app, 110, 28).join("\n");
     for spinner_ch in ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] {
-        assert!(!rendered.contains(spinner_ch), "unexpected spinner {spinner_ch}:\n{rendered}");
+        assert!(
+            !rendered.contains(spinner_ch),
+            "unexpected spinner {spinner_ch}:\n{rendered}"
+        );
     }
     assert!(
         !rendered.contains("src/main.rs") && !rendered.contains("cargo test"),
@@ -447,7 +463,9 @@ fn done_and_failed_single_tools_fold_without_check_or_cross_badges() {
         "collapsed transcript should hide leading check and cross glyphs:\n{text}"
     );
     assert!(
-        text.contains("> 1 tool") && text.contains("> Edited 1 file") && text.contains("> Ran 1 command (failed)"),
+        text.contains("> 1 tool")
+            && text.contains("> Edited 1 file")
+            && text.contains("> Ran 1 command (failed)"),
         "single finished/failed tools should fold cleanly with uniform '>':\n{text}"
     );
 

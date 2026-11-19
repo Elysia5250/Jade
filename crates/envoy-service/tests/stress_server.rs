@@ -10,11 +10,10 @@ use std::time::{Duration, Instant};
 use tokio::net::UnixListener;
 
 fn tmpdir(tag: &str) -> PathBuf {
-    let n = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let p = std::env::temp_dir().join(format!("envoy-svc-stress-{tag}-{n}"));
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Keep socket paths well under macOS SUN_LEN (104 bytes).
+    let p = PathBuf::from("/tmp").join(format!("es-{tag}-{}-{seq}", std::process::id()));
     let _ = std::fs::remove_dir_all(&p);
     std::fs::create_dir_all(&p).unwrap();
     p
@@ -127,7 +126,9 @@ async fn stress_24_concurrent_clients_with_aborted_followers() {
     // Verify server still answers cleanly after connection aborts.
     let list = remote.jobs("local").await.unwrap();
     assert_eq!(list.len(), 24);
-    assert!(list.iter().all(|j| matches!(j.state, JobState::Done { .. })));
+    assert!(list
+        .iter()
+        .all(|j| matches!(j.state, JobState::Done { .. })));
 
     let _ = stop_tx.send(());
     let _ = accept_task.await;

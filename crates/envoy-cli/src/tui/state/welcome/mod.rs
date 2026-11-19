@@ -170,7 +170,7 @@ impl App {
             };
         }
         if skills {
-            return match crate::skills::prefs::create_user_skill(&self.data_dir, &draft) {
+            return match envoy_agent::skills::prefs::create_user_skill(&self.data_dir, &draft) {
                 Ok(path) => {
                     let name = draft.trim().to_string();
                     if let Some(welcome) = self.welcome.as_mut() {
@@ -197,7 +197,7 @@ impl App {
             };
         }
         if memory {
-            return match crate::memory::create(&self.data_dir, &draft) {
+            return match envoy_agent::memory::create(&self.data_dir, &draft) {
                 Ok(note) => {
                     let id = note.id.clone();
                     let path = note.path.clone();
@@ -348,11 +348,11 @@ impl App {
     }
 
     fn recount_welcome(&mut self) {
-        let skill_count = crate::skills::discover_skills(&self.data_dir, &self.session.cwd)
+        let skill_count = envoy_agent::skills::discover_skills(&self.data_dir, &self.session.cwd)
             .into_iter()
-            .filter(|skill| skill.scope == crate::skills::SkillScope::User)
+            .filter(|skill| skill.scope == envoy_agent::skills::SkillScope::User)
             .count();
-        let memory_count = crate::memory::list(&self.data_dir).len();
+        let memory_count = envoy_agent::memory::list(&self.data_dir).len();
         if let Some(welcome) = self.welcome.as_mut() {
             welcome.skill_count = skill_count;
             welcome.memory_count = memory_count;

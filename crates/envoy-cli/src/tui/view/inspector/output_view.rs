@@ -181,8 +181,8 @@ pub(super) fn draw_inspect_view(frame: &mut Frame, app: &mut App, theme: &Theme,
         }
     } else {
         // Show workspace skills & MCP servers details as general inspect view
-        let mcp = crate::mcp::config::load_mcp_configs(&app.data_dir, &app.session.cwd);
-        let skills = crate::skills::discover_skills(&app.data_dir, &app.session.cwd);
+        let mcp = envoy_agent::mcp::config::load_mcp_configs(&app.data_dir, &app.session.cwd);
+        let skills = envoy_agent::skills::discover_skills(&app.data_dir, &app.session.cwd);
         lines.push(Line::styled(
             " WORKSPACE INSPECTOR",
             Style::default()

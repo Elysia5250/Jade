@@ -14,7 +14,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
     let unauthed = if let Some((prov, model)) = resolve_active_provider(&app.data_dir) {
         let (used, estimated) = context_used(&app.session);
         let budget =
-            crate::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
+            envoy_agent::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
         let window = budget.compact_at;
         let ratio = if window == 0 {
             0.0

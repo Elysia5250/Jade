@@ -1,5 +1,5 @@
 use super::*;
-use crate::agent::delegate_pref::{self, DelegateLevel};
+use envoy_agent::agent::delegate_pref::{self, DelegateLevel};
 
 fn tmpdir() -> PathBuf {
     let n = std::time::SystemTime::now()

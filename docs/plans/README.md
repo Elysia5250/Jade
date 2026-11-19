@@ -29,5 +29,12 @@ Exact commands / PTY checks.
 
 Active plans:
 
+- (none)
+
+Completed plans:
+
+- `extract-agent-crate-and-harden-ci.md` — harden CI (clippy/fmt/macOS),
+  extract `envoy-agent` out of `envoy-cli`, trim redline files, and record
+  core ADRs.
 - `modularize-agent-and-console.md` — split the console state/view and the
-  agent loop before adding compaction and permissions.
+  agent loop, clear the 700-line baseline, and land compaction/permissions/MCP.

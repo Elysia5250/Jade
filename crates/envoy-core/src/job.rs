@@ -8,9 +8,7 @@ use crate::exec::{self, ExecSpec};
 use crate::fs;
 use crate::log::{self, JobLogs, LogWriter};
 use anyhow::{bail, Result};
-use envoy_proto::{
-    Job, JobId, JobResult, JobState, SandboxPolicy, SubmitRequest, DEFAULT_GROUP,
-};
+use envoy_proto::{Job, JobId, JobResult, JobState, SandboxPolicy, SubmitRequest, DEFAULT_GROUP};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -290,7 +288,8 @@ impl Jobs {
 
     /// Start every queued job whose group has capacity.
     fn schedule(&self) {
-        let starts: Vec<(JobId, Job, Vec<(String, String)>, u64, SandboxPolicy)> = {
+        type ScheduledStart = (JobId, Job, Vec<(String, String)>, u64, SandboxPolicy);
+        let starts: Vec<ScheduledStart> = {
             let mut t = self.inner.table.lock().unwrap();
             let queued: Vec<JobId> = t
                 .jobs
@@ -538,8 +537,14 @@ mod tests {
         let jobs = Jobs::open(dir.clone(), 1);
         let a = jobs.submit(shell("sleep 0.25"), "local").unwrap();
         let b = jobs.submit(shell("echo second"), "local").unwrap();
-        assert!(matches!(jobs.get(a.id).unwrap().state, JobState::Running { .. }));
-        assert!(matches!(jobs.get(b.id).unwrap().state, JobState::Queued { .. }));
+        assert!(matches!(
+            jobs.get(a.id).unwrap().state,
+            JobState::Running { .. }
+        ));
+        assert!(matches!(
+            jobs.get(b.id).unwrap().state,
+            JobState::Queued { .. }
+        ));
 
         let done_b = wait_done(&jobs, b.id).await;
         assert_eq!(done_b.state.exit_code(), Some(0));
@@ -552,7 +557,10 @@ mod tests {
         let jobs = Jobs::open(dir.clone(), 1);
         let a = jobs.submit(shell("sleep 0.2"), "local").unwrap();
         let b = jobs.submit(shell("echo second"), "local").unwrap();
-        assert!(matches!(jobs.get(b.id).unwrap().state, JobState::Queued { .. }));
+        assert!(matches!(
+            jobs.get(b.id).unwrap().state,
+            JobState::Queued { .. }
+        ));
 
         jobs.set_max_jobs(2);
         for _ in 0..200 {
@@ -583,10 +591,11 @@ mod tests {
         }
         jobs.cancel(job.id).unwrap();
         let done = wait_done(&jobs, job.id).await;
-        assert!(matches!(
-            done.state.result(),
-            Some(JobResult::Killed)
-        ), "{:?}", done.state);
+        assert!(
+            matches!(done.state.result(), Some(JobResult::Killed)),
+            "{:?}",
+            done.state
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -595,7 +604,9 @@ mod tests {
         let dir = tmpdir("cancel-queued");
         let jobs = Jobs::open(dir.clone(), 1);
         let running = jobs.submit(shell("sleep 0.3"), "local").unwrap();
-        let queued = jobs.submit(shell("touch /tmp/should-not-exist-envoy"), "local").unwrap();
+        let queued = jobs
+            .submit(shell("touch /tmp/should-not-exist-envoy"), "local")
+            .unwrap();
         jobs.cancel(queued.id).unwrap();
         let done = wait_done(&jobs, queued.id).await;
         assert!(matches!(done.state.result(), Some(JobResult::Killed)));

@@ -1,14 +1,14 @@
 //! Headless / non-interactive execution mode (`envoy -p ...`) for CI,
 //! scripts, and containerized agent benchmarks (e.g. Terminal-Bench / Harbor).
 
-use crate::agent::AskBroker;
-use crate::daemon;
-use crate::permissions::{PermissionMode, SandboxOverride};
-use crate::runtime::{Runtime, SendMode};
-use crate::session::{latest_session_for_cwd, load_session, save_session, ChatRole, Session};
 use crate::Ctx;
 use anyhow::{bail, Context, Result};
 use clap::{Args, ValueEnum};
+use envoy_agent::agent::AskBroker;
+use envoy_agent::daemon;
+use envoy_agent::permissions::{PermissionMode, SandboxOverride};
+use envoy_agent::runtime::{Runtime, SendMode};
+use envoy_agent::session::{latest_session_for_cwd, load_session, save_session, ChatRole, Session};
 use envoy_service::AgentServer;
 use serde::Serialize;
 use std::io::{Read, Write};
@@ -342,11 +342,11 @@ use output::collect_events;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::AgentEvent;
-    use crate::auth::{
+    use envoy_agent::agent::AgentEvent;
+    use envoy_agent::auth::{
         now_ms, record_provider_login, Credential, ProviderProtocol, StoredProvider,
     };
-    use crate::runtime::SeqEvent;
+    use envoy_agent::runtime::SeqEvent;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
@@ -387,7 +387,7 @@ mod tests {
         addr
     }
 
-    fn setup_provider(data: &PathBuf, addr: std::net::SocketAddr) {
+    fn setup_provider(data: &std::path::Path, addr: std::net::SocketAddr) {
         let prov = StoredProvider {
             id: "openai".into(),
             name: "Mock OpenAI".into(),

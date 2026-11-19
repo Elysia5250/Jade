@@ -2,7 +2,7 @@
 use super::links::LinkedSpan;
 use super::theme::Theme;
 use super::types::HitTarget;
-use crate::session::{CardStatus, TranscriptItem};
+use envoy_agent::session::{CardStatus, TranscriptItem};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 
@@ -50,12 +50,7 @@ fn pick_noise(avoid: char, tick: u64, pos: usize, salt: u64) -> char {
 }
 
 /// Computes the ping-pong reveal cursor and single-width scrambled tail at `elapsed_ms`.
-pub(crate) fn decrypt_frame(
-    text: &str,
-    prefix: usize,
-    elapsed_ms: u64,
-    salt: u64,
-) -> DecryptFrame {
+pub(crate) fn decrypt_frame(text: &str, prefix: usize, elapsed_ms: u64, salt: u64) -> DecryptFrame {
     let chars: Vec<char> = text.chars().collect();
     let n = chars.len();
     let prefix = prefix.min(n);

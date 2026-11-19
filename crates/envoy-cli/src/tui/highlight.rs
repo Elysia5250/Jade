@@ -164,8 +164,22 @@ fn is_keyword(lang: Lang, word: &str) -> bool {
         ),
         Lang::Shell => matches!(
             word,
-            "if" | "then" | "else" | "elif" | "fi" | "for" | "in" | "do" | "done" | "case"
-                | "esac" | "while" | "function" | "export" | "local" | "return" | "true"
+            "if" | "then"
+                | "else"
+                | "elif"
+                | "fi"
+                | "for"
+                | "in"
+                | "do"
+                | "done"
+                | "case"
+                | "esac"
+                | "while"
+                | "function"
+                | "export"
+                | "local"
+                | "return"
+                | "true"
                 | "false"
         ),
         Lang::Toml | Lang::Yaml | Lang::Json => matches!(word, "true" | "false" | "null"),
@@ -202,7 +216,9 @@ pub(crate) fn highlight_code_line<'a>(
     if lang == Lang::Toml && line.trim_start().starts_with('[') {
         return vec![Span::styled(
             line.to_string(),
-            base_style.fg(theme.syntax_type).add_modifier(Modifier::BOLD),
+            base_style
+                .fg(theme.syntax_type)
+                .add_modifier(Modifier::BOLD),
         )];
     }
 

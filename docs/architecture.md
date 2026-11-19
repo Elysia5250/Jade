@@ -32,14 +32,16 @@ Envoy is a daemon-owned agent with a thin terminal client.
 - The daemon is the source of truth for `running`; the console may be stale and
   must recover from a snapshot.
 
-## Module map (target)
+## Module map
 
 ```text
-crates/envoy-cli/src/
-  main.rs                 CLI parsing and command dispatch
-  cli_ops.rs              Extracted CLI status, device, and file subcommands
+crates/envoy-agent/src/
   daemon.rs               daemon lifecycle
   session.rs              session/transcript persistence
+  memory.rs               project/user memory store
+  worktree/               local git worktree management
+  auth/                   provider credentials, OAuth/PKCE, routing
+  hooks/                  deterministic lifecycle hooks
   runtime/                daemon-side session runtime, client, attach protocol
   agent/
     loop.rs               single agent loop, turn boundaries, overflow retry
@@ -51,6 +53,12 @@ crates/envoy-cli/src/
   permissions/            modes, rules, paths, shell, approval, audit
   skills/                 SKILL.md discovery, frontmatter parser, trust gate
   mcp/                    bidirectional MCP server (stdio) and client (stdio + HTTP/SSE)
+
+crates/envoy-cli/src/
+  main.rs                 CLI entrypoint and command dispatch
+  cli_args.rs             clap argument and subcommand definitions
+  cli_ops.rs              CLI status, device, and file subcommands
+  headless/               non-interactive `envoy -p` / `envoy ask` mode
   tui/
     mod.rs                terminal setup + run loop
     commands.rs           slash command registry (/compact, /handoff, /budget, /permissions, /mcp, /skill, ...)
@@ -59,9 +67,6 @@ crates/envoy-cli/src/
     text.rs               wrapping/markdown helpers
     theme.rs              color tokens
 ```
-
-`llm.rs` is a thin compatibility facade that re-exports `agent::*`; new code
-should import from `agent` directly.
 
 ## Context lifecycle
 
@@ -83,11 +88,12 @@ should import from `agent` directly.
 
 ## Where to look
 
-- Protocol: `crates/envoy-proto/src/lib.rs`, `crates/envoy-cli/src/runtime/`
+- Protocol: `crates/envoy-proto/src/lib.rs`, `crates/envoy-agent/src/runtime/`
 - Sandbox & search: `crates/envoy-core/src/{sandbox.rs,seatbelt.rs,search.rs}`
-- Agent loop & tools: `crates/envoy-cli/src/agent/{loop.rs,tools/}`
-- Compaction: `crates/envoy-cli/src/agent/context/`
-- Permissions: `crates/envoy-cli/src/permissions/`
-- Skills & MCP: `crates/envoy-cli/src/{skills,mcp}/`
+- Agent loop & tools: `crates/envoy-agent/src/agent/{loop.rs,tools/}`
+- Compaction: `crates/envoy-agent/src/agent/context/`
+- Permissions: `crates/envoy-agent/src/permissions/`
+- Skills & MCP: `crates/envoy-agent/src/{skills,mcp}/`
 - Console: `crates/envoy-cli/src/tui/`
 - Research and rationale: `docs/HARNESS-RESEARCH.md`
+- Cross-repo `conduit` / `grain` / `envoy` split archive: root `ARCHITECTURE.md` (kept in sync across the three repos; this file is the live internal map for `envoy`)

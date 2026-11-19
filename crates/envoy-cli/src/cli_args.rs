@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 use envoy_proto::{SandboxPolicy, SubmitRequest, TaskSpec, DEFAULT_GROUP};
 use std::path::PathBuf;
 
-use crate::mcp;
+use envoy_agent::mcp;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Commands {

@@ -217,7 +217,7 @@ fn cursor_style_collapsed_explore_group_and_reasoning_expand_on_click() {
             subtitle: String::new(),
             job_id: None,
             target: "local".into(),
-            output: vec![crate::session::OutputLine {
+            output: vec![envoy_agent::session::OutputLine {
                 text: "line".into(),
                 err: false,
             }],

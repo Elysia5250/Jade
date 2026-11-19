@@ -1,7 +1,7 @@
 //! Workspace file index and automatic underlined clickable file-link resolution.
 use super::theme::Theme;
 use super::HitTarget;
-use crate::session::FileChange;
+use envoy_agent::session::FileChange;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 use std::collections::HashMap;
@@ -220,7 +220,9 @@ pub(crate) fn normalize_display_path(cwd: &Path, path: &Path) -> String {
 }
 
 pub(crate) fn split_path_and_line(raw: &str) -> Option<(String, Option<usize>)> {
-    let mut s = raw.trim().trim_matches(|c| matches!(c, '"' | '\'' | '(' | ')' | '[' | ']' | ',' | ';'));
+    let mut s = raw
+        .trim()
+        .trim_matches(|c| matches!(c, '"' | '\'' | '(' | ')' | '[' | ']' | ',' | ';'));
     if let Some(rest) = s.strip_prefix("file://") {
         s = rest;
     }
@@ -362,8 +364,7 @@ pub(crate) fn inline_spans_linked(
         }
 
         // Inline code: `...`
-        if rest.starts_with('`') {
-            let after = &rest[1..];
+        if let Some(after) = rest.strip_prefix('`') {
             if let Some(end) = after.find('`') {
                 if end > 0 {
                     flush_plain(&mut plain, &mut out);
@@ -458,7 +459,23 @@ fn push_plain_with_bare_links(
     let mut buf = String::new();
     for (idx, ch) in text.char_indices() {
         let is_sep = ch.is_whitespace()
-            || matches!(ch, '(' | ')' | '[' | ']' | '<' | '>' | ',' | ';' | '"' | '\'' | '，' | '。' | '；' | '（' | '）');
+            || matches!(
+                ch,
+                '(' | ')'
+                    | '['
+                    | ']'
+                    | '<'
+                    | '>'
+                    | ','
+                    | ';'
+                    | '"'
+                    | '\''
+                    | '，'
+                    | '。'
+                    | '；'
+                    | '（'
+                    | '）'
+            );
         if is_sep {
             if start < idx {
                 let tok = &text[start..idx];

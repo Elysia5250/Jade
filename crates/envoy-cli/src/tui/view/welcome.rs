@@ -115,7 +115,7 @@ fn draw_home(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
             theme,
             width,
             idx == welcome.selected,
-            &row_text(app, welcome, row),
+            &row_text(app, welcome, row, width),
         );
         if matches!(row, WelcomeRow::Account) {
             let status = if daemon::socket_path(&app.data_dir).exists() {
@@ -135,16 +135,27 @@ fn draw_home(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn row_text(app: &App, welcome: &Welcome, row: &WelcomeRow) -> String {
+fn row_text(app: &App, welcome: &Welcome, row: &WelcomeRow, width: usize) -> String {
+    // `push_choice` adds a 3-char prefix (" > " / "   ") and trims to `width`.
+    let body_max = width.saturating_sub(4);
     match row {
         WelcomeRow::Here(path, resumes) => {
+            let prefix = "current   ";
+            let shown = collapse_home(path);
             if *resumes {
-                format!("current   {}  (resumes)", collapse_home(path))
+                let suffix = "  (resumes)";
+                let path_max = body_max.saturating_sub(prefix.len() + suffix.len());
+                format!("{prefix}{}{suffix}", truncate_width(&shown, path_max))
             } else {
-                format!("current   {}", collapse_home(path))
+                format!("{prefix}{shown}")
             }
         }
-        WelcomeRow::Recent(_, label) => format!("recent    {label}  (resumes)"),
+        WelcomeRow::Recent(_, label) => {
+            let prefix = "recent    ";
+            let suffix = "  (resumes)";
+            let label_max = body_max.saturating_sub(prefix.len() + suffix.len());
+            format!("{prefix}{}{suffix}", truncate_width(label, label_max))
+        }
         WelcomeRow::OpenPath => "open a path...".to_string(),
         WelcomeRow::NewFolder => "new folder...".to_string(),
         WelcomeRow::Account => account_text(app),
@@ -180,7 +191,7 @@ pub(super) fn draw_welcome(frame: &mut Frame, app: &App, theme: &Theme, area: Re
 
     if let Some((prov, model)) = resolve_active_provider(&app.data_dir) {
         let budget =
-            crate::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
+            envoy_agent::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
         rows.push(Line::from(vec![
             Span::styled("  model  ", Style::default().fg(theme.dim)),
             Span::styled(
@@ -200,8 +211,8 @@ pub(super) fn draw_welcome(frame: &mut Frame, app: &App, theme: &Theme, area: Re
         ]));
     }
 
-    let mcp = crate::mcp::config::load_mcp_configs(&app.data_dir, &app.session.cwd);
-    let skills = crate::skills::discover_skills(&app.data_dir, &app.session.cwd);
+    let mcp = envoy_agent::mcp::config::load_mcp_configs(&app.data_dir, &app.session.cwd);
+    let skills = envoy_agent::skills::discover_skills(&app.data_dir, &app.session.cwd);
     rows.push(Line::from(vec![
         Span::styled("  tools  ", Style::default().fg(theme.dim)),
         Span::styled(

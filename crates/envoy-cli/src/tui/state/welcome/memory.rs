@@ -3,7 +3,7 @@ use super::super::*;
 
 impl App {
     pub(super) fn reload_welcome_notes(&mut self) {
-        let notes = crate::memory::list(&self.data_dir);
+        let notes = envoy_agent::memory::list(&self.data_dir);
         if let Some(welcome) = self.welcome.as_mut() {
             let len = notes.len();
             if len == 0 {
@@ -71,7 +71,7 @@ impl App {
             return;
         };
         let selected = self.welcome.as_ref().map(|w| w.list_selected).unwrap_or(0);
-        if let Err(err) = crate::memory::set_enabled(&note, !note.enabled) {
+        if let Err(err) = envoy_agent::memory::set_enabled(&note, !note.enabled) {
             if let Some(welcome) = self.welcome.as_mut() {
                 welcome.error = Some(err);
             }
@@ -94,7 +94,7 @@ impl App {
         else {
             return;
         };
-        if let Err(err) = crate::memory::delete(&note) {
+        if let Err(err) = envoy_agent::memory::delete(&note) {
             if let Some(welcome) = self.welcome.as_mut() {
                 welcome.error = Some(err);
             }

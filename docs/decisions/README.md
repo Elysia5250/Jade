@@ -18,10 +18,10 @@ What did we choose?
 What gets easier, what gets harder, and what did we explicitly not do?
 ```
 
-Current decisions worth recording as they land:
+Recorded decisions:
 
-- daemon-owned agent sessions with sequenced event replay
-- postcard on the local agent socket (and why wire structs keep every field)
-- TUI as a client, not an agent host
-- summary compaction with a retained recent tail
-- explicit permission precedence and OS sandbox as the real boundary
+- `001-daemon-owned-sessions-and-replay.md` — daemon-owned agent sessions with sequenced event replay
+- `002-postcard-local-wire-protocol.md` — postcard on the local agent socket (and why wire structs keep every field)
+- `003-tui-as-thin-client.md` — TUI as a thin client behind the `envoy-agent` crate boundary
+- `004-two-stage-compaction-with-tail-retention.md` — two-stage context compaction with a retained recent tail
+- `005-explicit-permission-precedence-and-os-sandbox.md` — explicit permission precedence and OS sandbox as the real boundary

@@ -20,11 +20,9 @@ pub struct SeatbeltCommand {
 }
 
 pub fn find_sandbox_exec() -> Option<PathBuf> {
-    for fixed in ["/usr/bin/sandbox-exec"] {
-        let path = Path::new(fixed);
-        if is_executable(path) {
-            return Some(path.to_path_buf());
-        }
+    let fixed = Path::new("/usr/bin/sandbox-exec");
+    if is_executable(fixed) {
+        return Some(fixed.to_path_buf());
     }
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {

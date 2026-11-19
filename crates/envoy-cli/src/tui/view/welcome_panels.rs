@@ -121,16 +121,17 @@ pub(super) fn draw_skills(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
         let mut prev = "";
         for (offset, skill) in welcome.skills.iter().skip(start).take(window).enumerate() {
             let idx = start + offset;
-            let kind = crate::skills::skill_root_kind(&app.data_dir, skill);
+            let kind = envoy_agent::skills::skill_root_kind(&app.data_dir, skill);
             if kind != prev {
                 push_dim(&mut lines, theme, &format!("  {kind}"));
                 prev = kind;
             }
-            let on = if crate::skills::skill_is_injected(&app.data_dir, &app.session.cwd, skill) {
-                "on"
-            } else {
-                "off"
-            };
+            let on =
+                if envoy_agent::skills::skill_is_injected(&app.data_dir, &app.session.cwd, skill) {
+                    "on"
+                } else {
+                    "off"
+                };
             push_choice(
                 &mut lines,
                 theme,

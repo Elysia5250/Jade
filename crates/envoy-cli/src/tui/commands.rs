@@ -51,6 +51,12 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         about: "how readily the agent calls subagents",
     },
     SlashCommand {
+        name: "effort",
+        aliases: &[],
+        args: "[level]",
+        about: "thinking effort for the current model",
+    },
+    SlashCommand {
         name: "mode",
         aliases: &[],
         args: "",

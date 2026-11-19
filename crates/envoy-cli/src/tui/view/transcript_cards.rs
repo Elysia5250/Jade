@@ -4,7 +4,7 @@ use crate::tui::*;
 
 pub(super) fn activity_sentence(
     items: &[TranscriptItem],
-    changes: &[crate::session::FileChange],
+    changes: &[envoy_agent::session::FileChange],
 ) -> String {
     let mut edited: Vec<String> = Vec::new();
     let mut explored: Vec<String> = Vec::new();
@@ -123,7 +123,7 @@ fn title_path(title: &str, name: &str) -> String {
 
 pub(super) fn render_turn_summary(
     items: &[TranscriptItem],
-    changes: &[crate::session::FileChange],
+    changes: &[envoy_agent::session::FileChange],
     width: usize,
     theme: &Theme,
     is_selected: bool,

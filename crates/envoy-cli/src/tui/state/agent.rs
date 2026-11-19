@@ -275,7 +275,7 @@ impl App {
 
     pub(in crate::tui) fn set_permission_mode(&mut self, mode: PermissionMode) {
         self.perm_mode = mode;
-        let _ = crate::permissions::rules::save_default_mode(&self.data_dir, mode);
+        let _ = envoy_agent::permissions::rules::save_default_mode(&self.data_dir, mode);
         self.set_toast(format!("permissions: {}", mode.label()), false);
         self.push_permission_mode_to_daemon(mode);
     }

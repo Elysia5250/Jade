@@ -78,9 +78,7 @@ pub(crate) fn complete_directories(cwd: &Path, raw: &str) -> Vec<(String, String
             continue;
         }
         let lower = name.to_lowercase();
-        let rank = if q.is_empty() {
-            0
-        } else if name.starts_with(&name_prefix) {
+        let rank = if q.is_empty() || name.starts_with(&name_prefix) {
             0
         } else if lower.starts_with(&q) {
             1
@@ -94,7 +92,11 @@ pub(crate) fn complete_directories(cwd: &Path, raw: &str) -> Vec<(String, String
         let completed = format!("{arg_dir_prefix}{name}/");
         dirs.push((rank, lower, format!("{name}/"), completed));
     }
-    dirs.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)).then_with(|| a.2.cmp(&b.2)));
+    dirs.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
     dirs.into_iter()
         .take(10)
         .map(|(_, _, display, completed)| (display, completed))
@@ -225,7 +227,7 @@ pub(crate) fn truncate_width(text: &str, max: usize) -> String {
     for ch in text.chars() {
         let w = char_width(ch);
         if width + w > max {
-            if width + 1 <= max {
+            if width < max {
                 out.push('.');
             }
             return out;
@@ -252,7 +254,7 @@ pub(crate) fn job_elapsed(job: &Job) -> u64 {
     }
 }
 
-pub(crate) use crate::agent::context::context_used;
+pub(crate) use envoy_agent::agent::context::context_used;
 
 pub(crate) fn context_bar(used: u64, window: u64) -> (String, String) {
     const CELLS: usize = 8;

@@ -12,7 +12,7 @@ pub(super) fn render_tool_header(
     title: &str,
     subtitle: &str,
     target: &str,
-    output: &[crate::session::OutputLine],
+    output: &[envoy_agent::session::OutputLine],
     status: CardStatus,
     collapsed: bool,
     duration_ms: Option<u64>,

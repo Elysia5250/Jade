@@ -3,12 +3,12 @@
 //! Nothing here holds a job open. `submit` returns the new job id, and `logs`
 //! is a cursor-based watch that can be opened, dropped and reopened at will.
 
+use anyhow::{bail, Result};
 use envoy_proto::codec::{read_framed, write_framed};
 use envoy_proto::{
     Call, Entry, Hello, Job, JobId, LogRecord, Op, Reply, SubmitRequest, AGENT_CHUNK,
     AGENT_VERSION, READ_LIMIT,
 };
-use anyhow::{bail, Result};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -43,9 +43,9 @@ where
     let first: Reply = match tokio::time::timeout(HELLO_TIMEOUT, read_framed(&mut stream)).await {
         Ok(Ok(reply)) => reply,
         Ok(Err(e)) => bail!("{peer} closed the agent stream during the handshake ({e})"),
-        Err(_) => bail!(
-            "{peer} did not answer the agent handshake — is the agent service mounted there?"
-        ),
+        Err(_) => {
+            bail!("{peer} did not answer the agent handshake — is the agent service mounted there?")
+        }
     };
     match first {
         Reply::Hello(hello) => Ok(Conn { stream, hello }),
@@ -241,12 +241,7 @@ pub struct WriteStream<S> {
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> WriteStream<S> {
-    pub async fn open(
-        stream: S,
-        peer: &str,
-        path: &str,
-        mode: Option<u32>,
-    ) -> Result<Self> {
+    pub async fn open(stream: S, peer: &str, path: &str, mode: Option<u32>) -> Result<Self> {
         let conn = open(
             stream,
             peer,
@@ -310,13 +305,11 @@ where
         },
     )
     .await?;
-    loop {
-        match next_reply(&mut conn.stream, peer).await? {
-            Reply::Listing { entries } => return Ok(entries),
-            Reply::Done { .. } => return Ok(Vec::new()),
-            Reply::Failed { error } => bail!(error),
-            other => bail!("unexpected reply to a list: {other:?}"),
-        }
+    match next_reply(&mut conn.stream, peer).await? {
+        Reply::Listing { entries } => Ok(entries),
+        Reply::Done { .. } => Ok(Vec::new()),
+        Reply::Failed { error } => bail!(error),
+        other => bail!("unexpected reply to a list: {other:?}"),
     }
 }
 
@@ -332,11 +325,14 @@ mod tests {
     use std::sync::Arc;
 
     fn tmpdir(tag: &str) -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let p = std::env::temp_dir().join(format!("envoy-wire-{tag}-{n}"));
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let p =
+            std::env::temp_dir().join(format!("envoy-wire-{tag}-{}-{n}-{seq}", std::process::id()));
         std::fs::create_dir_all(&p).unwrap();
         p
     }
@@ -444,9 +440,17 @@ mod tests {
 
         {
             let peer = serve_one(&server, "caller-a").await;
-            let mut conn = open(peer, "caller-a", Op::JobLog { id: job.id, offset: 0, follow: true })
-                .await
-                .unwrap();
+            let mut conn = open(
+                peer,
+                "caller-a",
+                Op::JobLog {
+                    id: job.id,
+                    offset: 0,
+                    follow: true,
+                },
+            )
+            .await
+            .unwrap();
             // Read the handshake-confirmed stream for a moment, then hang up.
             let _ = tokio::time::timeout(
                 std::time::Duration::from_millis(80),
@@ -495,7 +499,10 @@ mod tests {
         let got = status(serve_one(&server, "caller-a").await, "caller-a", long.id)
             .await
             .unwrap();
-        assert!(matches!(got.state, JobState::Running { .. } | JobState::Queued { .. }));
+        assert!(matches!(
+            got.state,
+            JobState::Running { .. } | JobState::Queued { .. }
+        ));
 
         cancel(serve_one(&server, "caller-a").await, "caller-a", long.id)
             .await
@@ -603,9 +610,12 @@ mod tests {
         assert!(!hello.os.is_empty());
 
         let disabled = server_with(false, &[]).1;
-        let hello = probe(serve_one(&disabled, envoy_proto::LOCAL_CALLER).await, "local")
-            .await
-            .unwrap();
+        let hello = probe(
+            serve_one(&disabled, envoy_proto::LOCAL_CALLER).await,
+            "local",
+        )
+        .await
+        .unwrap();
         assert_eq!(hello.version, envoy_proto::AGENT_VERSION);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -16,7 +16,7 @@ impl App {
     pub(in crate::tui) fn filtered_login_providers(
         &self,
         filter: &str,
-    ) -> Vec<(usize, &'static crate::auth::BuiltinProvider)> {
+    ) -> Vec<(usize, &'static envoy_agent::auth::BuiltinProvider)> {
         let q = filter.trim().to_ascii_lowercase();
         BUILTIN_PROVIDERS
             .iter()
@@ -109,7 +109,7 @@ impl App {
                     let pname = sp.name.clone();
                     let kind = sp.credential.kind_label();
                     match record_provider_login(&self.data_dir, sp, preferred_model) {
-                        Ok(mref) => self.finish_login(&pname, &kind, &mref),
+                        Ok(mref) => self.finish_login(&pname, kind, &mref),
                         Err(e) => {
                             self.set_toast(format!("{e:#}"), true);
                             self.modal = None;
@@ -147,9 +147,9 @@ impl App {
 }
 
 pub(super) fn openai_url_preview(redirect_uri: &str, challenge: &str, state: &str) -> String {
-    crate::auth::openai_authorize_url(
+    envoy_agent::auth::openai_authorize_url(
         redirect_uri,
-        &crate::auth::Pkce {
+        &envoy_agent::auth::Pkce {
             verifier: String::new(),
             challenge: challenge.to_string(),
         },

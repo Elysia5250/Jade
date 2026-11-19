@@ -5,13 +5,13 @@ impl App {
     pub(super) fn reload_welcome_skills(&mut self) {
         let data = self.data_dir.clone();
         let cwd = self.session.cwd.clone();
-        let mut skills: Vec<_> = crate::skills::discover_skills(&data, &cwd)
+        let mut skills: Vec<_> = envoy_agent::skills::discover_skills(&data, &cwd)
             .into_iter()
-            .filter(|skill| skill.scope == crate::skills::SkillScope::User)
+            .filter(|skill| skill.scope == envoy_agent::skills::SkillScope::User)
             .collect();
         skills.sort_by(|a, b| {
-            source_ord(crate::skills::skill_root_kind(&data, a))
-                .cmp(&source_ord(crate::skills::skill_root_kind(&data, b)))
+            source_ord(envoy_agent::skills::skill_root_kind(&data, a))
+                .cmp(&source_ord(envoy_agent::skills::skill_root_kind(&data, b)))
                 .then(a.name.cmp(&b.name))
         });
         if let Some(welcome) = self.welcome.as_mut() {
@@ -76,8 +76,8 @@ impl App {
         else {
             return;
         };
-        let on = crate::skills::skill_is_injected(&self.data_dir, &self.session.cwd, &skill);
-        let result = crate::skills::prefs::set_inject(&self.data_dir, &skill.name, !on);
+        let on = envoy_agent::skills::skill_is_injected(&self.data_dir, &self.session.cwd, &skill);
+        let result = envoy_agent::skills::prefs::set_inject(&self.data_dir, &skill.name, !on);
         if let Some(welcome) = self.welcome.as_mut() {
             welcome.error = result.err();
         }

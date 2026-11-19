@@ -29,10 +29,7 @@ fn short_tmpdir(tag: &str) -> PathBuf {
 async fn read_http_body(sock: &mut tokio::net::TcpStream) -> String {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
-    loop {
-        let Ok(n) = sock.read(&mut tmp).await else {
-            break;
-        };
+    while let Ok(n) = sock.read(&mut tmp).await {
         if n == 0 {
             break;
         }
@@ -143,7 +140,10 @@ async fn stress_16_isolated_headless_processes_concurrent() {
             .unwrap_or_else(|e| panic!("proc {i} bad json: {e}\n{stdout}"));
         assert_eq!(json["ok"], true);
         assert_eq!(json["tool_calls"], 1);
-        assert!(json["result"].as_str().unwrap_or("").contains("TOKEN_OK_42"));
+        assert!(json["result"]
+            .as_str()
+            .unwrap_or("")
+            .contains("TOKEN_OK_42"));
     }
 
     eprintln!(

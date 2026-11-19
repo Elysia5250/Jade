@@ -176,7 +176,10 @@ async fn stress_large_log_flood_and_concurrent_readers() {
 
     for r in readers {
         let bytes = r.await.unwrap();
-        assert!(bytes > 50_000, "expected full log stream, got {bytes} bytes");
+        assert!(
+            bytes > 50_000,
+            "expected full log stream, got {bytes} bytes"
+        );
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

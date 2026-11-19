@@ -1,7 +1,7 @@
 # Plan: modularize agent and console
 
-- Status: active
-- Last updated: 2026-11-16
+- Status: complete
+- Last updated: 2026-11-19
 
 ## Goal
 
@@ -18,9 +18,9 @@ context compaction and permissions behind their own modules.
 - [x] Split `tui/view.rs` into `view/{mod,transcript,editor,status,sidebar,queued,ask,menus,modals}.rs`.
 - [x] Split `llm.rs` into `agent/{loop,prompt,events,asks}` and
       `agent/{tools,providers}/`.
-- [ ] Enable the hard file-size check with the split files removed from the
-      baseline. (state, view and llm entries removed; auth/main/mcp/service
-      remain.)
+- [x] Enable the hard file-size check with the split files removed from the
+      baseline. (`scripts/file-size-baseline.txt` is now empty and CI enforces
+      the 700-line hard limit across the workspace.)
 - [x] Context compaction module (`agent/context/`, `/compact`, `/handoff`, `/budget`, vendor harness tiers, overflow retry, `runtime/` split).
 - [x] Permission module (`permissions/`, OS `bwrap` workspace sandbox, `Shift+Tab`, `/permissions`, `/plan`, `/trust`).
 - [x] Toolchain, Skills, and Bidirectional MCP (`glob`, `grep`, `webfetch`, `todo`, `skill`, `skills/`, `mcp/` server + stdio/HTTP-SSE client, `/mcp`, `/skill`).
@@ -34,7 +34,9 @@ context compaction and permissions behind their own modules.
 
 ## Next
 
-Phases 1, 2, 3, and 3.5 are complete. Only `auth.rs` and `conduit.rs` remain in `scripts/file-size-baseline.txt`; split them opportunistically when touched.
+Complete. Follow-on structural work (extracting `envoy-agent`, hardening CI,
+and trimming files near the 700-line cap) is tracked in
+`docs/plans/extract-agent-crate-and-harden-ci.md`.
 
 ## Verification
 

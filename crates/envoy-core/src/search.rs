@@ -44,11 +44,9 @@ pub async fn grep_files(
     let pattern = pattern.to_string();
     let include = include.map(str::to_string);
     let cap = normalize_cap(max_results);
-    tokio::task::spawn_blocking(move || {
-        grep_files_sync(&root, &pattern, include.as_deref(), cap)
-    })
-    .await
-    .context("grep task panicked")?
+    tokio::task::spawn_blocking(move || grep_files_sync(&root, &pattern, include.as_deref(), cap))
+        .await
+        .context("grep task panicked")?
 }
 
 fn normalize_cap(max_results: u32) -> usize {
@@ -60,7 +58,11 @@ fn normalize_cap(max_results: u32) -> usize {
 }
 
 fn resolve_root(root: &str) -> Result<PathBuf> {
-    let raw = if root.trim().is_empty() { "." } else { root.trim() };
+    let raw = if root.trim().is_empty() {
+        "."
+    } else {
+        root.trim()
+    };
     let resolved = crate::fs::resolve(raw);
     let canon = std::fs::canonicalize(&resolved)
         .with_context(|| format!("search root {}", resolved.display()))?;
@@ -278,7 +280,11 @@ struct RegexLite {
 enum Atom {
     StartAnchor,
     EndAnchor,
-    Rep { kind: Matcher, min: usize, max: Option<usize> },
+    Rep {
+        kind: Matcher,
+        min: usize,
+        max: Option<usize>,
+    },
 }
 
 #[derive(Clone)]
@@ -288,7 +294,10 @@ enum Matcher {
     Digit,
     Word,
     Space,
-    Class { negated: bool, ranges: Vec<(char, char)> },
+    Class {
+        negated: bool,
+        ranges: Vec<(char, char)>,
+    },
 }
 
 impl Matcher {
@@ -301,7 +310,11 @@ impl Matcher {
             Matcher::Space => c.is_whitespace(),
             Matcher::Class { negated, ranges } => {
                 let hit = ranges.iter().any(|(a, b)| c >= *a && c <= *b);
-                if *negated { !hit } else { hit }
+                if *negated {
+                    !hit
+                } else {
+                    hit
+                }
             }
         }
     }
@@ -457,7 +470,11 @@ fn parse_seq(s: &str) -> Option<Vec<Atom>> {
             }
             _ => (1, Some(1)),
         };
-        atoms.push(Atom::Rep { kind: atom, min, max });
+        atoms.push(Atom::Rep {
+            kind: atom,
+            min,
+            max,
+        });
     }
     Some(atoms)
 }
@@ -526,10 +543,14 @@ mod tests {
         std::fs::write(dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         std::fs::write(dir.join("target/out.rs"), "ignored\n").unwrap();
 
-        let rs = glob_files(dir.to_str().unwrap(), "**/*.rs", 50).await.unwrap();
+        let rs = glob_files(dir.to_str().unwrap(), "**/*.rs", 50)
+            .await
+            .unwrap();
         assert_eq!(rs, vec!["src/main.rs", "src/sub/util.rs"]);
 
-        let brace = glob_files(dir.to_str().unwrap(), "*.{md,rs}", 50).await.unwrap();
+        let brace = glob_files(dir.to_str().unwrap(), "*.{md,rs}", 50)
+            .await
+            .unwrap();
         assert!(brace.contains(&"README.md".to_string()));
         assert!(!brace.iter().any(|p| p.contains(".env")));
         let _ = std::fs::remove_dir_all(&dir);

@@ -29,18 +29,17 @@ recall, interrupt, daemon survival).
 - `crates/envoy-core`: job store and execution primitives. No UI, no provider
   SDKs.
 - `crates/envoy-service`: daemon/server, conduit adapter, remote RPC. No TUI.
-- `crates/envoy-cli`: CLI, daemon lifecycle, `agent/` loop, `permissions/`,
-  `session/`, and the `tui/` client.
-- `crates/envoy-cli/src/tui/`: console only. Rendering must not perform I/O,
-  call providers, or mutate daemon state.
-- `crates/envoy-cli/src/agent/`: provider adapters, tools, prompt, loop, and
-  context compaction. No `ratatui` types.
-- `crates/envoy-cli/src/permissions/`: modes, rules, path/shell matching,
-  approvals, audit. No TUI types.
+- `crates/envoy-agent`: daemon-owned `runtime/`, `agent/` loop (providers,
+  tools, prompt, context compaction), `permissions/`, `hooks/`, `skills/`,
+  `mcp/`, `auth/`, `session`, `memory`, `worktree`, and `daemon`. No `ratatui`
+  or TUI types.
+- `crates/envoy-cli`: `envoy` binary entrypoint, CLI dispatch, `headless/`,
+  and the `tui/` console client. Rendering must not perform I/O, call
+  providers, or mutate daemon state.
 
-Dependency direction is one-way: `proto -> core/service -> cli`, and inside
-the CLI `agent/permissions/session -> tui`. Do not make a lower layer depend on
-the TUI or on a concrete provider.
+Dependency direction is one-way and Cargo-enforced:
+`proto -> core -> service -> agent -> cli`. Do not make a lower layer depend
+on the TUI or on a concrete provider.
 
 ## Size and shape rules
 

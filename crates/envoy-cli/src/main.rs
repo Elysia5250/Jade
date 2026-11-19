@@ -7,21 +7,9 @@
 //! Remote targets (`--on laptop`) go through `conduit run`'s control socket.
 //! envoy never links conduit: it is an HTTP/WebSocket client of that socket.
 
-mod agent;
-mod auth;
 mod cli_ops;
-mod daemon;
 mod headless;
-pub mod hooks;
-mod llm;
-pub mod mcp;
-mod memory;
-pub mod permissions;
-mod runtime;
-mod session;
-pub mod skills;
 mod tui;
-mod worktree;
 
 mod cli_args;
 pub(crate) use cli_args::{AuthCmd, Commands, DaemonCmd};
@@ -32,6 +20,7 @@ use cli_ops::{
     cmd_allow, cmd_copy, cmd_deny, cmd_devices, cmd_ls, cmd_models, cmd_read, cmd_set_enabled,
     cmd_status, cmd_write,
 };
+use envoy_agent::{auth, daemon, mcp, runtime};
 use envoy_core::{parse_mode, AgentConfigStore};
 use envoy_proto::{Job, JobState, SubmitRequest};
 use envoy_service::{
@@ -284,8 +273,8 @@ fn print_jobs(jobs: &[Job]) {
         return;
     }
     println!(
-        "{:>4}  {:<10} {:<10} {:<10} {:>10}  {}",
-        "ID", "STATE", "GROUP", "OWNER", "LOG", "COMMAND"
+        "{:>4}  {:<10} {:<10} {:<10} {:>10}  COMMAND",
+        "ID", "STATE", "GROUP", "OWNER", "LOG"
     );
     for job in jobs {
         println!(

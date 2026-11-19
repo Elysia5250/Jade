@@ -61,8 +61,7 @@ impl AgentConfigStore {
         let data = serde_json::to_string_pretty(&self.config)?;
         let tmp = self.root.join("tmp").join("agent.json.tmp");
         std::fs::write(&tmp, data)?;
-        std::fs::rename(&tmp, self.root.join("agent.json"))
-            .with_context(|| "write agent.json")?;
+        std::fs::rename(&tmp, self.root.join("agent.json")).with_context(|| "write agent.json")?;
         Ok(())
     }
 

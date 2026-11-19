@@ -140,7 +140,7 @@ fn skill_toggle_writes_prefs_and_new_skill_returns_edit() {
         .expect("demo skill");
     app.welcome.as_mut().unwrap().list_selected = idx;
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(!crate::skills::prefs::injected(&dir, "demo", true));
+    assert!(!envoy_agent::skills::prefs::injected(&dir, "demo", true));
     app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
     for ch in "extra".chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));

@@ -2,7 +2,6 @@
 use super::*;
 
 impl App {
-
     pub(in crate::tui) async fn refresh(&mut self, remote: &Remote<AnyDialer>) {
         self.last_refresh = Instant::now();
         if let Some(watch) = &self.watch {
@@ -30,8 +29,11 @@ impl App {
         }
     }
 
-
-    pub(in crate::tui) async fn submit_shell(&mut self, remote: &Remote<AnyDialer>, req: SubmitRequest) {
+    pub(in crate::tui) async fn submit_shell(
+        &mut self,
+        remote: &Remote<AnyDialer>,
+        req: SubmitRequest,
+    ) {
         let command = req.spec.display();
         self.session.maybe_set_title_from(&format!("$ {command}"));
         let user_id = self.session.alloc_id();
@@ -80,12 +82,11 @@ impl App {
         }
     }
 
-
     pub(in crate::tui) async fn attach_job_card(&mut self, remote: &Remote<AnyDialer>, job: Job) {
         self.open_job_output(job.id);
-        if let Some(pos) = self.session.items.iter().position(|it| {
-            matches!(it, TranscriptItem::Tool { job_id: Some(id), .. } if *id == job.id)
-        }) {
+        if let Some(pos) = self.session.items.iter().position(
+            |it| matches!(it, TranscriptItem::Tool { job_id: Some(id), .. } if *id == job.id),
+        ) {
             self.selected_card = Some(pos);
             return;
         }
@@ -127,7 +128,6 @@ impl App {
         self.follow = true;
     }
 
-
     pub(in crate::tui) async fn poll_shell_cards(&mut self, remote: &Remote<AnyDialer>) {
         if self.shell_watches.is_empty() {
             return;
@@ -135,15 +135,13 @@ impl App {
         let mut still_running = Vec::new();
         let mut watches = std::mem::take(&mut self.shell_watches);
         for mut w in watches.drain(..) {
-            let done =
-                Self::poll_one_watch(remote, &self.target, &mut self.session, &mut w).await;
+            let done = Self::poll_one_watch(remote, &self.target, &mut self.session, &mut w).await;
             if !done {
                 still_running.push(w);
             }
         }
         self.shell_watches = still_running;
     }
-
 
     pub(in crate::tui) async fn poll_one_watch(
         remote: &Remote<AnyDialer>,
@@ -153,28 +151,34 @@ impl App {
     ) -> bool {
         let mut new_lines: Vec<(String, bool)> = Vec::new();
         let res = remote
-            .logs(target, w.job_id, w.cursor, false, |records: &[LogRecord]| {
-                for r in records {
-                    let (buf, err) = if r.fd == 1 {
-                        (&mut w.partial_err, true)
-                    } else {
-                        (&mut w.partial_out, false)
-                    };
-                    for &b in &r.data {
-                        if b == b'\n' {
-                            let line = std::mem::take(buf);
-                            new_lines.push((
-                                String::from_utf8_lossy(&line)
-                                    .trim_end_matches('\r')
-                                    .to_string(),
-                                err,
-                            ));
+            .logs(
+                target,
+                w.job_id,
+                w.cursor,
+                false,
+                |records: &[LogRecord]| {
+                    for r in records {
+                        let (buf, err) = if r.fd == 1 {
+                            (&mut w.partial_err, true)
                         } else {
-                            buf.push(b);
+                            (&mut w.partial_out, false)
+                        };
+                        for &b in &r.data {
+                            if b == b'\n' {
+                                let line = std::mem::take(buf);
+                                new_lines.push((
+                                    String::from_utf8_lossy(&line)
+                                        .trim_end_matches('\r')
+                                        .to_string(),
+                                    err,
+                                ));
+                            } else {
+                                buf.push(b);
+                            }
                         }
                     }
-                }
-            })
+                },
+            )
             .await;
 
         let Ok((next, finished)) = res else {
@@ -221,7 +225,6 @@ impl App {
         false
     }
 
-
     pub(in crate::tui) async fn cancel_active(&mut self, remote: &Remote<AnyDialer>) {
         if self.agent_running {
             self.interrupt_agent();
@@ -238,9 +241,8 @@ impl App {
                 }
             }
             for item_id in self.active_tool_items.values() {
-                if let Some(TranscriptItem::Tool {
-                    status, job_id, ..
-                }) = self.session.items.iter_mut().find(|i| i.id() == *item_id)
+                if let Some(TranscriptItem::Tool { status, job_id, .. }) =
+                    self.session.items.iter_mut().find(|i| i.id() == *item_id)
                 {
                     if *status == CardStatus::Running {
                         *status = CardStatus::Error;
@@ -266,7 +268,6 @@ impl App {
         }
     }
 
-
     pub(in crate::tui) async fn cancel_job(&mut self, remote: &Remote<AnyDialer>, id: JobId) {
         match remote.cancel(&self.target, id).await {
             Ok(()) => self.set_toast(format!("cancel requested for #{id}"), false),
@@ -274,5 +275,4 @@ impl App {
         }
         self.refresh(remote).await;
     }
-
 }

@@ -5,13 +5,13 @@
 //! socket, `/v1/services/16/open/{target}`, `/v1/services/16/accept?name=envoy`,
 //! the text handoff frame, and JSON errors.
 
-use futures::SinkExt;
 use envoy_core::AgentConfig;
 use envoy_proto::codec::{read_framed, write_framed};
 use envoy_proto::{ClientMsg, Op, Reply, SandboxPolicy, SubmitRequest, TaskSpec, DEFAULT_GROUP};
 use envoy_service::{
     spawn_accept_pool, AgentServer, ConduitClient, ConduitDialer, Remote, StaticHost, WsByteStream,
 };
+use futures::SinkExt;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,11 +24,11 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
 fn tmpdir(tag: &str) -> PathBuf {
-    let n = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let p = std::env::temp_dir().join(format!("envoy-conduit-{tag}-{n}"));
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Keep socket paths well under macOS SUN_LEN (104 bytes).
+    let p = PathBuf::from("/tmp").join(format!("ec-{tag}-{}-{seq}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&p);
     std::fs::create_dir_all(&p).unwrap();
     p
 }
@@ -199,11 +199,7 @@ async fn accept_pool_serves_the_handed_off_peer_and_trusts_its_identity() {
         }
     });
 
-    let pool = spawn_accept_pool(
-        server,
-        ConduitClient::new(socket.clone()),
-        1,
-    );
+    let pool = spawn_accept_pool(server, ConduitClient::new(socket.clone()), 1);
     let device = tokio::time::timeout(Duration::from_secs(5), rx)
         .await
         .expect("the pool should hand off within 5s")

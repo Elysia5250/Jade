@@ -1,6 +1,6 @@
 //! Console handlers for `/monitor`, `/rewind`, and checkpoint rewind state sync.
 use super::*;
-use crate::session::{compute_diff_counts, ChatMessage};
+use envoy_agent::session::{compute_diff_counts, ChatMessage};
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -158,15 +158,7 @@ impl App {
         let notice = self.notice_tx.clone();
         self.set_toast("rewinding checkpoint...", false);
         tokio::spawn(async move {
-            match runtime::request(
-                &data_dir,
-                &AgentReq::Rewind {
-                    id,
-                    checkpoint_id,
-                },
-            )
-            .await
-            {
+            match runtime::request(&data_dir, &AgentReq::Rewind { id, checkpoint_id }).await {
                 Ok(AgentResp::Ack) => {}
                 Ok(AgentResp::Error(e)) => {
                     let _ = notice.send(UiNotice::Toast(e, true));
@@ -179,6 +171,7 @@ impl App {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::tui) fn apply_checkpoint_rewound(
         &mut self,
         checkpoint_id: u64,

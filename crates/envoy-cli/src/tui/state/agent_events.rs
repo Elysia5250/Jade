@@ -1,6 +1,6 @@
 //! Fold daemon agent events into the local transcript.
 use super::*;
-use crate::session::OutputLine;
+use envoy_agent::session::OutputLine;
 
 impl App {
     pub(in crate::tui) fn apply_event(&mut self, seq: u64, event: AgentEvent) {

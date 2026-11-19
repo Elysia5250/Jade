@@ -19,8 +19,11 @@ mod edit_file;
 mod highlight;
 mod links;
 mod markdown;
+mod markdown_table;
+mod modals;
 mod mouse;
 mod state;
+mod terminal;
 mod text;
 mod theme;
 mod types;
@@ -29,14 +32,18 @@ mod view;
 pub(crate) use commands::{SlashCommand, SLASH_COMMANDS};
 pub(crate) use decrypt::*;
 pub(crate) use markdown::*;
+pub(crate) use modals::*;
+pub(crate) use terminal::Tui;
 pub(crate) use text::*;
 pub(crate) use theme::{Theme, THEMES};
 pub(crate) use types::*;
 
-pub(crate) use crate::agent::checkpoint::CheckpointSummary;
-pub(crate) use crate::agent::MonitorInfo;
+pub(crate) use anyhow::{bail, Result};
+pub(crate) use envoy_agent::agent::checkpoint::CheckpointSummary;
+pub(crate) use envoy_agent::agent::MonitorInfo;
+pub(crate) use envoy_agent::agent::{AgentEvent, AskOption};
 #[allow(unused_imports)] // re-exported for the state and view modules
-pub(crate) use crate::auth::{
+pub(crate) use envoy_agent::auth::{
     anthropic_authorize_url, available_models, bind_openai_callback_listener, effective_providers,
     exchange_anthropic_code, exchange_openai_code, extract_query_param, generate_pkce,
     is_retired_model, load_prefs, open_browser, poll_github_copilot_device,
@@ -46,29 +53,24 @@ pub(crate) use crate::auth::{
     AuthMethodKind, AvailableModel, Credential, ModelRef, ProviderProtocol, StoredProvider,
     BUILTIN_PROVIDERS,
 };
-pub(crate) use crate::daemon;
-pub(crate) use crate::llm::{AgentEvent, AskOption};
-pub(crate) use crate::permissions::{
+pub(crate) use envoy_agent::daemon;
+pub(crate) use envoy_agent::permissions::{
     is_workspace_trusted, set_workspace_trusted, PermissionEngine, PermissionMode, RuleScope,
 };
-pub(crate) use crate::runtime::{self, AgentReq, AgentResp, SendMode};
-pub(crate) use crate::session::{
+pub(crate) use envoy_agent::runtime::{self, AgentReq, AgentResp, SendMode};
+pub(crate) use envoy_agent::session::{
     delete_session, exact_session_for_cwd, latest_session_for_cwd, list_sessions, load_session,
-    recent_workspaces, save_session, CardStatus, ChatMessage, ChatRole, Session, SessionSummary,
-    TranscriptItem,
+    recent_workspaces, save_session, CardStatus, ChatMessage, ChatRole, Session, TranscriptItem,
 };
-pub(crate) use anyhow::{bail, Result};
 pub(crate) use envoy_proto::{
     Job, JobId, JobState, LogRecord, SubmitRequest, TaskSpec, DEFAULT_GROUP,
 };
 pub(crate) use envoy_service::{
     default_control_socket, dialer_for, AgentDialer, ConduitClient, Remote, Status,
 };
-pub(crate) use ratatui::backend::CrosstermBackend;
 pub(crate) use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseButton,
-    MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 pub(crate) use ratatui::crossterm::execute;
 pub(crate) use ratatui::crossterm::terminal::{
@@ -81,9 +83,11 @@ pub(crate) use ratatui::text::{Line, Span};
 pub(crate) use ratatui::widgets::{
     Block, BorderType, Borders, Clear, List, ListItem, ListState, Padding, Paragraph,
 };
-pub(crate) use ratatui::{Frame, Terminal};
+pub(crate) use ratatui::Frame;
+#[cfg(test)]
+pub(crate) use ratatui::Terminal;
 pub(crate) use std::collections::{HashMap, HashSet, VecDeque};
-pub(crate) use std::io::{stdout, IsTerminal, Stdout};
+pub(crate) use std::io::{stdout, IsTerminal};
 pub(crate) use std::path::PathBuf;
 pub(crate) use std::time::{Duration, Instant};
 pub(crate) use tokio::sync::{mpsc, oneshot, watch};
@@ -369,109 +373,6 @@ pub(crate) enum Command {
     Quit,
 }
 
-pub(crate) struct Picker {
-    title: String,
-    query: String,
-    items: Vec<(String, Command)>,
-    selected: usize,
-}
-
-// ------------------------------------------------------------------ /login modal
-
-pub(crate) enum LoginEvent {
-    Success(StoredProvider, Option<String>),
-    Error(String),
-    OpenAiDeviceStarted {
-        verification_url: String,
-        user_code: String,
-    },
-    GitHubDeviceStarted {
-        verification_uri: String,
-        user_code: String,
-    },
-}
-
-pub(crate) enum LoginModal {
-    SelectProvider {
-        filter: String,
-        selected: usize,
-    },
-    SelectMethod {
-        provider_idx: usize,
-        selected: usize,
-    },
-    ApiKeyForm {
-        provider_idx: usize,
-        key: String,
-        base_url: String,
-        model: String,
-        focus_field: usize,
-        reveal: bool,
-        error: Option<String>,
-    },
-    CustomForm {
-        protocol_idx: usize,
-        name: String,
-        base_url: String,
-        key: String,
-        model: String,
-        focus_field: usize,
-        error: Option<String>,
-    },
-    OAuthBrowser {
-        provider_name: String,
-        url: String,
-        redirect_uri: String,
-        verifier: String,
-        pasted: String,
-        status: String,
-        busy: bool,
-        error: Option<String>,
-    },
-    OAuthCodePaste {
-        provider_name: String,
-        url: String,
-        verifier: String,
-        state: String,
-        console: bool,
-        code_input: String,
-        busy: bool,
-        error: Option<String>,
-    },
-    OAuthDevice {
-        provider_name: String,
-        verification_uri: String,
-        user_code: String,
-        status: String,
-        error: Option<String>,
-    },
-}
-
-pub(crate) struct ModelsModal {
-    filter: String,
-    selected: usize,
-    models: Vec<AvailableModel>,
-    fetching: bool,
-}
-
-pub(crate) struct SessionsModal {
-    sessions: Vec<SessionSummary>,
-    selected: usize,
-}
-
-pub(crate) struct RewindModal {
-    checkpoints: Vec<CheckpointSummary>,
-    selected: usize,
-}
-
-pub(crate) enum Modal {
-    Picker(Picker),
-    Login(LoginModal),
-    Models(ModelsModal),
-    Sessions(SessionsModal),
-    Rewind(RewindModal),
-}
-
 // ------------------------------------------------------------------ live shell watch
 
 pub(crate) struct ShellWatch {
@@ -573,7 +474,7 @@ pub(crate) struct App {
     login_cancel: Option<oneshot::Sender<()>>,
 
     // Remote /models fetch
-    models_rx: Option<oneshot::Receiver<(String, Vec<crate::agent::context::ListedModel>)>>,
+    models_rx: Option<oneshot::Receiver<(String, Vec<envoy_agent::agent::context::ListedModel>)>>,
     welcome: Option<Welcome>,
 
     // Universal right inspector, clickable links, and mouse selection
@@ -589,90 +490,20 @@ pub(crate) struct App {
     transcript_cache: HashMap<(u64, usize, usize), (usize, Vec<LinkedLine>)>,
 }
 
-pub(crate) struct Tui {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
-    enhanced_keys: bool,
-    mouse_capture: bool,
-}
-
-fn terminal_supports_csi_u() -> bool {
-    if std::env::var_os("KITTY_WINDOW_ID").is_some()
-        || std::env::var_os("WEZTERM_EXECUTABLE").is_some()
-        || std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some()
-    {
-        return true;
-    }
-    if matches!(
-        std::env::var("TERM_PROGRAM").as_deref(),
-        Ok("iTerm.app" | "WezTerm" | "ghostty" | "vscode" | "WarpTerminal" | "rio")
-    ) {
-        return true;
-    }
-    matches!(
-        std::env::var("TERM").as_deref(),
-        Ok("xterm-kitty" | "xterm-ghostty" | "alacritty" | "foot" | "foot-extra")
-    )
-}
-
-impl Tui {
-    fn enter() -> Result<Self> {
-        enable_raw_mode()?;
-        execute!(
-            stdout(),
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableBracketedPaste
-        )?;
-        let enhanced_keys = terminal_supports_csi_u();
-        if enhanced_keys {
-            let _ = execute!(
-                stdout(),
-                PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-            );
-        }
-        let terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
-        Ok(Self {
-            terminal,
-            enhanced_keys,
-            mouse_capture: true,
-        })
-    }
-
-    fn set_mouse_capture(&mut self, enabled: bool) {
-        self.mouse_capture = enabled;
-        if enabled {
-            let _ = execute!(self.terminal.backend_mut(), EnableMouseCapture);
-        } else {
-            let _ = execute!(self.terminal.backend_mut(), DisableMouseCapture);
-        }
-    }
-}
-
-impl Drop for Tui {
-    fn drop(&mut self) {
-        if self.enhanced_keys {
-            let _ = execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags);
-        }
-        if self.mouse_capture {
-            let _ = execute!(self.terminal.backend_mut(), DisableMouseCapture);
-        }
-        let _ = execute!(self.terminal.backend_mut(), DisableBracketedPaste);
-        let _ = disable_raw_mode();
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
-        let _ = self.terminal.show_cursor();
-    }
-}
-
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_delegate;
+#[cfg(test)]
+mod tests_effort;
 #[cfg(test)]
 mod tests_inspector;
 #[cfg(test)]
 mod tests_ux;
 #[cfg(test)]
 mod tests_ux_fold;
+#[cfg(test)]
+mod tests_ux_layout;
 #[cfg(test)]
 mod tests_welcome;
 #[cfg(test)]
