@@ -75,10 +75,11 @@ async fn read_snap(stream: &mut UnixStream) -> Snap {
     let mut incarnation = 0u64;
     let mut saw_messages = false;
     loop {
-        let resp: AgentResp = tokio::time::timeout(Duration::from_secs(5), read_framed(&mut *stream))
-            .await
-            .expect("snapshot frame timed out")
-            .unwrap_or_else(|err| panic!("snapshot frame failed: {err:#}"));
+        let resp: AgentResp =
+            tokio::time::timeout(Duration::from_secs(5), read_framed(&mut *stream))
+                .await
+                .expect("snapshot frame timed out")
+                .unwrap_or_else(|err| panic!("snapshot frame failed: {err:#}"));
         match resp {
             AgentResp::SnapshotStart { incarnation_id, .. } => incarnation = incarnation_id,
             AgentResp::SnapshotChunk { events: chunk } => {
@@ -206,9 +207,10 @@ async fn incarnation_mismatch_forces_session_reset() {
         "missing reset: {:?}",
         diff.events
     );
-    assert!(diff.events.iter().any(|event| {
-        matches!(&event.event, AgentEvent::TextDelta(text) if text == "kept")
-    }));
+    assert!(diff
+        .events
+        .iter()
+        .any(|event| { matches!(&event.event, AgentEvent::TextDelta(text) if text == "kept") }));
 }
 
 #[tokio::test]
@@ -245,7 +247,12 @@ async fn oversized_file_changes_replay_in_chunks() {
     for event in &snap.events {
         if let AgentEvent::FileChanged { before, after, .. } = &event.event {
             files += 1;
-            assert!(before.len() <= cap && after.len() <= cap, "{} {}", before.len(), after.len());
+            assert!(
+                before.len() <= cap && after.len() <= cap,
+                "{} {}",
+                before.len(),
+                after.len()
+            );
             assert!(after.len() < big.len());
         }
     }
@@ -297,17 +304,20 @@ async fn monitors_sync_seqs_are_strictly_increasing() {
     let live = boot
         .runtime
         .ensure("s1".into(), boot.dir.clone(), "local".into(), Vec::new());
-    live.lock().unwrap().monitors.seed_active_for_test(MonitorInfo {
-        id: 7,
-        job_id: 9,
-        label: "watch".into(),
-        pattern: "err".into(),
-        command: "true".into(),
-        trigger_count: 1,
-        max_triggers: Some(3),
-        owns_job: false,
-        active: true,
-    });
+    live.lock()
+        .unwrap()
+        .monitors
+        .seed_active_for_test(MonitorInfo {
+            id: 7,
+            job_id: 9,
+            label: "watch".into(),
+            pattern: "err".into(),
+            command: "true".into(),
+            trigger_count: 1,
+            max_triggers: Some(3),
+            owns_job: false,
+            active: true,
+        });
     drop(live);
     let inc = boot.runtime.incarnation_id();
     let _first = attach_from(&boot, "s1", 0, inc).await;
@@ -415,7 +425,13 @@ async fn set_cwd_target_and_clear_drive_the_next_turn() {
     )
     .await;
     assert_next(&boot, &elsewhere, "peer-2", None);
-    expect_missing(&boot.dir, AgentReq::Interrupt { id: "missing".into() }).await;
+    expect_missing(
+        &boot.dir,
+        AgentReq::Interrupt {
+            id: "missing".into(),
+        },
+    )
+    .await;
     expect_missing(
         &boot.dir,
         AgentReq::Send {

@@ -60,19 +60,15 @@ pub async fn run_job(
         }
     }
 
-    let prepared = match sandbox::prepare_command_with_env(
-        &spec.argv,
-        &spec.cwd,
-        &spec.sandbox,
-        &spec.env,
-    ) {
-        Ok(p) => p,
-        Err(e) => {
-            return JobResult::FailedToSpawn {
-                error: format!("sandbox setup failed: {e:#}"),
+    let prepared =
+        match sandbox::prepare_command_with_env(&spec.argv, &spec.cwd, &spec.sandbox, &spec.env) {
+            Ok(p) => p,
+            Err(e) => {
+                return JobResult::FailedToSpawn {
+                    error: format!("sandbox setup failed: {e:#}"),
+                }
             }
-        }
-    };
+        };
     // Declared before the process guard so the directory is removed after the
     // child has been reaped or killed.
     let _scratch = sandbox::ScratchGuard(prepared.scratch_dir.clone());

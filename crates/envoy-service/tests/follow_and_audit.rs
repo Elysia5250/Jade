@@ -119,9 +119,7 @@ async fn follow_log_returns_the_full_tail_of_a_large_fast_job() {
 async fn missing_job_follow_fails_instead_of_waiting_forever() {
     let srv = Running::start("missing").await;
     let err = tokio::time::timeout(Duration::from_secs(3), async {
-        srv.remote
-            .logs("local", 999_999, 0, true, |_| {})
-            .await
+        srv.remote.logs("local", 999_999, 0, true, |_| {}).await
     })
     .await
     .expect("follow of a missing job hung")
@@ -141,7 +139,9 @@ async fn failed_rpc_is_audited_as_not_ok() {
     assert!(err.to_string().contains("no such job"), "{err}");
     let audit = std::fs::read_to_string(srv.dir.join("agent/audit.log")).unwrap();
     assert!(
-        audit.lines().any(|line| line.contains("\"ok\":false") && line.contains("job-status")),
+        audit
+            .lines()
+            .any(|line| line.contains("\"ok\":false") && line.contains("job-status")),
         "{audit}"
     );
     srv.stop().await;

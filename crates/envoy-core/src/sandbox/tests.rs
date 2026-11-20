@@ -169,14 +169,13 @@ fn bwrap_places_namespace_flags_and_masks_secrets_after_bind() {
         .argv
         .windows(3)
         .any(|w| w[0] == "--ro-bind" && w[2] == nested_dir.join(".env").display().to_string()));
-    assert!(prep
-        .argv
-        .windows(3)
-        .any(|w| w[0] == "--ro-bind" && w[2] == nested_dir.join(".ENV.prod").display().to_string()));
-    assert!(!prep
-        .argv
-        .iter()
-        .any(|a| a.contains("envoy-sandbox-empty")));
+    assert!(
+        prep.argv
+            .windows(3)
+            .any(|w| w[0] == "--ro-bind"
+                && w[2] == nested_dir.join(".ENV.prod").display().to_string())
+    );
+    assert!(!prep.argv.iter().any(|a| a.contains("envoy-sandbox-empty")));
 
     let _ = std::fs::remove_dir_all(&fake_home);
 }

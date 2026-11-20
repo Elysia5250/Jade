@@ -510,7 +510,10 @@ mod tests {
         assert!(builtin_model_cap("o1-preview").is_some());
         assert!(builtin_model_cap("my-pro3-model").is_none());
         assert!(builtin_model_cap("video1").is_none());
-        assert_eq!(builtin_model_cap("gpt-6-astra").unwrap().pricing_cliff, None);
+        assert_eq!(
+            builtin_model_cap("gpt-6-astra").unwrap().pricing_cliff,
+            None
+        );
     }
 
     #[test]

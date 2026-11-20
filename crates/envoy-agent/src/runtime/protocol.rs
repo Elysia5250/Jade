@@ -375,9 +375,7 @@ mod tests {
                 id: "s-attach".into(),
                 from: 4,
             },
-            AgentReq::Interrupt {
-                id: "s-int".into(),
-            },
+            AgentReq::Interrupt { id: "s-int".into() },
             AgentReq::Answer {
                 id: "s-ans".into(),
                 ask_id: 11,
@@ -426,7 +424,9 @@ mod tests {
                 id: "s-target".into(),
                 target: "peer-9".into(),
             },
-            AgentReq::Clear { id: "s-clear".into() },
+            AgentReq::Clear {
+                id: "s-clear".into(),
+            },
             AgentReq::ProbeMcp {
                 cwd: PathBuf::from("/work/mcp"),
             },

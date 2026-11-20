@@ -55,7 +55,11 @@ pub(crate) fn complete_directories(cwd: &Path, raw: &str) -> Vec<(String, String
         let dir = resolve_cd_path(cwd, parent_raw);
         (dir, raw[idx + 1..].to_string(), parent_raw.to_string())
     } else if raw == "~" {
-        (PathBuf::from(expanded_prefix), String::new(), "~/".to_string())
+        (
+            PathBuf::from(expanded_prefix),
+            String::new(),
+            "~/".to_string(),
+        )
     } else {
         (cwd.to_path_buf(), raw.to_string(), String::new())
     };

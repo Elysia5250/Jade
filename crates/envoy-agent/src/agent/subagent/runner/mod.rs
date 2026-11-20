@@ -67,9 +67,8 @@ struct PreparedTask {
 
 pub(crate) type DelegateFuture<'a> = std::pin::Pin<
     Box<
-        dyn std::future::Future<
-                Output = Result<(String, bool, BTreeMap<String, Value>, u64, u64)>,
-            > + Send
+        dyn std::future::Future<Output = Result<(String, bool, BTreeMap<String, Value>, u64, u64)>>
+            + Send
             + 'a,
     >,
 >;

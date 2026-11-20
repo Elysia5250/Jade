@@ -220,7 +220,11 @@ fn classify_poll(status: u16, body: &str) -> PollClass {
     if status == 403 || status == 404 {
         let error = serde_json::from_str::<serde_json::Value>(body)
             .ok()
-            .and_then(|val| val.get("error").and_then(|item| item.as_str()).map(str::to_string));
+            .and_then(|val| {
+                val.get("error")
+                    .and_then(|item| item.as_str())
+                    .map(str::to_string)
+            });
         return match error.as_deref() {
             None | Some("authorization_pending") | Some("slow_down") => PollClass::Pending,
             Some(_) => PollClass::Fatal,

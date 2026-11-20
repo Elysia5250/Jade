@@ -208,7 +208,11 @@ fn normalize_local_args(name: &str, cwd: &Path, args: &Value) -> Value {
     out
 }
 
-async fn authorize_mcp_tool(mcp: &Mcp, name: &str, args: &Value) -> std::result::Result<SandboxPolicy, String> {
+async fn authorize_mcp_tool(
+    mcp: &Mcp,
+    name: &str,
+    args: &Value,
+) -> std::result::Result<SandboxPolicy, String> {
     let asks = AskBroker::new_headless();
     let (sink_tx, _sink_rx) = tokio::sync::mpsc::unbounded_channel();
     match mcp

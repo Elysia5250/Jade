@@ -42,7 +42,8 @@ pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
     let has_diff = app.inputs.has_diff;
 
     let line_label = app
-        .ui.inspector
+        .ui
+        .inspector
         .file_line
         .map(|l| format!(":{l}"))
         .unwrap_or_default();

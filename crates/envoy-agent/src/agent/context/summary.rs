@@ -134,8 +134,9 @@ pub fn assemble_compacted_messages(
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: None,
-    
-        reasoning_blocks: Vec::new(),}];
+
+        reasoning_blocks: Vec::new(),
+    }];
     if tail
         .first()
         .is_some_and(|m| m.role == ChatRole::User || m.role == ChatRole::Tool)
@@ -149,8 +150,9 @@ pub fn assemble_compacted_messages(
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
-        
-            reasoning_blocks: Vec::new(),});
+
+            reasoning_blocks: Vec::new(),
+        });
     }
     out.extend(tail);
     out
@@ -614,8 +616,8 @@ mod tests {
                 tool_calls: vec![],
                 tool_call_id: None,
                 tool_name: None,
-            
-                reasoning_blocks: Vec::new(),},
+                reasoning_blocks: Vec::new(),
+            },
             user("add a flag"),
             ChatMessage {
                 role: ChatRole::Assistant,
@@ -624,8 +626,8 @@ mod tests {
                 tool_calls: vec![],
                 tool_call_id: None,
                 tool_name: None,
-            
-                reasoning_blocks: Vec::new(),},
+                reasoning_blocks: Vec::new(),
+            },
             tool("c9", &huge),
         ];
         let (prev, dossier) = condense_for_summary(&msgs);

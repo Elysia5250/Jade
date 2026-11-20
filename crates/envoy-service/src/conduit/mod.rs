@@ -522,7 +522,9 @@ fn decode_chunked(data: &[u8]) -> Result<Vec<u8>> {
         };
         let line = std::str::from_utf8(&rest[..end])?;
         let token = line.split(';').next().unwrap_or("0").trim();
-        if token.is_empty() || token.len() > MAX_CHUNK_HEX_DIGITS || !token.bytes().all(|b| b.is_ascii_hexdigit())
+        if token.is_empty()
+            || token.len() > MAX_CHUNK_HEX_DIGITS
+            || !token.bytes().all(|b| b.is_ascii_hexdigit())
         {
             bail!("bad chunk size");
         }
@@ -539,7 +541,10 @@ fn decode_chunked(data: &[u8]) -> Result<Vec<u8>> {
         if rest.len() < body_end {
             bail!("truncated chunk body");
         }
-        let new_len = out.len().checked_add(size).context("chunk length overflow")?;
+        let new_len = out
+            .len()
+            .checked_add(size)
+            .context("chunk length overflow")?;
         if new_len > MAX_CHUNKED_BODY {
             bail!("chunked body exceeded {MAX_CHUNKED_BODY} bytes");
         }
@@ -597,12 +602,16 @@ mod tests {
 
     #[test]
     fn huge_chunk_length_is_an_explicit_error() {
-        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n0\r\n\r\n";
+        let raw =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n0\r\n\r\n";
         let Err(err) = parse_http_response(raw) else {
             panic!("oversized chunk length was accepted");
         };
         let text = format!("{err:#}");
-        assert!(text.contains("chunk") || text.contains("bad chunk"), "{text}");
+        assert!(
+            text.contains("chunk") || text.contains("bad chunk"),
+            "{text}"
+        );
     }
 
     #[test]

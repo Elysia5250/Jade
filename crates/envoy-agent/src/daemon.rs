@@ -469,11 +469,9 @@ mod tests {
         assert!(plist.contains("StandardErrorPath"));
 
         let unit = systemd_unit(exe, dir);
-        assert!(
-            unit.contains(
-                "ExecStart=\"/Users/u/.local/bin/envoy\" --data-dir \"/Users/u/.envoy\" serve"
-            )
-        );
+        assert!(unit.contains(
+            "ExecStart=\"/Users/u/.local/bin/envoy\" --data-dir \"/Users/u/.envoy\" serve"
+        ));
         assert!(unit.contains("Restart=on-failure"));
     }
 

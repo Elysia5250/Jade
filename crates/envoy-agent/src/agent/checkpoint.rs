@@ -136,7 +136,13 @@ impl CheckpointStore {
         before: String,
         restorable_before: bool,
     ) {
-        if self.note_file_change(checkpoint_id, path, existed_before, before, restorable_before) {
+        if self.note_file_change(
+            checkpoint_id,
+            path,
+            existed_before,
+            before,
+            restorable_before,
+        ) {
             let _ = self.save();
         }
     }
@@ -429,8 +435,9 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: None,
             tool_name: None,
-        
-            reasoning_blocks: Vec::new(),}];
+
+            reasoning_blocks: Vec::new(),
+        }];
         let c2 = store.begin_turn("second prompt", msg1, 1);
         store.record_file_change(c2, "/w/a.txt".into(), true, "v2".into(), true);
         store.record_file_change(c2, "/w/new.txt".into(), false, String::new(), true);

@@ -222,9 +222,7 @@ pub(crate) async fn run_prepared_tool_call(
                     }
                     Err(err) => Err(err),
                 },
-                "job" => job_tool(remote, target, cwd, args)
-                    .await
-                    .map(|s| (s, None)),
+                "job" => job_tool(remote, target, cwd, args).await.map(|s| (s, None)),
                 "delegate" => {
                     match delegate_tool(
                         subagent_host,

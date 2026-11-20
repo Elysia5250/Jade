@@ -522,8 +522,9 @@ impl TurnHookSession {
                 tool_calls: Vec::new(),
                 tool_call_id: Some(p.call.id),
                 tool_name: Some(p.call.name),
-            
-                reasoning_blocks: Vec::new(),});
+
+                reasoning_blocks: Vec::new(),
+            });
         }
         (child_in, child_out)
     }
@@ -649,7 +650,10 @@ mod tests {
         let (tx, _rx) = mpsc::unbounded_channel();
         let out = sess.prepare_tool_batch(0, &[tc], &asks, &tx).await;
         let err = out[0].blocked_error.as_deref().unwrap();
-        assert!(err.contains("invalid JSON tool arguments for `read`"), "{err}");
+        assert!(
+            err.contains("invalid JSON tool arguments for `read`"),
+            "{err}"
+        );
         assert_ne!(out[0].effective_args, json!({}));
     }
 

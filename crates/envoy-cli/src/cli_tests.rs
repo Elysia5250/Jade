@@ -58,8 +58,8 @@ fn cwd_flag_is_global() {
 
 #[test]
 fn shell_run_keeps_every_word() {
-    let cli = Cli::try_parse_from(["envoy", "run", "--shell", "echo", "hello", "world"])
-        .expect("parse");
+    let cli =
+        Cli::try_parse_from(["envoy", "run", "--shell", "echo", "hello", "world"]).expect("parse");
     let Commands::Run(args) = cli.cmd.expect("run") else {
         panic!("expected run");
     };
@@ -108,7 +108,10 @@ fn env_model_does_not_block_tui_while_cli_model_flag_does() {
         .try_get_matches_from(["envoy", "--model", "gpt-5"])
         .expect("parse");
     let cli = Cli::from_arg_matches(&matches).expect("from matches");
-    assert_eq!(tui_unsupported_flag(&cli.headless, &matches), Some("--model"));
+    assert_eq!(
+        tui_unsupported_flag(&cli.headless, &matches),
+        Some("--model")
+    );
 
     let env_only = headless::HeadlessArgs {
         model: Some("gpt-5".into()),

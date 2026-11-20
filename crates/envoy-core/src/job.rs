@@ -380,11 +380,7 @@ impl Jobs {
                 }
                 let (group, limit) = {
                     let e = t.jobs.get(&id).expect("id from the same map");
-                    let limit = t
-                        .groups
-                        .get(&e.job.group)
-                        .copied()
-                        .unwrap_or(global_limit);
+                    let limit = t.groups.get(&e.job.group).copied().unwrap_or(global_limit);
                     (e.job.group.clone(), limit.max(1))
                 };
                 let running = t

@@ -285,8 +285,14 @@ impl PermissionEngine {
             Effect::Ask if skip_perms => {
                 let mut extra_rw = policies.extra_rw.clone();
                 extra_rw.extend(decision.extra_rw.iter().cloned());
-                let sandbox =
-                    sandbox_for(&self.cwd, &extra_rw, true, true, read_only_mode, sandbox_ovr);
+                let sandbox = sandbox_for(
+                    &self.cwd,
+                    &extra_rw,
+                    true,
+                    true,
+                    read_only_mode,
+                    sandbox_ovr,
+                );
                 audit::record_decision(
                     &self.data_dir,
                     audit::PermissionAuditEntry {

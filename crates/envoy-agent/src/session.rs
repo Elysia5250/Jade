@@ -573,8 +573,9 @@ mod tests {
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
-        
-            reasoning_blocks: Vec::new(),};
+
+            reasoning_blocks: Vec::new(),
+        };
         let bytes = postcard::to_stdvec(&message).unwrap();
         let back: ChatMessage = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(back.role, message.role);
@@ -593,8 +594,9 @@ mod tests {
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 tool_name: None,
-            
-                reasoning_blocks: Vec::new(),}],
+
+                reasoning_blocks: Vec::new(),
+            }],
             input_tokens: 3,
             output_tokens: 4,
             context_tokens: 3,

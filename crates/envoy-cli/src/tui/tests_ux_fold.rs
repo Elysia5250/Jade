@@ -122,7 +122,8 @@ fn consecutive_failed_commands_and_non_edit_tools_fold_into_one_line() {
     );
 
     let hit = app
-        .ui.hit_regions
+        .ui
+        .hit_regions
         .iter()
         .find(|hr| matches!(hr.target, HitTarget::ToggleToolGroup(_)))
         .expect("folded tool group hit region")
@@ -182,7 +183,8 @@ fn thinking_wording_is_unified_collapsed_and_coalesces_consecutive_steps() {
         "streaming collapsed thinking must use Decrypt Effect without spinners:\n{live_text}"
     );
     assert!(
-        app.ui.hit_regions
+        app.ui
+            .hit_regions
             .iter()
             .any(|hr| matches!(hr.target, HitTarget::ToggleReasoning(_))),
         "live thinking row should keep ToggleReasoning hit target"
@@ -204,7 +206,8 @@ fn thinking_wording_is_unified_collapsed_and_coalesces_consecutive_steps() {
     assert!(!settled.contains("> Thought"));
 
     let hit = app
-        .ui.hit_regions
+        .ui
+        .hit_regions
         .iter()
         .find(|hr| matches!(hr.target, HitTarget::ToggleReasoning(_)))
         .expect("thinking toggle hit region")
@@ -392,14 +395,16 @@ fn running_tools_and_groups_render_progressive_phrases_with_decrypt_effect() {
         "collapsed running tools must hide concrete paths and commands:\n{rendered}"
     );
     assert!(
-        app.ui.hit_regions
+        app.ui
+            .hit_regions
             .iter()
             .any(|hr| matches!(hr.target, HitTarget::ToggleToolGroup(_))),
         "running command group should remain expandable"
     );
 
     let card_hit = app
-        .ui.hit_regions
+        .ui
+        .hit_regions
         .iter()
         .find(|hr| matches!(hr.target, HitTarget::ToggleToolCard(_)))
         .expect("single running edit hit region")

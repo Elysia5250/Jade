@@ -108,9 +108,7 @@ async fn close_session_cancels_an_owned_monitor_job() {
             };
             let server = server.clone();
             tokio::spawn(async move {
-                let _ = server
-                    .serve_stream(envoy_core::Caller::Local, stream)
-                    .await;
+                let _ = server.serve_stream(envoy_core::Caller::Local, stream).await;
             });
         }
     });

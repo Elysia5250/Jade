@@ -20,7 +20,15 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
             Style::default().fg(theme.dim),
         )));
     } else {
-        for (idx, fc) in app.session.current.changed_files.iter().enumerate().rev().take(12) {
+        for (idx, fc) in app
+            .session
+            .current
+            .changed_files
+            .iter()
+            .enumerate()
+            .rev()
+            .take(12)
+        {
             let rel = links::display_rel(&app.session.current.cwd, std::path::Path::new(&fc.path));
             let stats = format!(" +{} -{}", fc.added, fc.removed);
             let name_budget = w.saturating_sub(display_width(&stats) + 4).max(8);
@@ -206,7 +214,12 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
 
     // 5. Active & Recent Monitors
     if !app.agent.active_monitors.is_empty() {
-        let active_n = app.agent.active_monitors.iter().filter(|m| m.active).count();
+        let active_n = app
+            .agent
+            .active_monitors
+            .iter()
+            .filter(|m| m.active)
+            .count();
         push_section_header(&mut rows, "MONITORS", &format!("{active_n} active"), theme);
         for m in app.agent.active_monitors.iter().take(8) {
             let (glyph, color) = if m.active {
@@ -253,7 +266,12 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
     }
 
     // 6. Detached Jobs
-    push_section_header(&mut rows, "jobs", &format!("{}", app.jobs.list.len()), theme);
+    push_section_header(
+        &mut rows,
+        "jobs",
+        &format!("{}", app.jobs.list.len()),
+        theme,
+    );
     if app.jobs.list.is_empty() {
         rows.push(LinkedLine::from_line(Line::styled(
             "  none",

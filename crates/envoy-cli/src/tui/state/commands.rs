@@ -26,7 +26,8 @@ impl App {
             }
             Command::NewSession => {
                 self.persist_session();
-                self.session.current = Session::new(self.session.current.cwd.clone(), self.jobs.target.clone());
+                self.session.current =
+                    Session::new(self.session.current.cwd.clone(), self.jobs.target.clone());
                 self.reset_session_view();
                 self.spawn_agent_attach();
                 self.set_toast("started new session", false);
@@ -414,7 +415,8 @@ impl App {
                     self.ui.inspector.scroll = 0;
                     if self.ui.inspector.file_path.is_none() {
                         if let Some(first) = self.session.current.changed_files.last() {
-                            self.ui.inspector.selected_diff = self.session.current.changed_files.len() - 1;
+                            self.ui.inspector.selected_diff =
+                                self.session.current.changed_files.len() - 1;
                             self.ui.inspector.file_path = Some(first.path.clone());
                         }
                     }

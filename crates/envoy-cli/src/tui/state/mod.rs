@@ -198,11 +198,18 @@ impl App {
     pub(in crate::tui) fn open_file_in_inspector(&mut self, raw_path: &str, line: Option<usize>) {
         let local = inputs::target_is_local(&self.jobs.target);
         if local {
-            self.session.workspace_index.ensure_fresh(&self.session.current.cwd);
+            self.session
+                .workspace_index
+                .ensure_fresh(&self.session.current.cwd);
         }
         let (rel, parsed_line) = if local {
-            self.session.workspace_index
-                .resolve_path(&self.session.current.cwd, &self.session.current.changed_files, raw_path)
+            self.session
+                .workspace_index
+                .resolve_path(
+                    &self.session.current.cwd,
+                    &self.session.current.changed_files,
+                    raw_path,
+                )
                 .unwrap_or_else(|| {
                     (
                         links::normalize_display_path(
@@ -213,11 +220,19 @@ impl App {
                     )
                 })
         } else {
-            self.session.workspace_index
-                .resolve_path_cached(&self.session.current.cwd, &self.session.current.changed_files, raw_path)
+            self.session
+                .workspace_index
+                .resolve_path_cached(
+                    &self.session.current.cwd,
+                    &self.session.current.changed_files,
+                    raw_path,
+                )
                 .unwrap_or_else(|| {
                     (
-                        links::display_rel(&self.session.current.cwd, std::path::Path::new(raw_path)),
+                        links::display_rel(
+                            &self.session.current.cwd,
+                            std::path::Path::new(raw_path),
+                        ),
                         links::split_path_and_line(raw_path).and_then(|(_, ln)| ln),
                     )
                 })
@@ -256,12 +271,16 @@ impl App {
     }
 
     pub(in crate::tui) fn find_changed_file_index(&self, rel_or_abs: &str) -> Option<usize> {
-        let norm =
-            links::normalize_display_path(&self.session.current.cwd, std::path::Path::new(rel_or_abs));
+        let norm = links::normalize_display_path(
+            &self.session.current.cwd,
+            std::path::Path::new(rel_or_abs),
+        );
         self.session.current.changed_files.iter().position(|fc| {
             fc.path == rel_or_abs
-                || links::normalize_display_path(&self.session.current.cwd, std::path::Path::new(&fc.path))
-                    == norm
+                || links::normalize_display_path(
+                    &self.session.current.cwd,
+                    std::path::Path::new(&fc.path),
+                ) == norm
         })
     }
 
@@ -364,7 +383,8 @@ impl App {
     }
 
     pub(in crate::tui) fn own_device_id(&self) -> String {
-        self.jobs.status
+        self.jobs
+            .status
             .as_ref()
             .map(|s| s.device_id.clone())
             .unwrap_or_default()
@@ -378,7 +398,10 @@ impl App {
         self.jobs.shell_watches.clear();
         self.inputs.clear_for_target_switch();
         let id = self.session.current.id.clone();
-        self.sync_agent(AgentReq::SetTarget { id, target: target.clone() });
+        self.sync_agent(AgentReq::SetTarget {
+            id,
+            target: target.clone(),
+        });
         self.set_toast(format!("target: {target}"), false);
     }
 }

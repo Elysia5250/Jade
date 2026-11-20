@@ -87,7 +87,8 @@ impl App {
     }
 
     pub(in crate::tui) fn run_mcp_command(&mut self, arg: &str) {
-        let report = envoy_agent::mcp::config::load_mcp_configs(&self.data_dir, &self.session.current.cwd);
+        let report =
+            envoy_agent::mcp::config::load_mcp_configs(&self.data_dir, &self.session.current.cwd);
         if arg.trim() == "probe" {
             let data_dir = self.data_dir.clone();
             let cwd = self.session.current.cwd.clone();
@@ -95,13 +96,13 @@ impl App {
             let sid = self.session.current.id.clone();
             self.set_toast("probing MCP servers.", false);
             tokio::spawn(async move {
-                let (msg, err) = match runtime::request(&data_dir, &AgentReq::ProbeMcp { cwd }).await
-                {
-                    Ok(AgentResp::McpProbe(lines)) => (lines.join("\n"), false),
-                    Ok(AgentResp::Error(reason)) => (reason, true),
-                    Ok(_) => ("unexpected daemon reply to MCP probe".into(), true),
-                    Err(err) => (format!("mcp probe failed: {err:#}"), true),
-                };
+                let (msg, err) =
+                    match runtime::request(&data_dir, &AgentReq::ProbeMcp { cwd }).await {
+                        Ok(AgentResp::McpProbe(lines)) => (lines.join("\n"), false),
+                        Ok(AgentResp::Error(reason)) => (reason, true),
+                        Ok(_) => ("unexpected daemon reply to MCP probe".into(), true),
+                        Err(err) => (format!("mcp probe failed: {err:#}"), true),
+                    };
                 let _ = notice.send(UiNotice::Notice {
                     session_id: sid,
                     msg,
@@ -141,7 +142,8 @@ impl App {
     pub(in crate::tui) fn run_skill_command(&mut self, arg: &str) {
         let name = arg.trim();
         if name.is_empty() {
-            let skills = envoy_agent::skills::discover_skills(&self.data_dir, &self.session.current.cwd);
+            let skills =
+                envoy_agent::skills::discover_skills(&self.data_dir, &self.session.current.cwd);
             if skills.is_empty() {
                 self.push_notice(
                     "Skills: none found (add ~/.envoy/skills/<name>/SKILL.md or trust project .envoy/skills)",

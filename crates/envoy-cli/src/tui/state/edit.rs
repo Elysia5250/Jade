@@ -198,13 +198,15 @@ impl App {
             KeyCode::PageUp => {
                 self.ui.follow = false;
                 self.ui.transcript_scroll = self
-                    .ui.transcript_scroll
+                    .ui
+                    .transcript_scroll
                     .saturating_sub(self.ui.transcript_height.max(1) as usize);
                 Action::None
             }
             KeyCode::PageDown => {
                 self.ui.transcript_scroll = self
-                    .ui.transcript_scroll
+                    .ui
+                    .transcript_scroll
                     .saturating_add(self.ui.transcript_height.max(1) as usize);
                 if self.ui.transcript_scroll >= self.ui.transcript_max_scroll {
                     self.ui.follow = true;
@@ -347,7 +349,9 @@ impl App {
         self.ui.menu_selected = 0;
         self.ui.at_dismissed_at = None;
         if self.at_mention_span().is_some() {
-            self.session.workspace_index.ensure_fresh(&self.session.current.cwd);
+            self.session
+                .workspace_index
+                .ensure_fresh(&self.session.current.cwd);
         }
     }
 
@@ -399,7 +403,9 @@ impl App {
         self.ui.menu_selected = 0;
         self.ui.at_dismissed_at = None;
         if c == '@' || self.at_mention_span().is_some() {
-            self.session.workspace_index.ensure_fresh(&self.session.current.cwd);
+            self.session
+                .workspace_index
+                .ensure_fresh(&self.session.current.cwd);
         }
     }
 
@@ -471,7 +477,8 @@ impl App {
     }
 
     pub(in crate::tui) fn byte_index(&self, chars: usize) -> usize {
-        self.ui.input
+        self.ui
+            .input
             .char_indices()
             .nth(chars)
             .map(|(i, _)| i)

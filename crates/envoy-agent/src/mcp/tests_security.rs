@@ -73,7 +73,10 @@ async fn mcp_server_normalizes_relative_paths_rejects_ld_preload_and_audits() {
         .await
         .unwrap();
         assert!(is_err, "{key} -> {msg}");
-        assert!(msg.contains("disallowed environment variable"), "{key} -> {msg}");
+        assert!(
+            msg.contains("disallowed environment variable"),
+            "{key} -> {msg}"
+        );
     }
 
     // 3. Relative `.bashrc` is read from `mcp.cwd/.bashrc` (NEVER `$HOME/.bashrc`),
@@ -110,7 +113,11 @@ async fn mcp_server_normalizes_relative_paths_rejects_ld_preload_and_audits() {
     )
     .await
     .unwrap();
-    assert!(!local_rc.2, "expected local .bashrc read ok: {}", local_rc.0);
+    assert!(
+        !local_rc.2,
+        "expected local .bashrc read ok: {}",
+        local_rc.0
+    );
     assert!(local_rc.0.contains("WORKSPACE_RC_ONLY"), "{}", local_rc.0);
 
     let res = call_tool(
@@ -190,9 +197,11 @@ fn mcp_config_blocks_project_override_and_secret_env_expansion() {
             "{bad}"
         );
     }
-    assert!(
-        validate_http_url(&reqwest::Url::parse("http://127.0.0.1:8080/mcp").unwrap(), true).is_ok()
-    );
+    assert!(validate_http_url(
+        &reqwest::Url::parse("http://127.0.0.1:8080/mcp").unwrap(),
+        true
+    )
+    .is_ok());
 
     let _ = std::fs::remove_dir_all(&dir);
 }

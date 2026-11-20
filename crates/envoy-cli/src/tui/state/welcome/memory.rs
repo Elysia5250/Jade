@@ -52,7 +52,8 @@ impl App {
 
     fn edit_selected_note(&mut self) -> Action {
         let path = self
-            .ui.welcome
+            .ui
+            .welcome
             .as_ref()
             .and_then(|w| w.notes.get(w.list_selected))
             .map(|note| note.path.clone());
@@ -64,13 +65,19 @@ impl App {
 
     fn toggle_selected_note(&mut self) {
         let Some(note) = self
-            .ui.welcome
+            .ui
+            .welcome
             .as_ref()
             .and_then(|w| w.notes.get(w.list_selected).cloned())
         else {
             return;
         };
-        let selected = self.ui.welcome.as_ref().map(|w| w.list_selected).unwrap_or(0);
+        let selected = self
+            .ui
+            .welcome
+            .as_ref()
+            .map(|w| w.list_selected)
+            .unwrap_or(0);
         if let Err(err) = envoy_agent::memory::set_enabled(&note, !note.enabled) {
             if let Some(welcome) = self.ui.welcome.as_mut() {
                 welcome.error = Some(err);
@@ -88,7 +95,8 @@ impl App {
 
     fn delete_selected_note(&mut self) {
         let Some(note) = self
-            .ui.welcome
+            .ui
+            .welcome
             .as_ref()
             .and_then(|w| w.notes.get(w.list_selected).cloned())
         else {

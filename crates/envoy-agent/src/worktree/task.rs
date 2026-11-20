@@ -116,12 +116,7 @@ pub(crate) fn remove_tree_at(path: &Path) -> Result<(), String> {
     let main = main_root(path)?;
     git_text(
         &main,
-        &[
-            "worktree",
-            "remove",
-            "--force",
-            &path.display().to_string(),
-        ],
+        &["worktree", "remove", "--force", &path.display().to_string()],
     )?;
     Ok(())
 }
@@ -137,7 +132,9 @@ pub(crate) fn settle_trees(session: &Path, trees: &[PendingTree]) -> Vec<TreeSet
         match commit_all(&tree.path, &tree.message) {
             Ok(CommitAll::Clean) => out.push(finish_clean(session, tree)),
             Ok(CommitAll::Committed) => merge_at.push(ordinal),
-            Ok(CommitAll::Failed(error)) => out.push(abandon(tree, &format!("commit failed: {error}"))),
+            Ok(CommitAll::Failed(error)) => {
+                out.push(abandon(tree, &format!("commit failed: {error}")))
+            }
             Err(error) => out.push(abandon(tree, &format!("commit failed: {error}"))),
         }
     }
@@ -184,10 +181,7 @@ fn abandon(tree: &PendingTree, why: &str) -> TreeSettlement {
             true,
             format!("worktree removed; branch {} kept", tree.branch),
         ),
-        Err(error) => (
-            false,
-            format!("left at {}: {error}", tree.path.display()),
-        ),
+        Err(error) => (false, format!("left at {}: {error}", tree.path.display())),
     };
     TreeSettlement {
         index: tree.index,
@@ -399,11 +393,9 @@ mod tests {
             .unwrap()
             .status
             .success());
-        assert!(
-            git_text(&root, &["status", "--porcelain"])
-                .unwrap()
-                .is_empty()
-        );
+        assert!(git_text(&root, &["status", "--porcelain"])
+            .unwrap()
+            .is_empty());
         assert!(!root.join("other.txt").exists());
         assert!(!third.path.exists());
         cleanup(&root);
@@ -427,7 +419,10 @@ mod tests {
         let failed = settled.iter().find(|item| item.index == 2).unwrap();
         assert!(!good.failed && good.removed, "{settled:?}");
         assert!(failed.failed && failed.removed, "{settled:?}");
-        assert_eq!(std::fs::read_to_string(root.join("ok.txt")).unwrap(), "yes\n");
+        assert_eq!(
+            std::fs::read_to_string(root.join("ok.txt")).unwrap(),
+            "yes\n"
+        );
         assert!(!root.join("bad.txt").exists());
         assert!(!ok_tree.path.exists());
         assert!(!bad.path.exists());

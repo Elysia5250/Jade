@@ -106,11 +106,7 @@ fn split_compound_and_subshells(input: &str) -> Result<(Vec<String>, bool)> {
     Ok((out, has_write_proc_sub))
 }
 
-fn split_range(
-    chars: &[char],
-    out: &mut Vec<String>,
-    has_write_proc_sub: &mut bool,
-) -> Result<()> {
+fn split_range(chars: &[char], out: &mut Vec<String>, has_write_proc_sub: &mut bool) -> Result<()> {
     let mut cur = String::new();
     let mut i = 0usize;
     let mut in_single = false;
@@ -504,7 +500,8 @@ fn unwrap_wrappers(
                             s.uses_sudo |= uses_sudo;
                             s.uses_xargs |= uses_xargs || has_write_proc;
                             s.redirections.extend(redirections.iter().cloned());
-                            s.read_redirections.extend(read_redirections.iter().cloned());
+                            s.read_redirections
+                                .extend(read_redirections.iter().cloned());
                             s.read_redirections.extend(extra_positional.iter().cloned());
                         }
                         out.extend(parsed);

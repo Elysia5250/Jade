@@ -37,7 +37,9 @@ impl Runtime {
         let cwd = cwd.unwrap_or_else(|| state.cwd.clone());
         let target = target.unwrap_or_else(|| state.target.clone());
         if state.cwd != cwd || state.target != target {
-            state.permissions = state.permissions.rebind_workspace(cwd.clone(), target.clone());
+            state.permissions = state
+                .permissions
+                .rebind_workspace(cwd.clone(), target.clone());
             state.hooks = super::hooks::new_hook_engine(&self.data_dir, &cwd);
             state.cwd = cwd;
             state.target = target;

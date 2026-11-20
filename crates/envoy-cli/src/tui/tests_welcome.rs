@@ -13,7 +13,8 @@ fn tmpdir(tag: &str) -> PathBuf {
 
 fn select(app: &mut App, row: WelcomeRow) {
     let idx = app
-        .ui.welcome
+        .ui
+        .welcome
         .as_ref()
         .unwrap()
         .rows
@@ -29,7 +30,8 @@ fn home_rows_keep_open_path_before_the_new_sections() {
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
     app.open_welcome();
     let kinds: Vec<_> = app
-        .ui.welcome
+        .ui
+        .welcome
         .as_ref()
         .unwrap()
         .rows
@@ -137,7 +139,8 @@ fn skill_toggle_writes_prefs_and_new_skill_returns_edit() {
     select(&mut app, WelcomeRow::Skills);
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     let idx = app
-        .ui.welcome
+        .ui
+        .welcome
         .as_ref()
         .unwrap()
         .skills

@@ -97,14 +97,16 @@ impl App {
                 KeyCode::Char('u') if self.ui.focus != Focus::Input => {
                     self.ui.follow = false;
                     self.ui.transcript_scroll = self
-                        .ui.transcript_scroll
+                        .ui
+                        .transcript_scroll
                         .saturating_sub((self.ui.transcript_height as usize / 2).max(1));
                     return Action::None;
                 }
                 KeyCode::Char('f') if self.ui.focus != Focus::Input => {
                     self.ui.follow = false;
                     self.ui.transcript_scroll = self
-                        .ui.transcript_scroll
+                        .ui
+                        .transcript_scroll
                         .saturating_add((self.ui.transcript_height as usize / 2).max(1));
                     return Action::None;
                 }
@@ -178,7 +180,9 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 match self.ui.focus {
                     Focus::Sidebar => {
-                        if self.ui.inspector.tab == InspectorTab::Overview && !self.jobs.list.is_empty() {
+                        if self.ui.inspector.tab == InspectorTab::Overview
+                            && !self.jobs.list.is_empty()
+                        {
                             self.jobs.selected = self.jobs.selected.saturating_sub(1);
                         } else {
                             self.ui.inspector.scroll = self.ui.inspector.scroll.saturating_sub(2);
@@ -200,13 +204,16 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => {
                 match self.ui.focus {
                     Focus::Sidebar => {
-                        if self.ui.inspector.tab == InspectorTab::Overview && !self.jobs.list.is_empty() {
+                        if self.ui.inspector.tab == InspectorTab::Overview
+                            && !self.jobs.list.is_empty()
+                        {
                             if self.jobs.selected + 1 < self.jobs.list.len() {
                                 self.jobs.selected += 1;
                             }
                         } else {
                             self.ui.inspector.scroll = self
-                                .ui.inspector
+                                .ui
+                                .inspector
                                 .scroll
                                 .saturating_add(2)
                                 .min(self.ui.inspector.max_scroll);
@@ -215,8 +222,12 @@ impl App {
                     Focus::Transcript => {
                         if !self.session.current.items.is_empty() {
                             let last = self.session.current.items.len() - 1;
-                            self.ui.selected_card =
-                                Some(self.ui.selected_card.map(|i| (i + 1).min(last)).unwrap_or(0));
+                            self.ui.selected_card = Some(
+                                self.ui
+                                    .selected_card
+                                    .map(|i| (i + 1).min(last))
+                                    .unwrap_or(0),
+                            );
                         }
                         self.ui.transcript_scroll = self.ui.transcript_scroll.saturating_add(2);
                     }
@@ -268,13 +279,15 @@ impl App {
             KeyCode::PageUp => {
                 if self.ui.focus == Focus::Sidebar {
                     self.ui.inspector.scroll = self
-                        .ui.inspector
+                        .ui
+                        .inspector
                         .scroll
                         .saturating_sub(self.ui.inspector.height.max(1) as usize);
                 } else {
                     self.ui.follow = false;
                     self.ui.transcript_scroll = self
-                        .ui.transcript_scroll
+                        .ui
+                        .transcript_scroll
                         .saturating_sub(self.ui.transcript_height.max(1) as usize);
                 }
                 Action::None
@@ -282,13 +295,15 @@ impl App {
             KeyCode::PageDown => {
                 if self.ui.focus == Focus::Sidebar {
                     self.ui.inspector.scroll = self
-                        .ui.inspector
+                        .ui
+                        .inspector
                         .scroll
                         .saturating_add(self.ui.inspector.height.max(1) as usize)
                         .min(self.ui.inspector.max_scroll);
                 } else {
                     self.ui.transcript_scroll = self
-                        .ui.transcript_scroll
+                        .ui
+                        .transcript_scroll
                         .saturating_add(self.ui.transcript_height.max(1) as usize);
                     if self.ui.transcript_scroll >= self.ui.transcript_max_scroll {
                         self.ui.follow = true;
@@ -332,14 +347,16 @@ impl App {
             return;
         }
         let next = if dir > 0 {
-            self.ui.inspector
+            self.ui
+                .inspector
                 .diff_hunk_lines
                 .iter()
                 .copied()
                 .find(|&l| l > cur)
                 .unwrap_or(*self.ui.inspector.diff_hunk_lines.first().unwrap())
         } else {
-            self.ui.inspector
+            self.ui
+                .inspector
                 .diff_hunk_lines
                 .iter()
                 .rev()

@@ -506,10 +506,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(
-            ssrf_hop.to_string().contains("SSRF guard"),
-            "{ssrf_hop:#}"
-        );
+        assert!(ssrf_hop.to_string().contains("SSRF guard"), "{ssrf_hop:#}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

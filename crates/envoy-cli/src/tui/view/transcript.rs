@@ -50,7 +50,8 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
             let expanded = app.session.expanded_explore_groups.contains(&first_id);
             let selected = app.ui.focus == Focus::Transcript
                 && app
-                    .ui.selected_card
+                    .ui
+                    .selected_card
                     .is_some_and(|sel| (start..end).contains(&sel));
             push_blank_linked(&mut lines);
             if expanded {
@@ -122,7 +123,12 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
             {
                 end += 1;
             }
-            if render_thinking_run(&app.session.current.items[idx..end], width, theme, &mut lines) {
+            if render_thinking_run(
+                &app.session.current.items[idx..end],
+                width,
+                theme,
+                &mut lines,
+            ) {
                 last_notice = None;
             }
             idx = end;
@@ -194,8 +200,8 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
                         {
                             continue;
                         }
-                        let sub_selected =
-                            app.ui.focus == Focus::Transcript && app.ui.selected_card == Some(sub_idx);
+                        let sub_selected = app.ui.focus == Focus::Transcript
+                            && app.ui.selected_card == Some(sub_idx);
                         render_single_item(
                             app,
                             sub_idx,

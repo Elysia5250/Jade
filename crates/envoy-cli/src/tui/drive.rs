@@ -327,7 +327,10 @@ fn next_wake(app: &App) -> Option<WakePlan> {
             push_wake(&mut best, left, true);
         }
     }
-    let refresh_left = app.jobs.interval.saturating_sub(app.jobs.last_refresh.elapsed());
+    let refresh_left = app
+        .jobs
+        .interval
+        .saturating_sub(app.jobs.last_refresh.elapsed());
     push_wake(&mut best, refresh_left, false);
     if !app.jobs.shell_watches.is_empty() {
         let left = SHELL_POLL.saturating_sub(app.jobs.last_shell_poll.elapsed());
@@ -362,7 +365,9 @@ async fn settle_background(app: &mut App, remote: &Remote<AnyDialer>) -> bool {
         app.jobs.last_shell_poll = Instant::now();
         dirty = true;
     }
-    if app.ui.welcome.is_none() && app.agent.stream.is_none() && Instant::now() >= app.agent.retry_at
+    if app.ui.welcome.is_none()
+        && app.agent.stream.is_none()
+        && Instant::now() >= app.agent.retry_at
     {
         app.spawn_agent_attach();
         dirty = true;
@@ -375,7 +380,8 @@ fn shell_poll_due(app: &App) -> bool {
 }
 
 fn job_fingerprint(app: &App) -> Vec<(u64, u64, Option<u32>, ProtoJobState)> {
-    app.jobs.list
+    app.jobs
+        .list
         .iter()
         .map(|job| (job.id, job.log_bytes, job.pid, job.state.clone()))
         .collect()
@@ -623,7 +629,9 @@ mod tests {
             text: "held".into(),
             is_error: false,
         });
-        let path = dir.join("sessions").join(format!("{}.json", app.session.current.id));
+        let path = dir
+            .join("sessions")
+            .join(format!("{}.json", app.session.current.id));
         app.session.persist_hold.set(true);
         app.persist_session();
         assert!(!path.exists());

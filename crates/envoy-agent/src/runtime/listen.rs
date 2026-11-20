@@ -1,8 +1,6 @@
 //! Console socket: hello, one request, then an optional event stream.
 
-use super::hello::{
-    protocol_mismatch_message, read_hello, write_hello, AGENT_PROTOCOL_VERSION,
-};
+use super::hello::{protocol_mismatch_message, read_hello, write_hello, AGENT_PROTOCOL_VERSION};
 use super::protocol::{AgentReq, AgentResp};
 use super::server::Runtime;
 use super::snapshot::stream_session;
@@ -79,14 +77,14 @@ where
         .await?;
         return Ok(());
     }
-    let req: AgentReq = match tokio::time::timeout(Duration::from_secs(5), read_framed(&mut rd)).await
-    {
-        Ok(Ok(req)) => req,
-        Ok(Err(err)) => bail!("reading agent request: {err:#}"),
-        Err(_) => bail!("no agent request within 5s"),
-    };
-    let reset = client_hello.incarnation_id != 0
-        && client_hello.incarnation_id != runtime.incarnation_id();
+    let req: AgentReq =
+        match tokio::time::timeout(Duration::from_secs(5), read_framed(&mut rd)).await {
+            Ok(Ok(req)) => req,
+            Ok(Err(err)) => bail!("reading agent request: {err:#}"),
+            Err(_) => bail!("no agent request within 5s"),
+        };
+    let reset =
+        client_hello.incarnation_id != 0 && client_hello.incarnation_id != runtime.incarnation_id();
     dispatch(&runtime, req, reset, &mut wr).await
 }
 
@@ -268,7 +266,14 @@ where
         }
         AgentReq::RefreshModels => match runtime.refresh_models().await {
             Ok((provider_id, models)) => {
-                write_framed(wr, &AgentResp::ModelsRefreshed { provider_id, models }).await?;
+                write_framed(
+                    wr,
+                    &AgentResp::ModelsRefreshed {
+                        provider_id,
+                        models,
+                    },
+                )
+                .await?;
             }
             Err(err) => fail(wr, format!("{err:#}")).await?,
         },

@@ -85,8 +85,17 @@ fn has_component_in(path: &Path, basenames: &[&str]) -> bool {
         return true;
     }
     const WILDCARD_PROTECTED: &[&str] = &[
-        ".env", ".env.local", ".git", ".ssh", ".aws", ".envoy", ".conduit", ".gnupg", ".kube",
-        ".codex", ".agents",
+        ".env",
+        ".env.local",
+        ".git",
+        ".ssh",
+        ".aws",
+        ".envoy",
+        ".conduit",
+        ".gnupg",
+        ".kube",
+        ".codex",
+        ".agents",
     ];
     for comp in path.components() {
         let Component::Normal(os) = comp else {

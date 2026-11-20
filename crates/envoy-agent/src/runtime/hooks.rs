@@ -176,8 +176,9 @@ impl Runtime {
                     tool_calls: Vec::new(),
                     tool_call_id: None,
                     tool_name: None,
-                
-                    reasoning_blocks: Vec::new(),};
+
+                    reasoning_blocks: Vec::new(),
+                };
                 state.messages.push(msg.clone());
                 cfg.history.push(msg);
                 self.publish(

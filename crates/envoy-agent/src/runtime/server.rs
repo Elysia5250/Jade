@@ -19,7 +19,6 @@ use tracing::debug;
 
 pub(crate) use super::live::{Live, LivePhase, PhaseGuard};
 
-
 pub struct Runtime {
     pub(crate) data_dir: PathBuf,
     pub(crate) conduit: Option<PathBuf>,
@@ -388,9 +387,7 @@ impl Runtime {
             let mut state = live.lock().unwrap();
             debug!(session = id, ?mode, running = state.running, "send");
             match mode {
-                SendMode::Prompt | SendMode::Steer
-                    if state.phase == LivePhase::RunningTurn =>
-                {
+                SendMode::Prompt | SendMode::Steer if state.phase == LivePhase::RunningTurn => {
                     state.steer.lock().unwrap().push(text.clone());
                     self.publish(
                         &mut state,
@@ -407,10 +404,7 @@ impl Runtime {
                 }
                 _ => {
                     if !state.claim(LivePhase::RunningTurn) {
-                        self.publish(
-                            &mut state,
-                            AgentEvent::TurnError("session is busy".into()),
-                        );
+                        self.publish(&mut state, AgentEvent::TurnError("session is busy".into()));
                         return;
                     }
                     text
@@ -513,13 +507,10 @@ impl Runtime {
             state.queued.clear();
             state.release();
             state.active_checkpoint_id = None;
-            let job = state.active_job.take().map(|job_id| {
-                (
-                    job_id,
-                    state.target.clone(),
-                    state.local_socket.clone(),
-                )
-            });
+            let job = state
+                .active_job
+                .take()
+                .map(|job_id| (job_id, state.target.clone(), state.local_socket.clone()));
             (state.turn.take(), state.pump.take(), job)
         };
         if let Some(task) = turn {
@@ -534,8 +525,15 @@ impl Runtime {
             let local_server = self.local_server.clone();
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
-                    cancel_active_job(&data_dir, &target, local_socket, conduit, local_server, job_id)
-                        .await;
+                    cancel_active_job(
+                        &data_dir,
+                        &target,
+                        local_socket,
+                        conduit,
+                        local_server,
+                        job_id,
+                    )
+                    .await;
                 });
             }
         }
@@ -581,7 +579,11 @@ fn new_incarnation() -> u64 {
         return 1;
     }
     let id = u64::from_le_bytes(buf);
-    if id == 0 { 1 } else { id }
+    if id == 0 {
+        1
+    } else {
+        id
+    }
 }
 
 struct SessionSnapshot {

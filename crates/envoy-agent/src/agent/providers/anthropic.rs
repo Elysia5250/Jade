@@ -126,7 +126,9 @@ impl AnthropicAcc {
         if start {
             self.input_tokens = usage["input_tokens"].as_u64().unwrap_or(self.input_tokens);
         } else {
-            self.output_tokens = usage["output_tokens"].as_u64().unwrap_or(self.output_tokens);
+            self.output_tokens = usage["output_tokens"]
+                .as_u64()
+                .unwrap_or(self.output_tokens);
         }
         if let Some(n) = usage["cache_read_input_tokens"].as_u64() {
             self.cache_read_tokens = n;

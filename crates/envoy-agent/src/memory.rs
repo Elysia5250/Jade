@@ -339,8 +339,10 @@ mod tests {
 
     #[test]
     fn split_note_parses_eof_delimiter_and_inline_comment() {
-        let (title, enabled, workspace, body) =
-            split_note("---\ntitle: \"Alpha # 1\" # keep\nenabled: false # off\n---", "fb");
+        let (title, enabled, workspace, body) = split_note(
+            "---\ntitle: \"Alpha # 1\" # keep\nenabled: false # off\n---",
+            "fb",
+        );
         assert_eq!(title, "Alpha # 1");
         assert!(!enabled);
         assert!(workspace.is_none());

@@ -103,9 +103,7 @@ impl App {
                     redirect_uri: next_redirect,
                 } => {
                     if let Some(Modal::Login(LoginModal::OAuthBrowser {
-                        url,
-                        redirect_uri,
-                        ..
+                        url, redirect_uri, ..
                     })) = self.ui.modal.as_mut()
                     {
                         *url = next_url;

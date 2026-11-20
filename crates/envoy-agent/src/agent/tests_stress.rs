@@ -233,8 +233,9 @@ async fn stress_250_step_loop_with_compaction_and_fd_rss_profile() {
             tool_calls: vec![],
             tool_call_id: None,
             tool_name: None,
-        
-            reasoning_blocks: Vec::new(),}],
+
+            reasoning_blocks: Vec::new(),
+        }],
         asks: AskBroker::new_headless(),
         steer: Arc::new(Mutex::new(vec![])),
         permissions: PermissionEngine::new(

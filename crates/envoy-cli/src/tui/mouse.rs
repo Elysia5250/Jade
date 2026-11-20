@@ -11,7 +11,8 @@ impl App {
         match mouse.kind {
             MouseEventKind::Moved => {
                 self.ui.inspector.hover_divider = self
-                    .ui.inspector
+                    .ui
+                    .inspector
                     .divider_x
                     .map(|dx| col.abs_diff(dx) <= 1)
                     .unwrap_or(false);
@@ -101,13 +102,15 @@ impl App {
                 }
                 if self.is_over_inspector(col, row) {
                     self.ui.inspector.scroll = self
-                        .ui.inspector
+                        .ui
+                        .inspector
                         .scroll
                         .saturating_add(3)
                         .min(self.ui.inspector.max_scroll);
                 } else {
                     self.ui.transcript_scroll = self
-                        .ui.transcript_scroll
+                        .ui
+                        .transcript_scroll
                         .saturating_add(3)
                         .min(self.ui.transcript_max_scroll);
                     if self.ui.transcript_scroll >= self.ui.transcript_max_scroll {
@@ -132,7 +135,8 @@ impl App {
 
     pub(in crate::tui) fn dispatch_click(&mut self, col: u16, row: u16) -> Option<Action> {
         let hit = self
-            .ui.hit_regions
+            .ui
+            .hit_regions
             .iter()
             .rev()
             .find(|hr| {

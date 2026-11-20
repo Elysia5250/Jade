@@ -16,14 +16,14 @@ pub use catalog::{
     record_model_cap, refresh_models_dev_if_stale, store_listed_models, ListedModel,
 };
 pub use fetch::{fetch_provider_models, refresh_active_provider_models};
-pub use prune::bound_tool_output;
 #[cfg(test)]
 pub(crate) use mask::mask_old_observations;
+pub use prune::bound_tool_output;
 pub use summary::{assemble_compacted_messages, split_head_tail, summarize_messages};
+pub(crate) use tokens::tools_overhead_for;
 pub use tokens::{
     context_used, estimate_turn_raw_tokens, estimate_turn_tokens, tools_overhead, TokenCalibration,
 };
-pub(crate) use tokens::tools_overhead_for;
 
 use crate::agent::events::AgentEvent;
 use crate::auth::StoredProvider;
@@ -352,8 +352,9 @@ pub async fn generate_handoff(
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
-        
-            reasoning_blocks: Vec::new(),}],
+
+            reasoning_blocks: Vec::new(),
+        }],
         tools_overhead(&[]),
         TokenCalibration::default(),
     );

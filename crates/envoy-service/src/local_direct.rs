@@ -6,9 +6,7 @@
 use super::AgentServer;
 use anyhow::{bail, Context, Result};
 use envoy_core::{fs, job, search};
-use envoy_proto::{
-    Entry, GrepHit, Hello, Job, JobId, LogRecord, SubmitRequest, AGENT_VERSION,
-};
+use envoy_proto::{Entry, GrepHit, Hello, Job, JobId, LogRecord, SubmitRequest, AGENT_VERSION};
 use std::time::Duration;
 
 const LOG_BATCH: usize = 64 * 1024;
@@ -94,12 +92,7 @@ pub(crate) async fn write(path: &str, data: &[u8], mode: Option<u32>) -> Result<
     fs::write_file(path, data, mode).await
 }
 
-pub(crate) async fn edit(
-    path: &str,
-    old: &str,
-    new: &str,
-    replace_all: bool,
-) -> Result<usize> {
+pub(crate) async fn edit(path: &str, old: &str, new: &str, replace_all: bool) -> Result<usize> {
     fs::edit_file(path, old, new, replace_all).await
 }
 

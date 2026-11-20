@@ -64,8 +64,9 @@ impl Runtime {
                     tool_calls: Vec::new(),
                     tool_call_id: None,
                     tool_name: None,
-                
-                    reasoning_blocks: Vec::new(),});
+
+                    reasoning_blocks: Vec::new(),
+                });
                 true
             } else {
                 state.steer.lock().unwrap().push(agent_message);
@@ -296,8 +297,9 @@ mod tests {
                 tool_calls: vec![],
                 tool_call_id: None,
                 tool_name: None,
-            
-                reasoning_blocks: Vec::new(),});
+
+                reasoning_blocks: Vec::new(),
+            });
             st.active_checkpoint_id = None;
         }
         std::fs::write(&tracked, "fn v1() {}\n").unwrap();

@@ -1,8 +1,6 @@
 //! Client helpers for connecting to the daemon control socket (`agent.sock`).
 
-use super::hello::{
-    protocol_mismatch_message, read_hello, write_hello, AGENT_PROTOCOL_VERSION,
-};
+use super::hello::{protocol_mismatch_message, read_hello, write_hello, AGENT_PROTOCOL_VERSION};
 use super::protocol::{AgentReq, AgentResp};
 use super::socket_path;
 use crate::session::ChatMessage;

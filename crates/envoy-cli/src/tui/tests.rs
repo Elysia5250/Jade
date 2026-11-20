@@ -181,7 +181,10 @@ fn cd_directory_autocomplete_lists_subdirs_and_switches() {
     assert_eq!(comps, vec![("alpha-proj/".into(), "alpha-proj/".into())]);
 
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.session.current.cwd, std::fs::canonicalize(&sub).unwrap());
+    assert_eq!(
+        app.session.current.cwd,
+        std::fs::canonicalize(&sub).unwrap()
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -371,8 +374,9 @@ async fn context_budget_compacted_and_handoff_render_cleanly() {
                 tool_calls: Vec::new(),
                 tool_call_id: None,
                 tool_name: None,
-            
-                reasoning_blocks: Vec::new(),}],
+
+                reasoning_blocks: Vec::new(),
+            }],
             before_tokens: 50_000,
             after_tokens: 4_000,
             summary: "ok".into(),
@@ -381,7 +385,8 @@ async fn context_budget_compacted_and_handoff_render_cleanly() {
     );
     assert_eq!(app.session.current.messages.len(), 1);
     assert!(app
-        .session.current
+        .session
+        .current
         .items
         .iter()
         .any(|i| matches!(i, TranscriptItem::User { .. })));
@@ -522,7 +527,8 @@ async fn welcome_picker_selects_a_recent_workspace() {
     }
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     let err = app
-        .ui.welcome
+        .ui
+        .welcome
         .as_ref()
         .unwrap()
         .error

@@ -135,7 +135,10 @@ pub(crate) fn check_remote_path(raw: &str, data_dir: &Path) -> Result<(), String
     Ok(())
 }
 
-pub(crate) fn enforce_remote_submit(req: &mut SubmitRequest, data_dir: &Path) -> Result<(), String> {
+pub(crate) fn enforce_remote_submit(
+    req: &mut SubmitRequest,
+    data_dir: &Path,
+) -> Result<(), String> {
     if let Some(ref cwd) = req.cwd {
         check_remote_path(cwd, data_dir)?;
     }

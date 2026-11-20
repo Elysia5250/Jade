@@ -245,7 +245,8 @@ async fn refuse_writers(
     if readonly.is_empty() {
         return (reports, hook_state);
     }
-    let (ran, state) = run_plain(host, parent_call_id, readonly, hook_state, parent_tx, total).await;
+    let (ran, state) =
+        run_plain(host, parent_call_id, readonly, hook_state, parent_tx, total).await;
     reports.extend(ran);
     (reports, state)
 }

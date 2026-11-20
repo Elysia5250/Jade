@@ -127,7 +127,9 @@ struct CopilotSessionCache {
 static COPILOT_SESSION: Mutex<Option<CopilotSessionCache>> = Mutex::new(None);
 
 fn cache_lock() -> std::sync::MutexGuard<'static, Option<CopilotSessionCache>> {
-    COPILOT_SESSION.lock().unwrap_or_else(|err| err.into_inner())
+    COPILOT_SESSION
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
 }
 
 /// Refresh a minute early so an in-flight turn does not use an expired bearer.
@@ -213,7 +215,9 @@ pub async fn start_github_copilot_device_default() -> Result<GitHubDeviceStart> 
     start_github_copilot_device(&http).await
 }
 
-pub async fn poll_github_copilot_device_default(start: &GitHubDeviceStart) -> Result<StoredProvider> {
+pub async fn poll_github_copilot_device_default(
+    start: &GitHubDeviceStart,
+) -> Result<StoredProvider> {
     let http = crate::agent::shared_http_client()?;
     poll_github_copilot_device(&http, start).await
 }
@@ -241,10 +245,7 @@ mod tests {
     fn copilot_expiry_accepts_unix_seconds_and_millis() {
         let now = 1_700_000_000_000u64;
         let seconds = serde_json::json!({"expires_at": 1_700_000_120u64});
-        assert_eq!(
-            copilot_expires_at_ms(&seconds, now),
-            1_700_000_120_000
-        );
+        assert_eq!(copilot_expires_at_ms(&seconds, now), 1_700_000_120_000);
         let text = serde_json::json!({"expires_at": "1700000120000"});
         assert_eq!(copilot_expires_at_ms(&text, now), 1_700_000_120_000);
         let missing = serde_json::json!({});

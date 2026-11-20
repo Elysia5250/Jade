@@ -44,8 +44,8 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
 
-    let show_inspector =
-        app.ui.show_sidebar && (area.width >= 104 || (app.ui.inspector.force_open && area.width >= 76));
+    let show_inspector = app.ui.show_sidebar
+        && (area.width >= 104 || (app.ui.inspector.force_open && area.width >= 76));
 
     let (main_area, sidebar_area, divider_x) = if show_inspector {
         let desired = if let Some(ratio) = app.ui.inspector.dragged_ratio {
@@ -227,7 +227,10 @@ fn apply_selection_highlight(
     }
 }
 
-pub(in crate::tui) fn snapshot_screen_lines(buf: &ratatui::buffer::Buffer, out: &mut Vec<Vec<String>>) {
+pub(in crate::tui) fn snapshot_screen_lines(
+    buf: &ratatui::buffer::Buffer,
+    out: &mut Vec<Vec<String>>,
+) {
     let area = buf.area;
     let total_rows = (area.y + area.height) as usize;
     let total_cols = (area.x + area.width) as usize;

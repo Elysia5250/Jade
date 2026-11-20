@@ -34,11 +34,7 @@ impl Drop for AcceptPool {
 /// Keep `size` idle accept connections parked on conduit and serve whatever is
 /// handed off. Each worker owns exactly one parked connection at a time, so the
 /// pool size is the number of simultaneous idle accepts.
-pub fn spawn_accept_pool(
-    server: AgentServer,
-    client: ConduitClient,
-    size: usize,
-) -> AcceptPool {
+pub fn spawn_accept_pool(server: AgentServer, client: ConduitClient, size: usize) -> AcceptPool {
     let size = size.max(1);
     let tasks = Arc::new(Mutex::new(Vec::with_capacity(size)));
     let stop = Arc::new(AtomicBool::new(false));

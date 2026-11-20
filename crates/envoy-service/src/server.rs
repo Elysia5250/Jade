@@ -225,7 +225,10 @@ where
     let (op_name, detail) = describe(&op);
     let failed = Arc::new(AtomicBool::new(false));
     let outcome = REPLY_FAILED
-        .scope(failed.clone(), dispatch(&inner, &caller, op, &mut rd, &mut wr))
+        .scope(
+            failed.clone(),
+            dispatch(&inner, &caller, op, &mut rd, &mut wr),
+        )
         .await;
     let ms = start.elapsed().as_millis() as u64;
     // `dispatch` returns Ok after a `Reply::Failed` / `Reply::Denied`. The
@@ -523,10 +526,7 @@ async fn serve_write<S: AsyncRead + AsyncWrite + Unpin>(
                     reply(
                         wr,
                         Reply::Failed {
-                            error: format!(
-                                "write exceeds {} byte limit",
-                                policy::MAX_WRITE_BYTES
-                            ),
+                            error: format!("write exceeds {} byte limit", policy::MAX_WRITE_BYTES),
                         },
                     )
                     .await?;

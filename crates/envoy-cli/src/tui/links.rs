@@ -277,7 +277,11 @@ fn consider_symlink(
 }
 
 fn claim_file(path: &Path, seen: &mut HashSet<(u64, u64)>) -> bool {
-    match std::fs::symlink_metadata(path).ok().as_ref().and_then(meta_id) {
+    match std::fs::symlink_metadata(path)
+        .ok()
+        .as_ref()
+        .and_then(meta_id)
+    {
         Some(id) => seen.insert(id),
         None => true,
     }
@@ -480,7 +484,9 @@ pub(crate) fn inline_spans_linked(
                     let target_raw = &after[..close_paren];
                     if !label.is_empty() && !target_raw.is_empty() {
                         flush_plain(&mut plain, &mut out);
-                        if let Some((path, ln)) = index.resolve_path_cached(cwd, changed, target_raw) {
+                        if let Some((path, ln)) =
+                            index.resolve_path_cached(cwd, changed, target_raw)
+                        {
                             out.push(LinkedSpan {
                                 span: Span::styled(
                                     label.to_string(),

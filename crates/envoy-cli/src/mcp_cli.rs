@@ -20,7 +20,11 @@ pub(crate) enum McpCmd {
     Tools,
 }
 
-pub(crate) async fn cmd_mcp(data_dir: PathBuf, cmd: McpCmd, conduit: Option<PathBuf>) -> Result<()> {
+pub(crate) async fn cmd_mcp(
+    data_dir: PathBuf,
+    cmd: McpCmd,
+    conduit: Option<PathBuf>,
+) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| data_dir.clone());
     match cmd {
         McpCmd::Serve { mode } => {

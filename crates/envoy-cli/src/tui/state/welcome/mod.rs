@@ -7,8 +7,8 @@ mod skills;
 
 impl App {
     pub(in crate::tui) fn open_welcome(&mut self) {
-        let here =
-            std::fs::canonicalize(&self.session.current.cwd).unwrap_or_else(|_| self.session.current.cwd.clone());
+        let here = std::fs::canonicalize(&self.session.current.cwd)
+            .unwrap_or_else(|_| self.session.current.cwd.clone());
         let here_resumes = exact_session_for_cwd(&self.data_dir, &here).is_some();
         let mut rows = vec![WelcomeRow::Here(here.clone(), here_resumes)];
         for hit in recent_workspaces(&self.data_dir) {
@@ -67,7 +67,8 @@ impl App {
             return Action::Quit;
         }
         let mode = self
-            .ui.welcome
+            .ui
+            .welcome
             .as_ref()
             .map(|w| w.mode)
             .unwrap_or(WelcomeMode::Home);
@@ -186,41 +187,41 @@ impl App {
                     }
                 }
             }
-            WelcomeMode::MemoryNew => match envoy_agent::memory::create(
-                &self.data_dir,
-                &self.session.current.cwd,
-                &draft,
-            ) {
-                Ok(note) => {
-                    let id = note.id.clone();
-                    let path = note.path.clone();
-                    if let Some(welcome) = self.ui.welcome.as_mut() {
-                        welcome.mode = WelcomeMode::Memory;
-                        welcome.draft.clear();
-                        welcome.error = None;
-                    }
-                    self.reload_welcome_notes();
-                    if let Some(welcome) = self.ui.welcome.as_mut() {
-                        if let Some(idx) = welcome.notes.iter().position(|item| item.id == id) {
-                            welcome.list_selected = idx;
+            WelcomeMode::MemoryNew => {
+                match envoy_agent::memory::create(&self.data_dir, &self.session.current.cwd, &draft)
+                {
+                    Ok(note) => {
+                        let id = note.id.clone();
+                        let path = note.path.clone();
+                        if let Some(welcome) = self.ui.welcome.as_mut() {
+                            welcome.mode = WelcomeMode::Memory;
+                            welcome.draft.clear();
+                            welcome.error = None;
                         }
+                        self.reload_welcome_notes();
+                        if let Some(welcome) = self.ui.welcome.as_mut() {
+                            if let Some(idx) = welcome.notes.iter().position(|item| item.id == id) {
+                                welcome.list_selected = idx;
+                            }
+                        }
+                        Action::EditFile(path)
                     }
-                    Action::EditFile(path)
-                }
-                Err(err) => {
-                    if let Some(welcome) = self.ui.welcome.as_mut() {
-                        welcome.error = Some(err);
+                    Err(err) => {
+                        if let Some(welcome) = self.ui.welcome.as_mut() {
+                            welcome.error = Some(err);
+                        }
+                        Action::None
                     }
-                    Action::None
                 }
-            },
+            }
             _ => Action::None,
         }
     }
 
     fn handle_welcome_home(&mut self, key: KeyEvent) -> Action {
         let len = self
-            .ui.welcome
+            .ui
+            .welcome
             .as_ref()
             .map(|w| w.rows.len())
             .unwrap_or(1)
@@ -238,7 +239,8 @@ impl App {
             }
             KeyCode::Char('n') => {
                 let row = self
-                    .ui.welcome
+                    .ui
+                    .welcome
                     .as_ref()
                     .and_then(|w| w.rows.get(w.selected))
                     .cloned();
@@ -254,7 +256,8 @@ impl App {
 
     fn activate_welcome_row(&mut self) -> Action {
         let row = self
-            .ui.welcome
+            .ui
+            .welcome
             .as_ref()
             .and_then(|w| w.rows.get(w.selected))
             .cloned();
@@ -341,10 +344,11 @@ impl App {
     }
 
     fn recount_welcome(&mut self) {
-        let skill_count = envoy_agent::skills::discover_skills(&self.data_dir, &self.session.current.cwd)
-            .into_iter()
-            .filter(|skill| skill.scope == envoy_agent::skills::SkillScope::User)
-            .count();
+        let skill_count =
+            envoy_agent::skills::discover_skills(&self.data_dir, &self.session.current.cwd)
+                .into_iter()
+                .filter(|skill| skill.scope == envoy_agent::skills::SkillScope::User)
+                .count();
         let memory_count =
             envoy_agent::memory::list_for(&self.data_dir, &self.session.current.cwd).len();
         if let Some(welcome) = self.ui.welcome.as_mut() {

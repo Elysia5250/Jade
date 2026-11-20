@@ -17,7 +17,8 @@ pub(super) fn draw_diff_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
     app.ui.inspector.height = body_area.height;
 
     let selected_path = app.ui.inspector.file_path.clone().or_else(|| {
-        app.session.current
+        app.session
+            .current
             .changed_files
             .get(app.ui.inspector.selected_diff)
             .or_else(|| app.session.current.changed_files.last())

@@ -277,7 +277,12 @@ fn classify_rust_item(header: &str) -> (Option<&'static str>, String) {
         let tok = tokens[idx].as_str();
         match tok {
             "pub" | "async" | "unsafe" | "default" | "extern" => idx += 1,
-            "const" if matches!(tokens.get(idx + 1).map(String::as_str), Some("fn" | "unsafe")) => {
+            "const"
+                if matches!(
+                    tokens.get(idx + 1).map(String::as_str),
+                    Some("fn" | "unsafe")
+                ) =>
+            {
                 idx += 1;
             }
             "use" => return (Some("use"), String::new()),
@@ -289,17 +294,42 @@ fn classify_rust_item(header: &str) -> (Option<&'static str>, String) {
                     tokens.get(idx + 1).cloned().unwrap_or_default(),
                 )
             }
-            "enum" => return (Some("enum"), tokens.get(idx + 1).cloned().unwrap_or_default()),
+            "enum" => {
+                return (
+                    Some("enum"),
+                    tokens.get(idx + 1).cloned().unwrap_or_default(),
+                )
+            }
             "union" => {
                 return (
                     Some("union"),
                     tokens.get(idx + 1).cloned().unwrap_or_default(),
                 )
             }
-            "trait" => return (Some("trait"), tokens.get(idx + 1).cloned().unwrap_or_default()),
-            "mod" => return (Some("mod"), tokens.get(idx + 1).cloned().unwrap_or_default()),
-            "type" => return (Some("type"), tokens.get(idx + 1).cloned().unwrap_or_default()),
-            "const" => return (Some("const"), tokens.get(idx + 1).cloned().unwrap_or_default()),
+            "trait" => {
+                return (
+                    Some("trait"),
+                    tokens.get(idx + 1).cloned().unwrap_or_default(),
+                )
+            }
+            "mod" => {
+                return (
+                    Some("mod"),
+                    tokens.get(idx + 1).cloned().unwrap_or_default(),
+                )
+            }
+            "type" => {
+                return (
+                    Some("type"),
+                    tokens.get(idx + 1).cloned().unwrap_or_default(),
+                )
+            }
+            "const" => {
+                return (
+                    Some("const"),
+                    tokens.get(idx + 1).cloned().unwrap_or_default(),
+                )
+            }
             "static" => {
                 return (
                     Some("static"),

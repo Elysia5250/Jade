@@ -20,9 +20,9 @@ pub(crate) mod subagent;
 #[cfg(test)]
 mod tests_hooks;
 #[cfg(test)]
-mod tests_phase5;
-#[cfg(test)]
 mod tests_loop;
+#[cfg(test)]
+mod tests_phase5;
 #[cfg(test)]
 mod tests_stress;
 pub mod tools;
@@ -32,5 +32,5 @@ pub use config::{TurnConfig, TurnUsage};
 pub use context::CompactionTier;
 pub use events::{AgentEvent, AskOption};
 pub use monitors::{MonitorBroker, MonitorInfo, MonitorStartSpec};
-pub use r#loop::run_agent_turn;
 pub(crate) use providers::shared_http_client;
+pub use r#loop::run_agent_turn;

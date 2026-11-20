@@ -78,7 +78,8 @@ impl McpManager {
             }
             for mut t in discovered {
                 if mgr.tools.contains_key(&t.qualified_name) {
-                    let candidate = disambiguate_tool_name(&t.qualified_name, &t.server, &t.raw_name);
+                    let candidate =
+                        disambiguate_tool_name(&t.qualified_name, &t.server, &t.raw_name);
                     if mgr.tools.contains_key(&candidate) {
                         tracing::warn!(
                             server = %t.server,
@@ -200,22 +201,22 @@ async fn connect_one(
     let mut transport =
         match McpTransport::connect(&cfg.transport, cfg.scope, &workspace_cwd, cfg.timeout_s).await
         {
-        Ok(t) => t,
-        Err(e) => {
-            return (
-                McpServerStatus {
-                    name: cfg.name,
-                    scope: cfg.scope,
-                    transport_label,
-                    connected: false,
-                    tool_count: 0,
-                    error: Some(format!("{e:#}")),
-                },
-                None,
-                Vec::new(),
-            );
-        }
-    };
+            Ok(t) => t,
+            Err(e) => {
+                return (
+                    McpServerStatus {
+                        name: cfg.name,
+                        scope: cfg.scope,
+                        transport_label,
+                        connected: false,
+                        tool_count: 0,
+                        error: Some(format!("{e:#}")),
+                    },
+                    None,
+                    Vec::new(),
+                );
+            }
+        };
 
     let mut tools = Vec::new();
     let mut cursor: Option<String> = None;
@@ -297,7 +298,11 @@ fn disambiguate_tool_name(base: &str, server: &str, raw_name: &str) -> String {
     let d = hasher.finalize();
     let suffix = format!("_{:02x}{:02x}{:02x}{:02x}", d[0], d[1], d[2], d[3]);
     let keep = 64usize.saturating_sub(suffix.len());
-    let prefix = if base.len() > keep { &base[..keep] } else { base };
+    let prefix = if base.len() > keep {
+        &base[..keep]
+    } else {
+        base
+    };
     format!("{prefix}{suffix}")
 }
 

@@ -53,8 +53,7 @@ impl EnvDiskSnapshot {
             if let Some(agents) = &self.agents {
                 parts.push(agents.clone());
             }
-            if let Some(todos) = super::tools::todo::format_active_todos_xml(data_dir, session_id)
-            {
+            if let Some(todos) = super::tools::todo::format_active_todos_xml(data_dir, session_id) {
                 parts.push(format!("## Active session checklist\n{todos}"));
             }
         }
@@ -237,9 +236,8 @@ pub(crate) fn sync_environment(messages: &mut Vec<ChatMessage>, note: Option<&st
         if latest_emitted_env_note(messages) == Some(note) {
             tail.environment_update = None;
         } else {
-            tail.environment_update = Some(format!(
-                "{ENV_UPDATE_PREFIX}{note}\n</environment_update>"
-            ));
+            tail.environment_update =
+                Some(format!("{ENV_UPDATE_PREFIX}{note}\n</environment_update>"));
         }
         push_volatile_tail(messages, tail);
         return;

@@ -284,7 +284,8 @@ impl App {
     pub(in crate::tui) fn machine_items(&self) -> Vec<(String, Command)> {
         let mut items = Vec::new();
         for peer in self
-            .jobs.status
+            .jobs
+            .status
             .as_ref()
             .map(|s| s.peers.as_slice())
             .unwrap_or(&[])
@@ -323,7 +324,10 @@ impl App {
                 Command::OpenModePicker,
             ),
             (
-                format!("Set permission mode (now {})", self.session.perm_mode.label()),
+                format!(
+                    "Set permission mode (now {})",
+                    self.session.perm_mode.label()
+                ),
                 Command::OpenPermissionPicker,
             ),
             ("New session (/new)".to_string(), Command::NewSession),
@@ -347,7 +351,8 @@ impl App {
             ("Refresh".to_string(), Command::Refresh),
         ];
         for peer in self
-            .jobs.status
+            .jobs
+            .status
             .as_ref()
             .map(|s| s.peers.as_slice())
             .unwrap_or(&[])

@@ -16,7 +16,14 @@ impl App {
                 self.agent.pending_ask = None;
             }
             AgentEvent::UserMessage { text, mode } => {
-                if mode != "steer" && self.agent.queued.front().map(|q| q == &text).unwrap_or(false) {
+                if mode != "steer"
+                    && self
+                        .agent
+                        .queued
+                        .front()
+                        .map(|q| q == &text)
+                        .unwrap_or(false)
+                {
                     self.agent.queued.pop_front();
                 }
                 let id = self.session.current.alloc_id();
@@ -114,8 +121,12 @@ impl App {
             }
             AgentEvent::ToolJob { call_id, job_id } => {
                 if let Some(&item_id) = self.agent.active_tool_items.get(&call_id) {
-                    if let Some(TranscriptItem::Tool { job_id: slot, .. }) =
-                        self.session.current.items.iter_mut().find(|i| i.id() == item_id)
+                    if let Some(TranscriptItem::Tool { job_id: slot, .. }) = self
+                        .session
+                        .current
+                        .items
+                        .iter_mut()
+                        .find(|i| i.id() == item_id)
                     {
                         *slot = Some(job_id);
                     }
@@ -123,7 +134,13 @@ impl App {
             }
             AgentEvent::ToolOutput { call_id, text, err } => {
                 if let Some(&item_id) = self.agent.active_tool_items.get(&call_id) {
-                    if let Some(item) = self.session.current.items.iter_mut().find(|i| i.id() == item_id) {
+                    if let Some(item) = self
+                        .session
+                        .current
+                        .items
+                        .iter_mut()
+                        .find(|i| i.id() == item_id)
+                    {
                         item.push_output_text(&text, err);
                     }
                 }
@@ -143,7 +160,12 @@ impl App {
                         collapsed,
                         name,
                         ..
-                    }) = self.session.current.items.iter_mut().find(|i| i.id() == item_id)
+                    }) = self
+                        .session
+                        .current
+                        .items
+                        .iter_mut()
+                        .find(|i| i.id() == item_id)
                     {
                         *status = if ok {
                             CardStatus::Done
@@ -295,7 +317,8 @@ impl App {
                 title,
             } => {
                 self.flush_session_now();
-                let mut fresh = Session::new(self.session.current.cwd.clone(), self.jobs.target.clone());
+                let mut fresh =
+                    Session::new(self.session.current.cwd.clone(), self.jobs.target.clone());
                 fresh.title = title;
                 fresh.prompt_tokens = after_tokens;
                 fresh.messages = vec![
@@ -309,8 +332,9 @@ impl App {
                         tool_calls: Vec::new(),
                         tool_call_id: None,
                         tool_name: None,
-                    
-                        reasoning_blocks: Vec::new(),},
+
+                        reasoning_blocks: Vec::new(),
+                    },
                     ChatMessage {
                         role: ChatRole::Assistant,
                         content: "Ready to continue from the handoff summary.".into(),
@@ -318,8 +342,9 @@ impl App {
                         tool_calls: Vec::new(),
                         tool_call_id: None,
                         tool_name: None,
-                    
-                        reasoning_blocks: Vec::new(),},
+
+                        reasoning_blocks: Vec::new(),
+                    },
                 ];
                 let notice_id = fresh.alloc_id();
                 fresh.items.push(TranscriptItem::Notice {

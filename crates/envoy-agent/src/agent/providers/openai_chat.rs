@@ -178,8 +178,7 @@ async fn post_chat_retrying_stream_options(
             && body.get("stream_options").is_some()
             && err_body.to_ascii_lowercase().contains("stream_options");
         if rejected {
-            body.as_object_mut()
-                .map(|map| map.remove("stream_options"));
+            body.as_object_mut().map(|map| map.remove("stream_options"));
             stripped = true;
             continue;
         }
@@ -363,8 +362,9 @@ mod tests {
             tool_calls: vec![],
             tool_call_id: None,
             tool_name: None,
-        
-            reasoning_blocks: Vec::new(),}];
+
+            reasoning_blocks: Vec::new(),
+        }];
         let (tx, _rx) = mpsc::unbounded_channel();
         let reply = stream_openai_chat(
             &reqwest::Client::new(),

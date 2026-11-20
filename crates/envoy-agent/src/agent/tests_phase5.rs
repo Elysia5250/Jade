@@ -4,7 +4,9 @@ use super::context::{
     estimate_turn_tokens, prepare_context, skip_inplace_mask, BudgetPlan, CompactionTier,
     TokenCalibration,
 };
-use super::prompt::{sync_environment, sync_pre_model_tail, ENV_PREFIX, ENV_UPDATE_PREFIX, PRE_MODEL_PREFIX};
+use super::prompt::{
+    sync_environment, sync_pre_model_tail, ENV_PREFIX, ENV_UPDATE_PREFIX, PRE_MODEL_PREFIX,
+};
 use super::providers::{
     anthropic_messages, chat_body, chat_messages, codex_request_body, mark_last_tool,
     prompt_cache_key, system_blocks,
@@ -90,7 +92,8 @@ fn cache_types(value: &Value) -> Vec<&str> {
 fn stable_prefix(messages: &[ChatMessage]) -> String {
     let mut out = String::new();
     for message in messages {
-        if message.content.starts_with(ENV_UPDATE_PREFIX) || message.content.starts_with(PRE_MODEL_PREFIX)
+        if message.content.starts_with(ENV_UPDATE_PREFIX)
+            || message.content.starts_with(PRE_MODEL_PREFIX)
         {
             break;
         }
@@ -105,7 +108,9 @@ fn provider() -> StoredProvider {
         name: "Test".into(),
         protocol: ProviderProtocol::OpenAiChat,
         base_url: "http://127.0.0.1:9/v1".into(),
-        credential: Credential::ApiKey { key: "sk-test".into() },
+        credential: Credential::ApiKey {
+            key: "sk-test".into(),
+        },
         custom_models: Vec::new(),
         fetched_models: Vec::new(),
         model_routes: Default::default(),
@@ -133,12 +138,18 @@ fn anthropic_body_merges_users_strips_empty_text_and_marks_cache() {
     }
     let body = serde_json::to_string(&messages).unwrap();
     assert!(!body.contains("\"text\":\"\""), "{body}");
-    assert!(text_blocks(&json!(messages)).iter().all(|text| !text.is_empty()));
+    assert!(text_blocks(&json!(messages))
+        .iter()
+        .all(|text| !text.is_empty()));
 
-    assert!(messages.iter().any(|message| message["content"]
-        .as_array()
-        .is_some_and(|blocks| blocks.iter().any(|block| block.get("cache_control").is_some()))));
-    assert!(cache_types(&json!(messages)).iter().all(|kind| *kind == "ephemeral"));
+    assert!(messages.iter().any(
+        |message| message["content"].as_array().is_some_and(|blocks| blocks
+            .iter()
+            .any(|block| block.get("cache_control").is_some()))
+    ));
+    assert!(cache_types(&json!(messages))
+        .iter()
+        .all(|kind| *kind == "ephemeral"));
     for message in &messages {
         let Some(blocks) = message["content"].as_array() else {
             continue;
@@ -180,7 +191,11 @@ fn anthropic_tool_continuation_replays_thinking_signature_and_redacted() {
         name: "read".into(),
         arguments: r#"{"path":"a.rs"}"#.into(),
     }];
-    let history = vec![user("read a"), assistant, tool_result("tu_1", "read", "file")];
+    let history = vec![
+        user("read a"),
+        assistant,
+        tool_result("tu_1", "read", "file"),
+    ];
     let messages = anthropic_messages(&history);
     let blocks = messages[1]["content"].as_array().unwrap();
     assert_eq!(blocks[0]["type"], "thinking");
@@ -204,7 +219,10 @@ fn prefix_bytes_stay_identical_from_step_2_through_5_at_65_percent() {
         tool_result("c1", "exec", &format!("{}\n", "Z".repeat(80)).repeat(40)),
         user("latest"),
     ];
-    sync_environment(&mut messages, Some("skills\n## Active session checklist\n- first"));
+    sync_environment(
+        &mut messages,
+        Some("skills\n## Active session checklist\n- first"),
+    );
     let plan_probe = estimate_turn_tokens(system, &messages, 0, TokenCalibration::default());
     let compact_at = (plan_probe * 100 / 65).max(plan_probe);
     let plan = BudgetPlan {
@@ -219,8 +237,14 @@ fn prefix_bytes_stay_identical_from_step_2_through_5_at_65_percent() {
     };
     assert!(plan_probe > plan.prune_at && plan_probe <= plan.compact_at);
     assert!(!skip_inplace_mask(false, plan_probe, &plan));
-    super::context::mask_old_observations(&mut messages, plan.tail_keep_tokens, TokenCalibration::default());
-    assert!(messages.iter().any(|message| message.content.contains("[masked ")));
+    super::context::mask_old_observations(
+        &mut messages,
+        plan.tail_keep_tokens,
+        TokenCalibration::default(),
+    );
+    assert!(messages
+        .iter()
+        .any(|message| message.content.contains("[masked ")));
 
     let mut seen = Vec::new();
     for step in 2..=5 {
@@ -234,8 +258,12 @@ fn prefix_bytes_stay_identical_from_step_2_through_5_at_65_percent() {
     assert!(seen.windows(2).all(|pair| pair[0] == pair[1]));
     assert!(messages[0].content.starts_with(ENV_PREFIX));
     assert!(!messages[0].content.contains("todo 5"));
-    assert!(messages.iter().any(|message| message.content.contains("todo 5")));
-    assert!(messages.iter().any(|message| message.content.starts_with(PRE_MODEL_PREFIX)));
+    assert!(messages
+        .iter()
+        .any(|message| message.content.contains("todo 5")));
+    assert!(messages
+        .iter()
+        .any(|message| message.content.starts_with(PRE_MODEL_PREFIX)));
     let masked = messages
         .iter()
         .find(|message| message.role == ChatRole::Tool)
@@ -250,7 +278,10 @@ fn dossier_keeps_multiline_user_requirements_including_the_tail() {
     let (_, dossier) = super::context::summary::condense_for_summary(&[user(text)]);
     assert!(dossier.contains("need the parser"), "{dossier}");
     assert!(dossier.contains("to keep every line"), "{dossier}");
-    assert!(dossier.contains("TAIL REQUIREMENT: preserve this last line"), "{dossier}");
+    assert!(
+        dossier.contains("TAIL REQUIREMENT: preserve this last line"),
+        "{dossier}"
+    );
 }
 
 #[test]
@@ -268,7 +299,11 @@ fn summary_request_is_one_user_message_and_sends_no_tools() {
 fn merge_summary_caps_at_16_000_chars() {
     let previous = "甲".repeat(20_000);
     let summary = super::context::summary::merge_summary(Some(&previous), "");
-    assert!(summary.chars().count() <= 16_000, "{}", summary.chars().count());
+    assert!(
+        summary.chars().count() <= 16_000,
+        "{}",
+        summary.chars().count()
+    );
 }
 
 #[tokio::test]
@@ -323,7 +358,9 @@ async fn force_mask_returns_pruned_only_without_a_provider_call() {
     .expect("mask freed space");
     assert!(outcome.pruned_only);
     assert!(outcome.after_tokens < outcome.before_tokens);
-    assert!(messages.iter().any(|message| message.content.contains("[masked ")));
+    assert!(messages
+        .iter()
+        .any(|message| message.content.contains("[masked ")));
 }
 
 #[test]
@@ -384,15 +421,21 @@ fn gateway_deepseek_r1_keeps_reasoning_until_the_next_user_turn() {
     assert_eq!(replayed["reasoning_content"], "chain of thought");
 
     let plain = chat_messages("openai/gpt-4.1", "sys", &history);
-    assert!(plain.iter().all(|message| message.get("reasoning_content").is_none()));
+    assert!(plain
+        .iter()
+        .all(|message| message.get("reasoning_content").is_none()));
 
     history.push(user("new question"));
     let next_turn = chat_messages("deepseek-r1", "sys", &history);
-    assert!(next_turn.iter().all(|message| message.get("reasoning_content").is_none()));
+    assert!(next_turn
+        .iter()
+        .all(|message| message.get("reasoning_content").is_none()));
 
     strip_prior_turn_reasoning(&mut history);
     assert!(history.iter().all(|message| message.reasoning.is_none()));
-    assert!(history.iter().all(|message| message.reasoning_blocks.is_empty()));
+    assert!(history
+        .iter()
+        .all(|message| message.reasoning_blocks.is_empty()));
 }
 
 #[test]
@@ -412,7 +455,8 @@ fn prompt_cache_key_is_stable_and_old_sessions_default_the_new_fields() {
     assert_eq!(session.cache_create_tokens, 0);
     assert!(session.messages.is_empty());
 
-    let message: ChatMessage = serde_json::from_str(r#"{"role":"assistant","content":"hi"}"#).unwrap();
+    let message: ChatMessage =
+        serde_json::from_str(r#"{"role":"assistant","content":"hi"}"#).unwrap();
     assert!(message.reasoning_blocks.is_empty());
     assert_eq!(TokenCalibration::from_stored(0.0).factor, 1.0);
     assert_eq!(TokenCalibration::from_stored(1.3).factor, 1.3);
@@ -439,10 +483,7 @@ fn mid_turn_synthetic_env_preserves_reasoning_and_empty_tools_omitted() {
         "qwen3-235b-thinking",
     ] {
         let msgs = chat_messages(model, "sys", &history);
-        let replayed = msgs
-            .iter()
-            .find(|m| m["role"] == "assistant")
-            .unwrap();
+        let replayed = msgs.iter().find(|m| m["role"] == "assistant").unwrap();
         assert_eq!(replayed["reasoning_content"], "step-by-step", "{model}");
     }
     let body = chat_body(

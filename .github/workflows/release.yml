@@ -19,14 +19,13 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-          - os: macos-14
+          # macos-14 was retired on 2026-11-02. macos-15 is the arm64 image.
+          - os: macos-15
             target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
-    # ARM Linux runners are only free on public repos, and Intel macOS runners
-    # are being retired; a missing leg must not block the other assets.
-    continue-on-error: ${{ matrix.os == 'ubuntu-24.04-arm' || matrix.os == 'macos-13' }}
+    # ARM Linux runners are only free on public repos. Intel macOS runners
+    # (macos-13) are gone, so there is no x86_64-apple-darwin asset.
+    continue-on-error: ${{ matrix.os == 'ubuntu-24.04-arm' }}
 
     steps:
       - uses: actions/checkout@v4

@@ -90,8 +90,9 @@ async fn overflow_triggers_one_compaction_retry_and_second_failure_errors() {
             }],
             tool_call_id: None,
             tool_name: None,
-        
-            reasoning_blocks: Vec::new(),},
+
+            reasoning_blocks: Vec::new(),
+        },
         ChatMessage {
             role: ChatRole::User,
             content: "latest request".into(),
@@ -99,8 +100,9 @@ async fn overflow_triggers_one_compaction_retry_and_second_failure_errors() {
             tool_calls: vec![],
             tool_call_id: None,
             tool_name: None,
-        
-            reasoning_blocks: Vec::new(),},
+
+            reasoning_blocks: Vec::new(),
+        },
     ];
     let cfg = TurnConfig {
         data_dir: dir.clone(),

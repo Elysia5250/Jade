@@ -260,8 +260,8 @@ pub(super) async fn finalize_step_limit(
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: None,
-    
-        reasoning_blocks: Vec::new(),});
+        reasoning_blocks: Vec::new(),
+    });
     let no_tools = ToolFilter {
         depth: 0,
         allowed: Some(Vec::new()),

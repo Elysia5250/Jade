@@ -376,7 +376,10 @@ mod tests {
             resolve_path(Path::new("/work/app"), "src/main.rs"),
             "/work/app/src/main.rs"
         );
-        assert_eq!(resolve_path(Path::new("/work/app"), "/etc/hosts"), "/etc/hosts");
+        assert_eq!(
+            resolve_path(Path::new("/work/app"), "/etc/hosts"),
+            "/etc/hosts"
+        );
         assert!(validate_env_arg(&json!({ "env": { "LD_PRELOAD": "/tmp/x" } })).is_err());
         assert!(validate_env_arg(&json!({ "env": { "OK": "a\0b" } })).is_err());
         assert!(validate_env_arg(&json!({ "env": { "RUST_LOG": "info" } })).is_ok());

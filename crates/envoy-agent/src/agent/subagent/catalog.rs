@@ -113,10 +113,8 @@ impl SubagentSpec {
 }
 
 fn tool_mutates(name: &str) -> bool {
-    matches!(
-        name,
-        "write" | "edit" | "exec" | "job" | "todo" | "monitor"
-    ) || name.starts_with("mcp__")
+    matches!(name, "write" | "edit" | "exec" | "job" | "todo" | "monitor")
+        || name.starts_with("mcp__")
 }
 
 pub(crate) fn builtin_agents() -> Vec<SubagentSpec> {

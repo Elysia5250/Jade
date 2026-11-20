@@ -316,7 +316,7 @@
 - [x] **P8-3** `[P2/卫生]` 渲染减债、日志轮转、死代码清理与 CI 护栏对齐
   - **位置**：`crates/envoy-cli/src/tui/{markdown.rs, markdown_table.rs, highlight.rs, decrypt.rs, text.rs:37-58, modals.rs:89}`、`crates/envoy-agent/src/runtime/{protocol.rs, server.rs, mod.rs}`、`crates/envoy-service/src/{server.rs, remote.rs, conduit/mod.rs}`、`crates/envoy-agent/src/agent/tools/schema.rs:328-397`、`crates/envoy-core/src/{audit.rs, fs.rs, log.rs}`、`scripts/{check-file-sizes.py, file-size-baseline.txt}`、`.github/workflows/ci.yml`、`docs/architecture.md:86`
   - **现状问题**：手写 Markdown/高亮/解密渲染约 1,800 行持续吃维护成本；`audit.log`、`permission_audit.jsonl`、`envoy.out` 永不轮转；存在整批零调用死协议与死代码（`AgentReq::{Ensure, Attach, List}`、`AgentResp::Sessions`、`SessionInfo`、`Op::Probe`、`AgentServer::with_device`、`schema.rs` 5 个 `#[allow(dead_code)]`、`expanded_prefix`、`ModelsModal::fetching` 等）；`check-file-sizes.py` 未按 `AGENTS.md` 排除测试文件，`file-size-baseline.txt` 空置；CI 缺 `--locked`、`shellcheck`、Python/benchmark 脚本检查与 MSRV 检查；`docs/architecture.md:86` 审计日志路径与实际不符。
-  - **改造动作**：评估用 `pulldown-cmark` 替换手写 Markdown 块/行内/表格解析并简化或可选化 `decrypt.rs`；为 `audit.log`、`permission_audit.jsonl`、`envoy.out` 增加大小轮转上限；清理上述已确认死协议变体、死导出与死测试函数；修正 `scripts/check-file-sizes.py` 真正排除 `tests/` 与 `tests*.rs` 并清理无用 baseline；CI 增加 `--locked`、`shellcheck scripts/*.sh`、Python 语法检查及 MSRV 1.85 验证；同步修正 `docs/architecture.md:86` 路径说明。
+  - **改造动作**：评估用 `pulldown-cmark` 替换手写 Markdown 块/行内/表格解析并简化或可选化 `decrypt.rs`；为 `audit.log`、`permission_audit.jsonl`、`envoy.out` 增加大小轮转上限；清理上述已确认死协议变体、死导出与死测试函数；修正 `scripts/check-file-sizes.py` 真正排除 `tests/` 与 `tests*.rs` 并清理无用 baseline；CI 增加 `--locked`、`shellcheck scripts/*.sh`、Python 语法检查及 MSRV 1.88 验证（`globset` 0.4.21 / `ignore` 0.4.34 声明 rust-version 1.88，锁文件无法在 1.85 上解析）；同步修正 `docs/architecture.md:86` 路径说明。
   - **回归验证**：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace --locked`、`python3 scripts/check-file-sizes.py`、`shellcheck scripts/*.sh` 全部零错误零警告通过。
 
 ## Decisions
@@ -331,11 +331,12 @@
 
 ## Next
 
-**Phase 1–8 均已完成并通过验证（工作区当前变更尚未提交）。Phase 8 是本计划的最后一项，到此停止。**
+**Phase 1–8 已提交为 `35b24bb` 并发布 `v0.4.0`。Phase 8 是本计划的最后一项，到此停止。**
+- `v0.4.1` 把工作区 MSRV 调到 1.88，补上 rustfmt，发布矩阵改为 `macos-15`。已退役的 `macos-13` 不再排队。
 - **Phase 8 门禁**：`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`（392 passed, 0 failed, 0 ignored）、`cargo check --workspace --all-targets --locked`、`python3 scripts/check-file-sizes.py` 全部退出码 0。
 - **分项计数**：`envoy-agent` 222、`envoy-cli` 75 + `tests/stress_headless.rs` 2、`envoy-core` 51 + `tests/stress_jobs.rs` 2、`envoy-proto` 8、`envoy-service` 17 + 集成测试 15（`conduit_control` 6、`follow_and_audit` 3、`remote_policy` 3、`stress_server` 1、`wire_version` 2）。
-- **环境说明**：本机未安装 `rustfmt` / `shellcheck`，且未在交互终端会话中运行 `docs/MANUAL-TEST.md` PTY 清单。
-- 不要回退 Phase 1–8 的安全不变量与重构结果。未另行要求时不要 commit、不要 push。
+- **环境说明**：`35b24bb` 提交前本机没跑 `rustfmt`。该提交的 GitHub CI 上 `shellcheck` 通过，格式检查失败。PTY 清单仍未在交互终端跑过。
+- 不要回退 Phase 1–8 的安全不变量与重构结果。
 
 ## Verification
 

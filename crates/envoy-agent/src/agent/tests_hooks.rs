@@ -212,8 +212,9 @@ async fn loop_hooks_pipeline_permission_recheck_and_stop_reentry() {
             tool_calls: vec![],
             tool_call_id: None,
             tool_name: None,
-        
-            reasoning_blocks: Vec::new(),}],
+
+            reasoning_blocks: Vec::new(),
+        }],
         asks: AskBroker::new(),
         steer: Arc::new(Mutex::new(vec![])),
         permissions: PermissionEngine::new(
@@ -394,8 +395,8 @@ async fn subagent_start_block_fallback_stop_and_ordered_state_merge() {
     parent_state.insert("keep".into(), json!(true));
     let (out, all_ok, next_state, _, _) =
         execute_delegate(&host, "call_d", tasks, parent_state, &tx)
-        .await
-        .unwrap();
+            .await
+            .unwrap();
 
     assert!(!all_ok);
     assert!(out.contains("1/3 succeeded"));

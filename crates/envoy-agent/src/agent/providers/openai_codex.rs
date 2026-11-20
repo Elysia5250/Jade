@@ -274,8 +274,9 @@ fn remember_encrypted(blocks: &mut Vec<ReasoningBlock>, item: &Value) {
         return;
     }
     let id = item["id"].as_str().unwrap_or("").to_string();
-    if blocks.iter().any(|block| matches!(block, ReasoningBlock::Encrypted { content: have, .. } if have == content))
-    {
+    if blocks.iter().any(
+        |block| matches!(block, ReasoningBlock::Encrypted { content: have, .. } if have == content),
+    ) {
         return;
     }
     blocks.push(ReasoningBlock::Encrypted {

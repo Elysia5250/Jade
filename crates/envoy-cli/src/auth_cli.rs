@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use envoy_agent::auth::{
     anthropic_authorize_url, auth_path, bind_openai_callback_listener, effective_providers,
     exchange_anthropic_code_default, exchange_openai_code_default, generate_pkce, load_auth,
-    load_prefs, now_ms, openai_authorize_url, open_browser, poll_github_copilot_device_default,
+    load_prefs, now_ms, open_browser, openai_authorize_url, poll_github_copilot_device_default,
     poll_openai_device_auth_default, random_state, record_provider_login, remove_provider,
     slugify_provider_id, start_github_copilot_device_default, start_openai_device_auth_default,
     wait_openai_browser_callback, AuthMethodKind, Credential, ProviderProtocol, StoredProvider,

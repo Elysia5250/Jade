@@ -460,7 +460,9 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_str(&text).ok()
 }
 
-fn read_json_strict<T: serde::de::DeserializeOwned>(path: &Path) -> std::result::Result<Option<T>, String> {
+fn read_json_strict<T: serde::de::DeserializeOwned>(
+    path: &Path,
+) -> std::result::Result<Option<T>, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text)
             .map(Some)

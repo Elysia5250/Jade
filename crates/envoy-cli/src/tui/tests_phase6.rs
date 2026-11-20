@@ -208,7 +208,8 @@ async fn p6_2d_session_isolation_notices_rewind_shell_delete_guard_handoff_and_c
     });
     app.apply_checkpoint_rewound(1, "cp1".into(), vec![], 1, vec![], vec![], vec![]);
     let kept: Vec<_> = app
-        .session.current
+        .session
+        .current
         .items
         .iter()
         .filter_map(|i| match i {
@@ -222,7 +223,10 @@ async fn p6_2d_session_isolation_notices_rewind_shell_delete_guard_handoff_and_c
     app.agent.running = true;
     let remote = Remote::new(dialer_for(&dir, "local", None));
     app.cancel_active(&remote).await;
-    assert!(app.agent.running, "daemon remains authoritative until TurnError");
+    assert!(
+        app.agent.running,
+        "daemon remains authoritative until TurnError"
+    );
     app.apply_event(99, AgentEvent::TurnError("interrupted".into()));
     assert!(!app.agent.running);
 
@@ -262,7 +266,8 @@ async fn p6_2e_bound_port_short_modal_screens_and_mouse_actions() {
     // 1. OpenAiBrowserBound updates OAuthBrowser redirect_uri and authorize URL to bound port.
     app.ui.modal = Some(Modal::Login(LoginModal::OAuthBrowser {
         provider_name: "ChatGPT".into(),
-        url: "http://auth.openai.com?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback".into(),
+        url: "http://auth.openai.com?redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"
+            .into(),
         redirect_uri: "http://localhost:1455/auth/callback".into(),
         verifier: "ver".into(),
         pasted: String::new(),
@@ -273,12 +278,16 @@ async fn p6_2e_bound_port_short_modal_screens_and_mouse_actions() {
     let (tx, rx) = mpsc::unbounded_channel();
     app.login.rx = Some(rx);
     tx.send(LoginEvent::OpenAiBrowserBound {
-        url: "http://auth.openai.com?redirect_uri=http%3A%2F%2Flocalhost%3A49152%2Fauth%2Fcallback".into(),
+        url: "http://auth.openai.com?redirect_uri=http%3A%2F%2Flocalhost%3A49152%2Fauth%2Fcallback"
+            .into(),
         redirect_uri: "http://localhost:49152/auth/callback".into(),
     })
     .unwrap();
     app.drain_login_events();
-    let Some(Modal::Login(LoginModal::OAuthBrowser { url, redirect_uri, .. })) = &app.ui.modal else {
+    let Some(Modal::Login(LoginModal::OAuthBrowser {
+        url, redirect_uri, ..
+    })) = &app.ui.modal
+    else {
         panic!("expected OAuthBrowser");
     };
     assert_eq!(redirect_uri, "http://localhost:49152/auth/callback");
@@ -382,9 +391,11 @@ async fn p6_2e_bound_port_short_modal_screens_and_mouse_actions() {
     let action = app.dispatch_click(1, 0).expect("CycleMode emits Action");
     assert!(!matches!(action, Action::AttachJob(_)));
     let mut remote = Remote::new(dialer_for(&dir, "local", None));
-    assert!(!drive::dispatch_action_for_test(&mut app, &mut remote, action)
-        .await
-        .unwrap());
+    assert!(
+        !drive::dispatch_action_for_test(&mut app, &mut remote, action)
+            .await
+            .unwrap()
+    );
     assert_eq!(app.ui.mode, InputMode::Shell);
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -413,7 +424,11 @@ fn p6_3a_welcome_mode_and_single_source_slash_commands() {
     assert_eq!(app.ui.inspector.tab, InspectorTab::Output);
 
     let _ = app.run_slash("/definitely_unknown_cmd");
-    let (msg, is_err, _) = app.ui.toast.as_ref().expect("unknown command sets error toast");
+    let (msg, is_err, _) = app
+        .ui
+        .toast
+        .as_ref()
+        .expect("unknown command sets error toast");
     assert!(*is_err && msg.contains("unknown command"), "{msg}");
 
     let _ = std::fs::remove_dir_all(&dir);

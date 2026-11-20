@@ -124,9 +124,7 @@ where
                 cache_create_tokens,
                 ..
             } => {
-                if fmt == OutputFormat::Text
-                    && (cache_read_tokens > 0 || cache_create_tokens > 0)
-                {
+                if fmt == OutputFormat::Text && (cache_read_tokens > 0 || cache_create_tokens > 0) {
                     let _ = writeln!(
                         err,
                         "[cache] read={cache_read_tokens} create={cache_create_tokens}"
@@ -150,7 +148,10 @@ where
                     let _ = writeln!(out);
                     let _ = out.flush();
                 }
-                return Err(TurnFailure { message: msg, tool_calls });
+                return Err(TurnFailure {
+                    message: msg,
+                    tool_calls,
+                });
             }
             _ => {}
         }

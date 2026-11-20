@@ -218,7 +218,8 @@ fn clicking_status_sign_in_opens_login_modal() {
     terminal.draw(|frame| paint(frame, &mut app)).unwrap();
 
     let region = app
-        .ui.hit_regions
+        .ui
+        .hit_regions
         .iter()
         .find(|hr| hr.target == HitTarget::OpenLogin)
         .cloned()
@@ -339,7 +340,8 @@ fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice
 
     // MonitorFired appends onto monitor tool output instead of pushing top-level Notice
     let notice_before = app
-        .session.current
+        .session
+        .current
         .items
         .iter()
         .filter(|i| matches!(i, TranscriptItem::Notice { .. }))
@@ -357,7 +359,8 @@ fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice
         },
     );
     let notice_after = app
-        .session.current
+        .session
+        .current
         .items
         .iter()
         .filter(|i| matches!(i, TranscriptItem::Notice { .. }))
@@ -399,7 +402,8 @@ fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice
 
     // Click group -> expands with [collapse]; click [collapse] -> folds again
     let grp = app
-        .ui.hit_regions
+        .ui
+        .hit_regions
         .iter()
         .find(|hr| matches!(hr.target, HitTarget::ToggleToolGroup(_)))
         .unwrap()
@@ -420,7 +424,8 @@ fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice
     );
 
     let col_btn = app
-        .ui.hit_regions
+        .ui
+        .hit_regions
         .iter()
         .find(|hr| matches!(hr.target, HitTarget::ToggleToolGroup(_)))
         .unwrap()

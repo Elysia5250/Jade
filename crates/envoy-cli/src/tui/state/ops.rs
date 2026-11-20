@@ -16,7 +16,8 @@ impl App {
                 return;
             }
             let lines: Vec<String> = self
-                .agent.active_monitors
+                .agent
+                .active_monitors
                 .iter()
                 .map(|m| {
                     let state = if m.active { "active" } else { "stopped" };
@@ -37,7 +38,8 @@ impl App {
         if let Some(target) = trimmed.strip_prefix("stop ").map(str::trim) {
             if target == "all" {
                 let ids: Vec<u64> = self
-                    .agent.active_monitors
+                    .agent
+                    .active_monitors
                     .iter()
                     .filter(|m| m.active)
                     .map(|m| m.id)
@@ -255,7 +257,8 @@ impl App {
         self.session.transcript_cache.clear();
         self.session.workspace_index.invalidate();
         self.ui.inspector.selected_diff = self
-            .ui.inspector
+            .ui
+            .inspector
             .selected_diff
             .min(self.session.current.changed_files.len().saturating_sub(1));
 

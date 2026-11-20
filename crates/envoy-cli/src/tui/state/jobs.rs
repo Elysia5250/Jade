@@ -35,7 +35,9 @@ impl App {
         req: SubmitRequest,
     ) {
         let command = req.spec.display();
-        self.session.current.maybe_set_title_from(&format!("$ {command}"));
+        self.session
+            .current
+            .maybe_set_title_from(&format!("$ {command}"));
         let user_id = self.session.current.alloc_id();
         self.session.current.items.push(TranscriptItem::User {
             id: user_id,
@@ -121,7 +123,13 @@ impl App {
             partial_err: Vec::new(),
             started: Instant::now(),
         };
-        Self::poll_one_watch(remote, &self.jobs.target, &mut self.session.current, &mut watch).await;
+        Self::poll_one_watch(
+            remote,
+            &self.jobs.target,
+            &mut self.session.current,
+            &mut watch,
+        )
+        .await;
         if exit_code.is_none() {
             self.jobs.shell_watches.push(watch);
         }
@@ -135,7 +143,9 @@ impl App {
         let mut still_running = Vec::new();
         let mut watches = std::mem::take(&mut self.jobs.shell_watches);
         for mut w in watches.drain(..) {
-            let done = Self::poll_one_watch(remote, &self.jobs.target, &mut self.session.current, &mut w).await;
+            let done =
+                Self::poll_one_watch(remote, &self.jobs.target, &mut self.session.current, &mut w)
+                    .await;
             if !done {
                 still_running.push(w);
             }

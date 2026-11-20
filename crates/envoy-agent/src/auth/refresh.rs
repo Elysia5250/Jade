@@ -155,7 +155,8 @@ fn persist_credential(data_dir: &Path, provider: &StoredProvider) {
 }
 
 fn refresh_gate(provider_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-    static GATES: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    static GATES: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
     let map = GATES.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut guard = map.lock().unwrap_or_else(|err| err.into_inner());
     guard

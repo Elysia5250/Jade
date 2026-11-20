@@ -242,8 +242,13 @@ pub fn apply_landlock_in_child(plan: &LandlockPlan) -> std::io::Result<()> {
         Ok(())
     };
 
-    if let Err(err) = add_paths(&plan.ro_paths, FS_READ | LANDLOCK_ACCESS_FS_EXECUTE)
-        .and_then(|()| add_paths(&plan.rw_paths, FS_READ | FS_WRITE | LANDLOCK_ACCESS_FS_EXECUTE))
+    if let Err(err) =
+        add_paths(&plan.ro_paths, FS_READ | LANDLOCK_ACCESS_FS_EXECUTE).and_then(|()| {
+            add_paths(
+                &plan.rw_paths,
+                FS_READ | FS_WRITE | LANDLOCK_ACCESS_FS_EXECUTE,
+            )
+        })
     {
         unsafe { libc::close(rs_fd) };
         return Err(err);

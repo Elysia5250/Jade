@@ -97,10 +97,13 @@ fn replay_reasoning(model: &str, history: &[ChatMessage], index: usize) -> Optio
     if let Some(text) = message.reasoning.as_deref().filter(|text| !text.is_empty()) {
         return Some(text.to_string());
     }
-    message.reasoning_blocks.iter().find_map(|block| match block {
-        ReasoningBlock::Thinking { text, .. } if !text.is_empty() => Some(text.clone()),
-        _ => None,
-    })
+    message
+        .reasoning_blocks
+        .iter()
+        .find_map(|block| match block {
+            ReasoningBlock::Thinking { text, .. } if !text.is_empty() => Some(text.clone()),
+            _ => None,
+        })
 }
 
 pub(crate) fn cached_tokens(usage: &Value) -> u64 {

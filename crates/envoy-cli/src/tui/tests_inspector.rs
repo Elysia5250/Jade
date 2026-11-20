@@ -246,7 +246,8 @@ fn cursor_style_collapsed_explore_group_and_reasoning_expand_on_click() {
 
     // Click the grouped explore summary line -> expands individual read/grep rows.
     let group_hit = app
-        .ui.hit_regions
+        .ui
+        .hit_regions
         .iter()
         .find(|hr| matches!(hr.target, HitTarget::ToggleToolGroup(_)))
         .expect("explore group hit region")
@@ -295,7 +296,8 @@ async fn inline_ask_keeps_inspector_visible_and_accepts_click() {
     );
 
     let opt_hit = app
-        .ui.hit_regions
+        .ui
+        .hit_regions
         .iter()
         .find(|hr| matches!(hr.target, HitTarget::SelectAskOption(0)))
         .expect("ask option 0 hit region")
@@ -395,7 +397,8 @@ fn monitors_and_checkpoint_rewind_update_overview_status_and_transcript() {
     assert!(rendered.contains("cargo watch"));
     assert!(rendered.contains("[stop]"));
     assert!(
-        app.ui.hit_regions
+        app.ui
+            .hit_regions
             .iter()
             .any(|hr| matches!(hr.target, HitTarget::StopMonitor(1))),
         "expected clickable StopMonitor(1) hit region"
@@ -419,7 +422,8 @@ fn monitors_and_checkpoint_rewind_update_overview_status_and_transcript() {
     assert_eq!(app.session.current.changed_files.len(), 1);
     assert!(app.session.current.changed_files[0].path.ends_with("a.rs"));
     let user_msgs: Vec<&str> = app
-        .session.current
+        .session
+        .current
         .items
         .iter()
         .filter_map(|it| match it {

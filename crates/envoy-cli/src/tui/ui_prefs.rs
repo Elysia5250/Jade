@@ -57,10 +57,7 @@ fn legacy_model_prefs(data_dir: &Path) -> ConsolePrefs {
     let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw) else {
         return ConsolePrefs::default();
     };
-    let theme = val
-        .get("theme")
-        .and_then(|item| item.as_u64())
-        .unwrap_or(0) as usize;
+    let theme = val.get("theme").and_then(|item| item.as_u64()).unwrap_or(0) as usize;
     let show_sidebar = val
         .get("show_sidebar")
         .and_then(|item| item.as_bool())

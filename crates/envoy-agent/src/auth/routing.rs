@@ -88,10 +88,7 @@ pub fn resolve_model_target(
             model_id,
         } => {
             if !is_retired_model(&parent_provider.id, &model_id)
-                && parent_provider
-                    .all_models()
-                    .iter()
-                    .any(|m| m == &model_id)
+                && parent_provider.all_models().iter().any(|m| m == &model_id)
             {
                 return (
                     parent_provider.clone(),

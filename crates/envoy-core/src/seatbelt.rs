@@ -6,9 +6,7 @@
 //! stay closed after those holes. A per-command scratch directory is
 //! `$TMPDIR` for that process only.
 
-use crate::sandbox::{
-    create_scratch_dir, user_control_dirs, user_secret_paths, PROTECTED_DIRS,
-};
+use crate::sandbox::{create_scratch_dir, user_control_dirs, user_secret_paths, PROTECTED_DIRS};
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 

@@ -27,12 +27,18 @@ impl App {
     /// are not replayed, so find the open assistant/tool items in the
     /// persisted transcript.
     pub(in crate::tui) fn resume_active_view(&mut self) {
-        self.agent.active_assistant_id = self.session.current.items.iter().rev().find_map(|item| match item {
-            TranscriptItem::Assistant {
-                id, done: false, ..
-            } => Some(*id),
-            _ => None,
-        });
+        self.agent.active_assistant_id =
+            self.session
+                .current
+                .items
+                .iter()
+                .rev()
+                .find_map(|item| match item {
+                    TranscriptItem::Assistant {
+                        id, done: false, ..
+                    } => Some(*id),
+                    _ => None,
+                });
         self.agent.active_tool_items.clear();
         for item in &self.session.current.items {
             if let TranscriptItem::Tool {
@@ -213,7 +219,10 @@ impl App {
                 self.ui.focus = Focus::Input;
             }
             UiNotice::Recalled { text: None, .. } => {}
-            UiNotice::Checkpoints { session_id, mut list } => {
+            UiNotice::Checkpoints {
+                session_id,
+                mut list,
+            } => {
                 if session_id != self.session.current.id {
                     return;
                 }

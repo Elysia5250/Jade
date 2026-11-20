@@ -28,7 +28,12 @@ impl App {
     }
 
     pub(super) fn handle_welcome_skills(&mut self, key: KeyEvent) -> Action {
-        let len = self.ui.welcome.as_ref().map(|w| w.skills.len()).unwrap_or(0);
+        let len = self
+            .ui
+            .welcome
+            .as_ref()
+            .map(|w| w.skills.len())
+            .unwrap_or(0);
         match key.code {
             KeyCode::Esc => {
                 self.leave_welcome_panel();
@@ -59,7 +64,8 @@ impl App {
 
     fn edit_selected_skill(&mut self) -> Action {
         let path = self
-            .ui.welcome
+            .ui
+            .welcome
             .as_ref()
             .and_then(|w| w.skills.get(w.list_selected))
             .map(|skill| skill.skill_file.clone());
@@ -71,13 +77,18 @@ impl App {
 
     fn toggle_selected_skill(&mut self) {
         let Some(skill) = self
-            .ui.welcome
+            .ui
+            .welcome
             .as_ref()
             .and_then(|w| w.skills.get(w.list_selected).cloned())
         else {
             return;
         };
-        let on = envoy_agent::skills::skill_is_injected(&self.data_dir, &self.session.current.cwd, &skill);
+        let on = envoy_agent::skills::skill_is_injected(
+            &self.data_dir,
+            &self.session.current.cwd,
+            &skill,
+        );
         let result = envoy_agent::skills::prefs::set_inject(&self.data_dir, &skill.name, !on);
         if let Some(welcome) = self.ui.welcome.as_mut() {
             welcome.error = result.err();

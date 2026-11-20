@@ -250,11 +250,8 @@ fn fill_catalog(app: &mut App) {
         ..Catalog::default()
     };
     if let Some((prov, model)) = resolve_active_provider(&app.data_dir) {
-        let budget = envoy_agent::agent::context::resolve_budget(
-            &app.data_dir,
-            &prov.id,
-            &model.model_id,
-        );
+        let budget =
+            envoy_agent::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
         catalog.signed_in = true;
         catalog.provider_id = prov.id;
         catalog.model_id = model.model_id;
@@ -281,17 +278,18 @@ fn fill_catalog(app: &mut App) {
             scope: skill.scope.label().to_string(),
         })
         .collect();
-    catalog.todos = envoy_agent::agent::tools::todo::load_todos(&app.data_dir, &app.session.current.id)
-        .into_iter()
-        .map(|item| TodoSnap {
-            content: item.content,
-            mark: match item.status {
-                envoy_agent::agent::tools::todo::TodoStatus::Pending => TodoMark::Pending,
-                envoy_agent::agent::tools::todo::TodoStatus::InProgress => TodoMark::InProgress,
-                envoy_agent::agent::tools::todo::TodoStatus::Completed => TodoMark::Completed,
-            },
-        })
-        .collect();
+    catalog.todos =
+        envoy_agent::agent::tools::todo::load_todos(&app.data_dir, &app.session.current.id)
+            .into_iter()
+            .map(|item| TodoSnap {
+                content: item.content,
+                mark: match item.status {
+                    envoy_agent::agent::tools::todo::TodoStatus::Pending => TodoMark::Pending,
+                    envoy_agent::agent::tools::todo::TodoStatus::InProgress => TodoMark::InProgress,
+                    envoy_agent::agent::tools::todo::TodoStatus::Completed => TodoMark::Completed,
+                },
+            })
+            .collect();
     if let Some(welcome) = &app.ui.welcome {
         catalog.welcome_flags = welcome
             .skills
@@ -323,13 +321,17 @@ fn refresh_media(app: &mut App) {
 }
 
 fn active_raw(app: &App) -> Option<String> {
-    if !matches!(app.ui.inspector.tab, InspectorTab::File | InspectorTab::Diff) {
+    if !matches!(
+        app.ui.inspector.tab,
+        InspectorTab::File | InspectorTab::Diff
+    ) {
         return None;
     }
     if let Some(path) = &app.ui.inspector.file_path {
         return Some(path.clone());
     }
-    app.session.current
+    app.session
+        .current
         .changed_files
         .get(app.ui.inspector.selected_diff)
         .or_else(|| app.session.current.changed_files.last())
@@ -353,8 +355,8 @@ fn load_media(app: &mut App, raw: &str, key: String) {
     } else {
         links::display_rel(&app.session.current.cwd, Path::new(raw))
     };
-    let session_diff = app.find_changed_file_index(&rel).is_some()
-        || app.find_changed_file_index(raw).is_some();
+    let session_diff =
+        app.find_changed_file_index(&rel).is_some() || app.find_changed_file_index(raw).is_some();
     let git = if local && !session_diff {
         diff::load_git_pair(&app.session.current.cwd, &rel)
     } else {
@@ -368,7 +370,9 @@ fn load_media(app: &mut App, raw: &str, key: String) {
     } else {
         let want = abs.to_string_lossy();
         app.inputs.remote_fill.as_ref().is_some_and(|fill| {
-            fill.target == app.jobs.target && fill.path == want && fill.total > FILE_PREVIEW_LIMIT as u64
+            fill.target == app.jobs.target
+                && fill.path == want
+                && fill.total > FILE_PREVIEW_LIMIT as u64
         })
     };
     let preview = if local {
@@ -496,7 +500,10 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(painted.contains('Z'), "filled preview missing from the frame");
+        assert!(
+            painted.contains('Z'),
+            "filled preview missing from the frame"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

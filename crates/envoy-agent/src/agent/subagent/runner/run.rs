@@ -74,8 +74,9 @@ pub(super) async fn run_single_subagent(
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
-        
-            reasoning_blocks: Vec::new(),}],
+
+            reasoning_blocks: Vec::new(),
+        }],
         asks: Arc::clone(&host.asks),
         steer: Arc::new(Mutex::new(Vec::new())),
         permissions: child_perm,

@@ -201,8 +201,9 @@ mod tests {
             }],
             tool_call_id: None,
             tool_name: None,
-        
-            reasoning_blocks: Vec::new(),};
+
+            reasoning_blocks: Vec::new(),
+        };
         assert!(estimate_message_tokens(&msg) >= 20);
         let mut with_reasoning = msg.clone();
         with_reasoning.reasoning = Some("x".repeat(4_000));
@@ -241,10 +242,11 @@ mod tests {
     fn replayed_reasoning_blocks_add_tokens() {
         let mut msg = ChatMessage::text(ChatRole::Assistant, "ok");
         let before = estimate_message_tokens(&msg);
-        msg.reasoning_blocks.push(crate::session::ReasoningBlock::Thinking {
-            text: "想".repeat(100),
-            signature: "sig".into(),
-        });
+        msg.reasoning_blocks
+            .push(crate::session::ReasoningBlock::Thinking {
+                text: "想".repeat(100),
+                signature: "sig".into(),
+            });
         assert!(estimate_message_tokens(&msg) > before);
     }
 

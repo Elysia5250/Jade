@@ -127,7 +127,8 @@ fn tui_unsupported_flag(
     args: &headless::HeadlessArgs,
     matches: &clap::ArgMatches,
 ) -> Option<&'static str> {
-    let model_from_cli = matches.value_source("model") == Some(clap::parser::ValueSource::CommandLine);
+    let model_from_cli =
+        matches.value_source("model") == Some(clap::parser::ValueSource::CommandLine);
     tui_unsupported_flag_with(args, model_from_cli)
 }
 
@@ -256,7 +257,9 @@ async fn main() -> Result<()> {
         Commands::Auth { cmd } => match cmd {
             AuthCmd::Login => auth_cli::cmd_auth_login(&ctx.data_dir).await,
             AuthCmd::List => auth_cli::cmd_auth_list(&ctx.data_dir).await,
-            AuthCmd::Logout { provider } => auth_cli::cmd_auth_logout(&ctx.data_dir, provider).await,
+            AuthCmd::Logout { provider } => {
+                auth_cli::cmd_auth_logout(&ctx.data_dir, provider).await
+            }
         },
         Commands::Models => cmd_models(&ctx.data_dir).await,
         Commands::Enable => cmd_set_enabled(&ctx.data_dir, true),

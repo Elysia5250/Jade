@@ -71,7 +71,10 @@ fn normalize_cap(max_results: u32) -> usize {
 
 fn is_protected_search_root(canon: &Path) -> bool {
     let raw = canon.to_string_lossy();
-    if matches!(raw.as_ref(), "/etc/shadow" | "/etc/gshadow" | "/etc/sudoers") {
+    if matches!(
+        raw.as_ref(),
+        "/etc/shadow" | "/etc/gshadow" | "/etc/sudoers"
+    ) {
         return true;
     }
     for comp in canon.components() {
@@ -464,7 +467,9 @@ mod tests {
             let outside = tmpdir("outside");
             std::fs::write(outside.join("secret.txt"), "nope\n").unwrap();
             std::os::unix::fs::symlink(&outside, dir.join("sym-dir")).unwrap();
-            let all = glob_files(dir.to_str().unwrap(), "**/*", 100).await.unwrap();
+            let all = glob_files(dir.to_str().unwrap(), "**/*", 100)
+                .await
+                .unwrap();
             assert!(!all.iter().any(|p| p.contains("sym-")), "{all:?}");
             let _ = std::fs::remove_dir_all(&outside);
         }

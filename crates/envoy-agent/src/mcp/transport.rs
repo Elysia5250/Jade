@@ -132,8 +132,10 @@ impl StdioTransport {
             let mut raw_argv = Vec::with_capacity(1 + args.len());
             raw_argv.push(command.to_string());
             raw_argv.extend(args.iter().cloned());
-            let env_vec: Vec<(String, String)> =
-                env_map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let env_vec: Vec<(String, String)> = env_map
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             let prepared = envoy_core::prepare_command_with_env(
                 &raw_argv,
                 &eff_cwd.display().to_string(),
@@ -157,7 +159,9 @@ impl StdioTransport {
                     }
                 }
             } else {
-                for key in ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "TMPDIR"] {
+                for key in [
+                    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TERM", "TMPDIR",
+                ] {
                     if let Some(val) = env_map.get(key) {
                         c.env(key, val);
                     }

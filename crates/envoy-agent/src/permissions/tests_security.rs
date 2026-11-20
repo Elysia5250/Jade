@@ -141,10 +141,8 @@ fn protected_guard_covers_search_tools_case_env_and_temp_symlinks() {
     {
         // Point symlink inside `/tmp` at a directory outside `/tmp` (workspace parent or `/var`).
         let target_outside = std::env::current_dir().unwrap();
-        let link_path = std::env::temp_dir().join(format!(
-            "envoy-p2-symlink-escape-{}",
-            std::process::id()
-        ));
+        let link_path =
+            std::env::temp_dir().join(format!("envoy-p2-symlink-escape-{}", std::process::id()));
         let _ = std::fs::remove_file(&link_path);
         std::os::unix::fs::symlink(&target_outside, &link_path).unwrap();
         let resolved = resolve_path_pair(&work, &format!("{}/pwn.txt", link_path.display()));
@@ -307,7 +305,9 @@ async fn plan_mode_and_approval_choice_mapping_and_summarize_call() {
         } => {
             assert!(!allow_net, "expanded path approval must not enable network");
             assert!(
-                extra_rw.iter().any(|p| p.contains("envoy-p2-expanded-target")),
+                extra_rw
+                    .iter()
+                    .any(|p| p.contains("envoy-p2-expanded-target")),
                 "missing expanded path in {extra_rw:?}"
             );
         }
@@ -351,7 +351,11 @@ fn shell_classifier_blocks_syntax_bypasses_and_tightens_readonly() {
         "bash -xc 'rm -rf /'",
     ] {
         let dec = eng.evaluate("exec", &json!({ "command": cmd }));
-        assert_eq!(dec.effect, Effect::Ask, "expected Ask for `{cmd}` -> {dec:?}");
+        assert_eq!(
+            dec.effect,
+            Effect::Ask,
+            "expected Ask for `{cmd}` -> {dec:?}"
+        );
     }
 
     // Non-readonly commands must NOT carry `read_only_all = true`.

@@ -25,7 +25,12 @@ pub(super) struct SnapshotParts {
 }
 
 /// `force` means the caller must see a `SessionReset` before the retained tail.
-pub(super) fn replay_window(from: u64, oldest: u64, seq: u64, reset_incarnation: bool) -> (u64, bool) {
+pub(super) fn replay_window(
+    from: u64,
+    oldest: u64,
+    seq: u64,
+    reset_incarnation: bool,
+) -> (u64, bool) {
     let gap = from != 0 && oldest > from;
     let ahead = from > seq;
     let force = reset_incarnation || gap || ahead;
@@ -44,10 +49,7 @@ pub(super) fn prepare_snapshot(
     debug!(from, cursor, seq = state.seq, force, "attach");
     let active = state.monitors.active_list();
     if !active.is_empty() {
-        runtime.publish(
-            &mut state,
-            AgentEvent::MonitorsSync { monitors: active },
-        );
+        runtime.publish(&mut state, AgentEvent::MonitorsSync { monitors: active });
     }
     let mut events: Vec<SeqEvent> = state
         .events
@@ -55,7 +57,11 @@ pub(super) fn prepare_snapshot(
         .filter(|event| event.seq > cursor)
         .cloned()
         .collect();
-    if force && !events.iter().any(|event| matches!(event.event, AgentEvent::SessionReset)) {
+    if force
+        && !events
+            .iter()
+            .any(|event| matches!(event.event, AgentEvent::SessionReset))
+    {
         events.insert(
             0,
             SeqEvent {

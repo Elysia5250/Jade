@@ -34,18 +34,15 @@ async fn remote_caller_named_local_cannot_bypass_gate() {
         })),
     );
     let peer = serve_caller(&server, Caller::Remote("local".into())).await;
-    let err = client::probe(peer, "local")
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("refused") || err.contains("allowlisted"), "{err}");
+    let err = client::probe(peer, "local").await.unwrap_err().to_string();
+    assert!(
+        err.contains("refused") || err.contains("allowlisted"),
+        "{err}"
+    );
 
     let disabled = AgentServer::new(dir.clone(), Arc::new(StaticHost::default()));
     let peer = serve_caller(&disabled, Caller::Remote("local".into())).await;
-    let err = client::probe(peer, "local")
-        .await
-        .unwrap_err()
-        .to_string();
+    let err = client::probe(peer, "local").await.unwrap_err().to_string();
     assert!(err.contains("refused") || err.contains("disabled"), "{err}");
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -80,7 +77,10 @@ async fn remote_caller_cannot_read_or_write_protected_paths() {
             .await
             .unwrap_err()
             .to_string();
-        assert!(err.contains("denied") || err.contains("refused"), "{bad:?}: {err}");
+        assert!(
+            err.contains("denied") || err.contains("refused"),
+            "{bad:?}: {err}"
+        );
     }
 
     let stream = serve_caller(&server, Caller::Remote("peer-a".into())).await;
@@ -118,15 +118,9 @@ async fn remote_submit_clamps_sandbox_off_and_write_defaults_to_0600() {
     // 1. Default write mode must be 0o600 on Unix.
     let target = work.join("secret.txt");
     let stream = serve_caller(&server, Caller::Remote("peer-a".into())).await;
-    client::write(
-        stream,
-        "peer-a",
-        target.to_str().unwrap(),
-        b"hello",
-        None,
-    )
-    .await
-    .unwrap();
+    client::write(stream, "peer-a", target.to_str().unwrap(), b"hello", None)
+        .await
+        .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

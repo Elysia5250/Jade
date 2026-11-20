@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 impl App {
     pub(super) fn handle_path_keys(&mut self, key: KeyEvent) -> Action {
         let choose_parent = self
-            .ui.welcome
+            .ui
+            .welcome
             .as_ref()
             .is_some_and(|w| w.mode == WelcomeMode::NewFolderPickParent);
         let mut submit: Option<String> = None;

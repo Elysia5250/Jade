@@ -426,7 +426,7 @@ envoy-proto -> envoy-core -> envoy-service -> envoy-agent -> envoy-cli
   1. 评估并使用 `pulldown-cmark` 替换手写 `markdown*.rs`（或确认简化边界）；清理多余特技渲染包袱。
   2. 为 `audit.log`、`permission_audit.jsonl`、`hook_audit.jsonl`、`envoy.out` 增加大小触发单轮转上限（如 10 MiB 轮转为 `.1`）。
   3. 清理已确认的零引用死协议变体、死导出口与死 `#[allow(dead_code)]`（先全局 `grep` 验证确实零引用！）。
-  4. 修正 `scripts/check-file-sizes.py` 真正按 `AGENTS.md` 排除测试文件/模块，清理空置 `file-size-baseline.txt`；更新 `docs/architecture.md` 修复错误的审计日志路径描述；升级 `.github/workflows/ci.yml` 增加 `--locked`、`shellcheck scripts/*.sh`、`python3 -m py_compile` 及 MSRV `1.85` 校验。
+  4. 修正 `scripts/check-file-sizes.py` 真正按 `AGENTS.md` 排除测试文件/模块，清理空置 `file-size-baseline.txt`；更新 `docs/architecture.md` 修复错误的审计日志路径描述；升级 `.github/workflows/ci.yml` 增加 `--locked`、`shellcheck scripts/*.sh`、`python3 -m py_compile` 及 MSRV `1.88` 校验（当前 `globset`/`ignore` 无法在 1.85 上解析）。
 
 ---
 

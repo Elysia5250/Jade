@@ -176,8 +176,9 @@ mod tests {
                     tool_calls: vec![],
                     tool_call_id: None,
                     tool_name: None,
-                
-                    reasoning_blocks: Vec::new(),}],
+
+                    reasoning_blocks: Vec::new(),
+                }],
                 before_tokens: 180_000,
                 after_tokens: 24_000,
                 summary: "summary".into(),
@@ -511,7 +512,10 @@ mod tests {
             assert_postcard(event);
         }
         assert!(seen.iter().all(|hit| *hit), "missing agent event");
-        match samples.iter().find(|event| matches!(event, AgentEvent::TurnDone { .. })) {
+        match samples
+            .iter()
+            .find(|event| matches!(event, AgentEvent::TurnDone { .. }))
+        {
             Some(AgentEvent::TurnDone { context_tokens, .. }) => assert_eq!(*context_tokens, 42),
             _ => panic!("TurnDone sample missing"),
         }

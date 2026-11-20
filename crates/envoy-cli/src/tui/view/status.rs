@@ -43,10 +43,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
             ));
             right_spans.push(Span::raw("  "));
         }
-        right_spans.push(Span::styled(
-            model_id,
-            Style::default().fg(theme.secondary),
-        ));
+        right_spans.push(Span::styled(model_id, Style::default().fg(theme.secondary)));
         right_spans.push(Span::raw("  "));
         let (filled, empty) = context_bar(used, window);
         right_spans.push(Span::styled(filled, Style::default().fg(bar_color)));
@@ -117,7 +114,12 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
     let toast = app
         .active_toast()
         .map(|(msg, err)| (format!("  {}", truncate_width(msg, 36)), err));
-    let active_monitors = app.agent.active_monitors.iter().filter(|m| m.active).count();
+    let active_monitors = app
+        .agent
+        .active_monitors
+        .iter()
+        .filter(|m| m.active)
+        .count();
     let mon_label = if active_monitors > 0 {
         format!("  mon:{active_monitors}")
     } else {
@@ -159,8 +161,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
     }
     let perm_x = area.x + mode_w_cells + 2;
     if perm_x < area.x + area.width {
-        let perm_w_cells = (display_width(perm_badge) as u16)
-            .min(area.x + area.width - perm_x);
+        let perm_w_cells = (display_width(perm_badge) as u16).min(area.x + area.width - perm_x);
         if perm_w_cells > 0 {
             app.ui.hit_regions.push(HitRegion {
                 rect: Rect {

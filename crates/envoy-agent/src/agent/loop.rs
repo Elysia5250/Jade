@@ -9,9 +9,7 @@ use super::events::AgentEvent;
 use super::loop_hooks::{hook_context_message, TurnHookSession};
 pub(crate) use super::loop_provider::call_provider_with_overflow_retry;
 use super::loop_provider::finalize_step_limit;
-use super::prompt::{
-    build_system_prompt, sync_environment, sync_pre_model_tail, EnvDiskSnapshot,
-};
+use super::prompt::{build_system_prompt, sync_environment, sync_pre_model_tail, EnvDiskSnapshot};
 use super::subagent::SubagentHost;
 use super::tools::ToolFilter;
 use crate::auth::ensure_fresh_provider;
@@ -278,7 +276,11 @@ pub(crate) async fn execute_loop(
             )
             .await?;
 
-            calibration.observe_uncompressed(raw_est, reply.input_tokens, reply.calibrate && !compressed);
+            calibration.observe_uncompressed(
+                raw_est,
+                reply.input_tokens,
+                reply.calibrate && !compressed,
+            );
             total_in += reply.input_tokens;
             total_out += reply.output_tokens;
             cache_read_tokens += reply.cache_read_tokens;
@@ -342,8 +344,9 @@ pub(crate) async fn execute_loop(
                         tool_calls: Vec::new(),
                         tool_call_id: None,
                         tool_name: None,
-                    
-                        reasoning_blocks: Vec::new(),});
+
+                        reasoning_blocks: Vec::new(),
+                    });
                     continue;
                 }
                 return Ok(LoopOutcome {
@@ -407,8 +410,9 @@ pub(crate) async fn execute_loop(
                     tool_calls: Vec::new(),
                     tool_call_id: None,
                     tool_name: None,
-                
-                    reasoning_blocks: Vec::new(),});
+
+                    reasoning_blocks: Vec::new(),
+                });
             }
         }
 

@@ -357,7 +357,8 @@ impl App {
                             let st = state.clone();
                             let (tx, rx) = mpsc::unbounded_channel();
                             let handle = tokio::spawn(async move {
-                                match exchange_anthropic_code_default(&raw, &ver, &st, console).await
+                                match exchange_anthropic_code_default(&raw, &ver, &st, console)
+                                    .await
                                 {
                                     Ok(sp) => {
                                         let _ = tx.send(LoginEvent::Success(sp, None));

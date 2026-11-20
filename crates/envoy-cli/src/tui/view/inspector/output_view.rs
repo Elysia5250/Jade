@@ -6,7 +6,8 @@ pub(super) fn draw_output_view(frame: &mut Frame, app: &mut App, theme: &Theme, 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     let tool_item = app
-        .ui.inspector
+        .ui
+        .inspector
         .output_item_id
         .and_then(|id| app.session.current.items.iter().find(|i| i.id() == id))
         .or_else(|| {
@@ -17,7 +18,8 @@ pub(super) fn draw_output_view(frame: &mut Frame, app: &mut App, theme: &Theme, 
             })
         })
         .or_else(|| {
-            app.session.current
+            app.session
+                .current
                 .items
                 .iter()
                 .rev()
@@ -114,10 +116,15 @@ pub(super) fn draw_inspect_view(frame: &mut Frame, app: &mut App, theme: &Theme,
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     let item = app
-        .ui.inspector
+        .ui
+        .inspector
         .inspect_item_id
         .and_then(|id| app.session.current.items.iter().find(|i| i.id() == id))
-        .or_else(|| app.ui.selected_card.and_then(|idx| app.session.current.items.get(idx)));
+        .or_else(|| {
+            app.ui
+                .selected_card
+                .and_then(|idx| app.session.current.items.get(idx))
+        });
 
     if let Some(TranscriptItem::Tool {
         call_id,

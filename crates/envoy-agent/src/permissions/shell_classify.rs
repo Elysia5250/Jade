@@ -127,9 +127,7 @@ pub(super) fn classify_argv(argv: &[String]) -> (bool, Vec<String>, Vec<String>)
             skip_next_filter = true;
             continue;
         }
-        if bin == "find"
-            && matches!(arg.as_str(), "-fprint" | "-fprint0" | "-fprintf" | "-fls")
-        {
+        if bin == "find" && matches!(arg.as_str(), "-fprint" | "-fprint0" | "-fprintf" | "-fls") {
             take_next_write = true;
             continue;
         }
