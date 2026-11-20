@@ -3,31 +3,31 @@ use super::*;
 
 impl App {
     pub(in crate::tui) fn handle_key(&mut self, key: KeyEvent) -> Action {
-        if self.welcome.is_some()
+        if self.ui.welcome.is_some()
             && key.code == KeyCode::Char('c')
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
             return Action::Quit;
         }
-        if self.modal.is_some() {
+        if self.ui.modal.is_some() {
             return self.handle_modal_key(key);
         }
-        if self.welcome.is_some() {
+        if self.ui.welcome.is_some() {
             return self.handle_welcome_key(key);
         }
-        if self.pending_ask.is_some() {
+        if self.agent.pending_ask.is_some() {
             return self.handle_ask_key(key);
         }
         if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Up {
-            if let Some(last) = self.queued.pop_back() {
+            if let Some(last) = self.agent.queued.pop_back() {
                 // A queued item can be in two places: the local outbox while
                 // offline, or the daemon's follow-up queue. Remove it from
                 // both before putting it back in the editor.
                 self.remove_outbox(&last);
                 self.recall_queued();
-                self.input = last;
-                self.input_cursor = self.input.chars().count();
-                self.focus = Focus::Input;
+                self.ui.input = last;
+                self.ui.input_cursor = self.ui.input.chars().count();
+                self.ui.focus = Focus::Input;
             } else {
                 // The console may have restarted while the daemon still had
                 // follow-ups queued; ask it for the last one.
@@ -37,7 +37,7 @@ impl App {
         }
 
         // Leader prefix (`ctrl+x`)
-        if let Some(at) = self.leader_at.take() {
+        if let Some(at) = self.ui.leader_at.take() {
             if at.elapsed() <= LEADER_TIMEOUT {
                 if let KeyCode::Char(c) = key.code {
                     let cmd = match c {
@@ -74,12 +74,12 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('c') => {
-                    if self.agent_running {
+                    if self.agent.running {
                         return Action::Cancel;
                     }
                     return Action::Quit;
                 }
-                KeyCode::Char('d') if self.input.is_empty() => return Action::Quit,
+                KeyCode::Char('d') if self.ui.input.is_empty() => return Action::Quit,
                 KeyCode::Char('b') => return self.run_command(Command::ToggleSidebar),
                 KeyCode::Char('p') => {
                     let items = self.command_items();
@@ -87,36 +87,36 @@ impl App {
                     return Action::None;
                 }
                 KeyCode::Char('x') => {
-                    self.leader_at = Some(Instant::now());
+                    self.ui.leader_at = Some(Instant::now());
                     return Action::None;
                 }
                 KeyCode::Char('o') => {
                     self.toggle_expand_cards();
                     return Action::None;
                 }
-                KeyCode::Char('u') => {
-                    self.follow = false;
-                    self.transcript_scroll = self
-                        .transcript_scroll
-                        .saturating_sub((self.transcript_height / 2).max(1));
+                KeyCode::Char('u') if self.ui.focus != Focus::Input => {
+                    self.ui.follow = false;
+                    self.ui.transcript_scroll = self
+                        .ui.transcript_scroll
+                        .saturating_sub((self.ui.transcript_height as usize / 2).max(1));
                     return Action::None;
                 }
-                KeyCode::Char('f') => {
-                    self.follow = false;
-                    self.transcript_scroll = self
-                        .transcript_scroll
-                        .saturating_add((self.transcript_height / 2).max(1));
+                KeyCode::Char('f') if self.ui.focus != Focus::Input => {
+                    self.ui.follow = false;
+                    self.ui.transcript_scroll = self
+                        .ui.transcript_scroll
+                        .saturating_add((self.ui.transcript_height as usize / 2).max(1));
                     return Action::None;
                 }
                 _ => {}
             }
         }
 
-        if self.focus == Focus::Input {
+        if self.ui.focus == Focus::Input {
             return self.handle_input_key(key);
         }
 
-        if self.focus == Focus::Sidebar {
+        if self.ui.focus == Focus::Sidebar {
             match key.code {
                 KeyCode::Char('1') => return self.focus_inspector_tab(InspectorTab::Overview),
                 KeyCode::Char('2') => return self.focus_inspector_tab(InspectorTab::Diff),
@@ -124,7 +124,7 @@ impl App {
                 KeyCode::Char('4') => return self.focus_inspector_tab(InspectorTab::Output),
                 KeyCode::Char('5') => return self.focus_inspector_tab(InspectorTab::Inspect),
                 KeyCode::Char('v') => {
-                    self.inspector.diff_layout = match self.inspector.diff_layout {
+                    self.ui.inspector.diff_layout = match self.ui.inspector.diff_layout {
                         diff::DiffLayout::Unified => diff::DiffLayout::Split,
                         diff::DiffLayout::Split => diff::DiffLayout::Unified,
                     };
@@ -138,14 +138,14 @@ impl App {
                     self.jump_diff_hunk(-1);
                     return Action::None;
                 }
-                KeyCode::Char('f') if self.inspector.tab == InspectorTab::Diff => {
-                    self.inspector.tab = InspectorTab::File;
-                    self.inspector.scroll = 0;
+                KeyCode::Char('f') if self.ui.inspector.tab == InspectorTab::Diff => {
+                    self.ui.inspector.tab = InspectorTab::File;
+                    self.ui.inspector.scroll = 0;
                     return Action::None;
                 }
-                KeyCode::Char('d') if self.inspector.tab == InspectorTab::File => {
-                    self.inspector.tab = InspectorTab::Diff;
-                    self.inspector.scroll = 0;
+                KeyCode::Char('d') if self.ui.inspector.tab == InspectorTab::File => {
+                    self.ui.inspector.tab = InspectorTab::Diff;
+                    self.ui.inspector.scroll = 0;
                     return Action::None;
                 }
                 _ => {}
@@ -154,155 +154,155 @@ impl App {
 
         match key.code {
             KeyCode::Char('/') => {
-                self.focus = Focus::Input;
-                self.input = "/".into();
-                self.input_cursor = 1;
-                self.menu_selected = 0;
+                self.ui.focus = Focus::Input;
+                self.ui.input = "/".into();
+                self.ui.input_cursor = 1;
+                self.ui.menu_selected = 0;
                 Action::None
             }
             KeyCode::Char('i') | KeyCode::Char('n') => {
-                self.focus = Focus::Input;
+                self.ui.focus = Focus::Input;
                 Action::None
             }
             KeyCode::BackTab => {
-                self.set_permission_mode(self.perm_mode.cycle());
+                self.set_permission_mode(self.session.perm_mode.cycle());
                 Action::None
             }
             KeyCode::Esc => {
-                if self.agent_running {
+                if self.agent.running {
                     return Action::Cancel;
                 }
-                self.focus = Focus::Input;
+                self.ui.focus = Focus::Input;
                 Action::None
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                match self.focus {
+                match self.ui.focus {
                     Focus::Sidebar => {
-                        if self.inspector.tab == InspectorTab::Overview && !self.jobs.is_empty() {
-                            self.job_selected = self.job_selected.saturating_sub(1);
+                        if self.ui.inspector.tab == InspectorTab::Overview && !self.jobs.list.is_empty() {
+                            self.jobs.selected = self.jobs.selected.saturating_sub(1);
                         } else {
-                            self.inspector.scroll = self.inspector.scroll.saturating_sub(2);
+                            self.ui.inspector.scroll = self.ui.inspector.scroll.saturating_sub(2);
                         }
                     }
                     Focus::Transcript => {
-                        if let Some(idx) = self.selected_card {
-                            self.selected_card = Some(idx.saturating_sub(1));
-                        } else if !self.session.items.is_empty() {
-                            self.selected_card = Some(self.session.items.len() - 1);
+                        if let Some(idx) = self.ui.selected_card {
+                            self.ui.selected_card = Some(idx.saturating_sub(1));
+                        } else if !self.session.current.items.is_empty() {
+                            self.ui.selected_card = Some(self.session.current.items.len() - 1);
                         }
-                        self.follow = false;
-                        self.transcript_scroll = self.transcript_scroll.saturating_sub(2);
+                        self.ui.follow = false;
+                        self.ui.transcript_scroll = self.ui.transcript_scroll.saturating_sub(2);
                     }
                     Focus::Input => {}
                 }
                 Action::None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                match self.focus {
+                match self.ui.focus {
                     Focus::Sidebar => {
-                        if self.inspector.tab == InspectorTab::Overview && !self.jobs.is_empty() {
-                            if self.job_selected + 1 < self.jobs.len() {
-                                self.job_selected += 1;
+                        if self.ui.inspector.tab == InspectorTab::Overview && !self.jobs.list.is_empty() {
+                            if self.jobs.selected + 1 < self.jobs.list.len() {
+                                self.jobs.selected += 1;
                             }
                         } else {
-                            self.inspector.scroll = self
-                                .inspector
+                            self.ui.inspector.scroll = self
+                                .ui.inspector
                                 .scroll
                                 .saturating_add(2)
-                                .min(self.inspector.max_scroll);
+                                .min(self.ui.inspector.max_scroll);
                         }
                     }
                     Focus::Transcript => {
-                        if !self.session.items.is_empty() {
-                            let last = self.session.items.len() - 1;
-                            self.selected_card =
-                                Some(self.selected_card.map(|i| (i + 1).min(last)).unwrap_or(0));
+                        if !self.session.current.items.is_empty() {
+                            let last = self.session.current.items.len() - 1;
+                            self.ui.selected_card =
+                                Some(self.ui.selected_card.map(|i| (i + 1).min(last)).unwrap_or(0));
                         }
-                        self.transcript_scroll = self.transcript_scroll.saturating_add(2);
+                        self.ui.transcript_scroll = self.ui.transcript_scroll.saturating_add(2);
                     }
                     Focus::Input => {}
                 }
                 Action::None
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
-                if self.focus == Focus::Transcript {
+                if self.ui.focus == Focus::Transcript {
                     self.toggle_expand_cards();
                     return Action::None;
                 }
-                if self.focus == Focus::Sidebar {
-                    if let Some(job) = self.jobs.get(self.job_selected).cloned() {
+                if self.ui.focus == Focus::Sidebar {
+                    if let Some(job) = self.jobs.list.get(self.jobs.selected).cloned() {
                         return Action::AttachJob(job);
                     }
                 }
                 Action::None
             }
-            KeyCode::Char('c') if self.focus == Focus::Sidebar => {
-                if let Some(job) = self.jobs.get(self.job_selected) {
+            KeyCode::Char('c') if self.ui.focus == Focus::Sidebar => {
+                if let Some(job) = self.jobs.list.get(self.jobs.selected) {
                     return Action::CancelJob(job.id);
                 }
                 Action::None
             }
             KeyCode::Char('g') => {
-                if self.focus == Focus::Sidebar {
-                    self.inspector.scroll = 0;
+                if self.ui.focus == Focus::Sidebar {
+                    self.ui.inspector.scroll = 0;
                     return Action::None;
                 }
-                self.follow = false;
-                self.transcript_scroll = 0;
-                if !self.session.items.is_empty() {
-                    self.selected_card = Some(0);
+                self.ui.follow = false;
+                self.ui.transcript_scroll = 0;
+                if !self.session.current.items.is_empty() {
+                    self.ui.selected_card = Some(0);
                 }
                 Action::None
             }
             KeyCode::Char('G') => {
-                if self.focus == Focus::Sidebar {
-                    self.inspector.scroll = self.inspector.max_scroll;
+                if self.ui.focus == Focus::Sidebar {
+                    self.ui.inspector.scroll = self.ui.inspector.max_scroll;
                     return Action::None;
                 }
-                self.follow = true;
-                if !self.session.items.is_empty() {
-                    self.selected_card = Some(self.session.items.len() - 1);
+                self.ui.follow = true;
+                if !self.session.current.items.is_empty() {
+                    self.ui.selected_card = Some(self.session.current.items.len() - 1);
                 }
                 Action::None
             }
             KeyCode::PageUp => {
-                if self.focus == Focus::Sidebar {
-                    self.inspector.scroll = self
-                        .inspector
+                if self.ui.focus == Focus::Sidebar {
+                    self.ui.inspector.scroll = self
+                        .ui.inspector
                         .scroll
-                        .saturating_sub(self.inspector.height.max(1));
+                        .saturating_sub(self.ui.inspector.height.max(1) as usize);
                 } else {
-                    self.follow = false;
-                    self.transcript_scroll = self
-                        .transcript_scroll
-                        .saturating_sub(self.transcript_height.max(1));
+                    self.ui.follow = false;
+                    self.ui.transcript_scroll = self
+                        .ui.transcript_scroll
+                        .saturating_sub(self.ui.transcript_height.max(1) as usize);
                 }
                 Action::None
             }
             KeyCode::PageDown => {
-                if self.focus == Focus::Sidebar {
-                    self.inspector.scroll = self
-                        .inspector
+                if self.ui.focus == Focus::Sidebar {
+                    self.ui.inspector.scroll = self
+                        .ui.inspector
                         .scroll
-                        .saturating_add(self.inspector.height.max(1))
-                        .min(self.inspector.max_scroll);
+                        .saturating_add(self.ui.inspector.height.max(1) as usize)
+                        .min(self.ui.inspector.max_scroll);
                 } else {
-                    self.transcript_scroll = self
-                        .transcript_scroll
-                        .saturating_add(self.transcript_height.max(1));
-                    if self.transcript_scroll >= self.transcript_max_scroll {
-                        self.follow = true;
+                    self.ui.transcript_scroll = self
+                        .ui.transcript_scroll
+                        .saturating_add(self.ui.transcript_height.max(1) as usize);
+                    if self.ui.transcript_scroll >= self.ui.transcript_max_scroll {
+                        self.ui.follow = true;
                     }
                 }
                 Action::None
             }
             KeyCode::Home => {
-                self.follow = false;
-                self.transcript_scroll = 0;
+                self.ui.follow = false;
+                self.ui.transcript_scroll = 0;
                 Action::None
             }
             KeyCode::End => {
-                self.follow = true;
+                self.ui.follow = true;
                 Action::None
             }
             KeyCode::Char('b') => self.run_command(Command::ToggleSidebar),
@@ -313,40 +313,40 @@ impl App {
     }
 
     pub(in crate::tui) fn focus_inspector_tab(&mut self, tab: InspectorTab) -> Action {
-        self.show_sidebar = true;
-        self.inspector.force_open = true;
-        self.inspector.tab = tab;
-        self.inspector.scroll = 0;
-        if tab == InspectorTab::Diff && self.inspector.file_path.is_none() {
-            if let Some(last) = self.session.changed_files.last() {
-                self.inspector.selected_diff = self.session.changed_files.len() - 1;
-                self.inspector.file_path = Some(last.path.clone());
+        self.ui.show_sidebar = true;
+        self.ui.inspector.force_open = true;
+        self.ui.inspector.tab = tab;
+        self.ui.inspector.scroll = 0;
+        if tab == InspectorTab::Diff && self.ui.inspector.file_path.is_none() {
+            if let Some(last) = self.session.current.changed_files.last() {
+                self.ui.inspector.selected_diff = self.session.current.changed_files.len() - 1;
+                self.ui.inspector.file_path = Some(last.path.clone());
             }
         }
         Action::None
     }
 
     pub(in crate::tui) fn jump_diff_hunk(&mut self, dir: isize) {
-        let cur = self.inspector.scroll as usize;
-        if self.inspector.diff_hunk_lines.is_empty() {
+        let cur = self.ui.inspector.scroll;
+        if self.ui.inspector.diff_hunk_lines.is_empty() {
             return;
         }
         let next = if dir > 0 {
-            self.inspector
+            self.ui.inspector
                 .diff_hunk_lines
                 .iter()
                 .copied()
                 .find(|&l| l > cur)
-                .unwrap_or(*self.inspector.diff_hunk_lines.first().unwrap())
+                .unwrap_or(*self.ui.inspector.diff_hunk_lines.first().unwrap())
         } else {
-            self.inspector
+            self.ui.inspector
                 .diff_hunk_lines
                 .iter()
                 .rev()
                 .copied()
                 .find(|&l| l < cur)
-                .unwrap_or(*self.inspector.diff_hunk_lines.last().unwrap())
+                .unwrap_or(*self.ui.inspector.diff_hunk_lines.last().unwrap())
         };
-        self.inspector.scroll = (next as u16).min(self.inspector.max_scroll);
+        self.ui.inspector.scroll = next.min(self.ui.inspector.max_scroll);
     }
 }

@@ -140,15 +140,19 @@ class EnvoyHarborAgent(BaseAgent):  # type: ignore[misc]
             return {}
         decoder = json.JSONDecoder()
         best: dict[str, Any] = {}
-        for index, char in enumerate(raw):
-            if char != "{":
-                continue
+        index = 0
+        while index < len(raw):
+            pos = raw.find("{", index)
+            if pos == -1:
+                break
             try:
-                parsed, _ = decoder.raw_decode(raw[index:])
+                parsed, end = decoder.raw_decode(raw, pos)
             except json.JSONDecodeError:
+                index = pos + 1
                 continue
             if isinstance(parsed, dict):
                 best = parsed
+            index = max(end, pos + 1)
         return best
 
     async def run(

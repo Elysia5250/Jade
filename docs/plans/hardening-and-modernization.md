@@ -221,44 +221,44 @@
 
 #### P6-2 终端生命周期、崩溃与交互
 
-- [ ] **P6-2a** `[P1]` 恢复终端，覆盖 panic 和信号
+- [x] **P6-2a** `[P1]` 恢复终端，覆盖 panic 和信号
   - **位置**：`crates/envoy-cli/src/tui/terminal.rs`、`crates/envoy-cli/src/tui/edit_file.rs`
   - **动作**：安装 panic hook 和 `Drop` guard，处理 `SIGTERM` / `SIGHUP`，退出时恢复 raw mode、alternate screen 和键盘增强标志。`edit_file` 挂起前按需对称 pop / re-push `KeyboardEnhancementFlags`，外部编辑器非零退出要有提示。
   - **验证**：进入中途失败或 panic 后，终端标志被恢复。用 guard 单测，不依赖人工 PTY。
 
-- [ ] **P6-2b** `[P1]` 滚动和几何边界
+- [x] **P6-2b** `[P1]` 滚动和几何边界
   - **位置**：滚动偏移字段、`crates/envoy-cli/src/tui/view/transcript.rs`、`crates/envoy-cli/src/tui/text.rs`
   - **动作**：滚动改为 `usize`。`area.width == 0` 早退。切片用 `min`。`Instant` 减法改为 `checked_sub`。
   - **验证**：70,000 行偏移不回绕。宽度为 0 的 `TestBackend` 渲染不 panic。
 
-- [ ] **P6-2c** `[P1]` 输入语义
+- [x] **P6-2c** `[P1]` 输入语义
   - **位置**：`crates/envoy-cli/src/tui/state/input.rs`、picker、字符宽度
   - **动作**：`Focus::Input` 下 `Ctrl+U` 清空输入。Picker 空输入不拦截 `j` / `k`。`char_width` 与 `UnicodeWidth` 一致。
   - **验证**：三条状态或 `TestBackend` 测试分别覆盖这三种情况。
 
-- [ ] **P6-2d** `[P1]` 会话视图隔离，daemon 保持运行权威
+- [x] **P6-2d** `[P1]` 会话视图隔离，daemon 保持运行权威
   - **位置**：`crates/envoy-cli/src/tui/state/{agent.rs,commands.rs,ops.rs,jobs.rs,modals.rs}`
   - **动作**：抽出一个 `reset_session_view()`，新建、切换和 handoff 共用。清掉 `transcript_cache`、`expanded_explore_groups` 和 inspector 选中，并为缓存加上限。`UiNotice` 带 `session_id`。`dispatch_agent` 串行。`/sessions` 不能删除当前会话。`/rewind` 不计本机 shell。`cancel_active` 只发 `Interrupt`，等 daemon 的结束事件。
   - **验证**：`NewSession` 不串台。含 shell 的 rewind 不算 turn。别的会话的 notice 被滤掉。取消之后 `agent_running` 仍由 daemon 事件决定。
 
-- [ ] **P6-2e** `[P1]` 登录端口、弹窗高度和鼠标动作
+- [x] **P6-2e** `[P1]` 登录端口、弹窗高度和鼠标动作
   - **位置**：`crates/envoy-cli/src/tui/state/login/methods.rs`、`crates/envoy-cli/src/tui/view/{modals.rs,status.rs}`、`crates/envoy-cli/src/tui/mouse.rs`
   - **动作**：OAuth 的 `redirect_uri` 使用实际监听端口。弹窗和状态栏按屏幕高度裁剪。鼠标分发完整 `Action`。
   - **验证**：备用端口写进 `redirect_uri`。矮屏幕渲染不越界。`AttachJob` 以外的鼠标动作能到达对应命令。PTY 清单仍等有 TTY 时再跑 `docs/MANUAL-TEST.md`。
 
 #### P6-3 拆解 `App`，收口薄客户端
 
-- [ ] **P6-3a** `[P2]` `WelcomeMode` 和斜杠命令单源
+- [x] **P6-3a** `[P2]` `WelcomeMode` 和斜杠命令单源
   - **位置**：welcome 的五个互斥布尔、`crates/envoy-cli/src/tui/commands.rs`、`SLASH_COMMANDS`
   - **动作**：互斥页面改成 `WelcomeMode`。命令表和 `run_slash` 用同一张表，补全里出现 `/jobs`、`/logs`、`/output`。这一项不搬 `App` 字段。
   - **验证**：补全能列出这三条。未知命令仍拒绝。现有 slash 测试通过。
 
-- [ ] **P6-3b** `[P2]` 把 `App` 拆成五个状态对象
+- [x] **P6-3b** `[P2]` 把 `App` 拆成五个状态对象
   - **位置**：`crates/envoy-cli/src/tui/mod.rs`、`crates/envoy-cli/src/tui/types.rs`、`crates/envoy-cli/src/tui/state/**`
   - **动作**：`App` 改为组合 `AgentState`、`SessionState`、`JobState`、`LoginState`、`UiState`。只搬家，交互不变。
   - **验证**：`cargo check --workspace --all-targets` 和现有 TUI 测试通过。没有源文件超过 700 行。
 
-- [ ] **P6-3c** `[P2]` `envoy-cli` 不再直接依赖 `reqwest`
+- [x] **P6-3c** `[P2]` `envoy-cli` 不再直接依赖 `reqwest`
   - **位置**：`crates/envoy-cli/Cargo.toml`、登录、模型目录、`/mcp probe`
   - **动作**：模型列表、OAuth 和 mcp probe 改走 daemon RPC，或改走 CLI 子命令。从 `envoy-cli` 去掉直接的 `reqwest` 依赖。
   - **验证**：`crates/envoy-cli/Cargo.toml` 没有 `reqwest`。`cargo check --workspace --all-targets` 通过。
@@ -270,25 +270,25 @@
 > 目标：砍掉高维护成本胶水代码、消灭分叉实现带来的漏洞隐患，显著缩小代码体积并提升编译与迭代效率。
 > 目标 commit scope：`refactor(workspace): eliminate self-loopback IPC, unify tools/models, and drop redundant custom engines`
 
-- [ ] **P7-1** `[P2/瘦身]` 消除同进程双 Daemon 自环 IPC 与 `EphemeralServer`
+- [x] **P7-1** `[P2/瘦身]` 消除同进程双 Daemon 自环 IPC 与 `EphemeralServer`
   - **位置**：`crates/envoy-service/src/remote.rs`、`crates/envoy-agent/src/runtime/{server.rs, ops.rs, monitors.rs}`、`crates/envoy-agent/src/agent/loop.rs:111-127`、`crates/envoy-cli/src/{main.rs:347-421, headless/mod.rs:84-162}`
   - **现状问题**：`envoy serve` 进程内 `Runtime` 不持有 `AgentServer` / `Jobs`，导致本地每次工具调用、200ms monitor 轮询和 rewind 都要走 `envoy.sock` 自连自己并重读 `agent.json` 写无用审计；`headless` 还为此在 `/tmp` 起 `EphemeralServer` 自连。
   - **改造动作**：为 `Remote` / `AgentDialer` 增加进程内 `LocalDirect` 实现（当 target 为本地且同进程持有 `Arc<Jobs>` / `AgentServer` 时直接内存派发，远程仍走 Conduit Service 16）；彻底移除 `headless` 中的 `EphemeralServer` 及临时 socket；同时修正全仓 4 处重复 `dialer_for` 样板代码。
   - **回归验证**：本机工具调用与 monitor 不再在 `agent/audit.log` 制造无效自环记录；`headless` 全量与压力测试在无临时 socket 环境下通过。
 
-- [ ] **P7-2** `[P2/瘦身]` 统一 `agent/tools/` 与 `mcp/server_tools.rs` 重复工具内核
+- [x] **P7-2** `[P2/瘦身]` 统一 `agent/tools/` 与 `mcp/server_tools.rs` 重复工具内核
   - **位置**：`crates/envoy-agent/src/agent/tools/` 与 `crates/envoy-agent/src/mcp/server_tools.rs`
   - **现状问题**：8 个核心工具（`exec`、`read`、`write`、`edit`、`ls`、`glob`、`grep`、`job`）两套各自实现，直接导致路径基准、输出截断、环境过滤与审计严重漂移。
   - **改造动作**：在 `envoy-agent` 抽出一套核心工具执行器与统一参数规范化/截断层，共用同一 `authorize_tool_call` + `HookEngine` 入口；`agent/tools` 与 `mcp/server_tools` 仅保留各自入参解析与返回格式薄适配。
   - **回归验证**：原有 agent tools 与 MCP tool 测试全部通过，新增测试确认双方共享一致的路径校验、截断上限与审计记录。
 
-- [ ] **P7-3** `[P2/瘦身]` 收口 6 份矛盾的模型/供应商注册表并加入内存缓存
+- [x] **P7-3** `[P2/瘦身]` 收口 6 份矛盾的模型/供应商注册表并加入内存缓存
   - **位置**：`crates/envoy-agent/src/auth/{catalog.rs, routing.rs, mod.rs:150-156, 443}`、`crates/envoy-agent/src/agent/context/{catalog.rs, families.rs, budget.rs, reasoning.rs, fetch.rs}`
   - **现状问题**：6 份硬编码元数据互打架（`is_retired_model` 封死 `"deepseek-chat"` 和 `"deepseek-reasoner"`、`families.rs` `id.contains("o3")` 误伤 `pro3`/`video1`、`budget.rs` 忽略 `pricing_cliff`、Codex `/models` 返回格式不被 `remember_caps_from_models` 识别、`store_listed_models` 覆盖 `custom_models`、`k` 按 `1024` vs `1000` 混用、TUI 与 daemon 调不同的 provider 解析函数），且 `effort::apply` 与 `budget.rs` 在**每次 LLM 请求**里同步重读反序列化几 MB 的 `model_caps.json`。
   - **改造动作**：建立单一 `ModelRegistry`（合并厂商、协议、alias 映射、上下文窗、pricing cliff、推理能力开关与排序分数），用 `OnceLock`/`RwLock` + 文件 mtime/版本号做进程内缓存消除热路径磁盘读；解禁 `"deepseek-chat"`/`"deepseek-reasoner"`；改用整词/前缀匹配替代宽松子串；修复 Codex `{"models":[{"slug":...}]}` 解析、保护用户 `custom_models`、统一 SI 单位计算；收口 TUI 与 daemon 使用同一 `resolve_provider`（正确保留环境变量覆盖）。
   - **回归验证**：单测验证 `"deepseek-chat"` / `"deepseek-reasoner"` 可选、`"my-pro3-model"` 不误匹配 `o3`、`pricing_cliff` 触发预设阈值、Codex 模型列表写入 caps 缓存且保留 `custom_models`。
 
-- [ ] **P7-4** `[P2/瘦身]` 替换手写轮子、剔除低效重依赖与重复胶水
+- [x] **P7-4** `[P2/瘦身]` 替换手写轮子、剔除低效重依赖与重复胶水
   - **位置**：`crates/envoy-core/src/search.rs`、`crates/envoy-agent/Cargo.toml`、`crates/envoy-agent/src/agent/context/extract.rs`、`crates/envoy-agent/src/{mcp/mod.rs:11, auth/cli.rs}`、`crates/envoy-cli/Cargo.toml:21`、`crates/envoy-agent/src/{skills/loader.rs, agent/subagent/catalog.rs, memory.rs, agent/effort.rs, agent/delegate_pref.rs, skills/prefs.rs}`
   - **现状问题**：`search.rs` ~400 行手写 `RegexLite` + `expand_braces` + `walk_files` 带来花括号爆炸 OOM、括号分组失效、ReDoS 与无界遍历；`envoy-agent` 仅为了 `extract.rs` 折叠 `.rs` 文件而引入 `tree-sitter` + `tree-sitter-rust` C 编译依赖；`envoy-agent` 里混入了仅 CLI 用的 `clap` 和 267 行交互式 stdin `auth/cli.rs`；`envoy-cli` 声明了未使用的 `futures`；3 份手写 frontmatter 解析器（不支持行内 `#` 注释）、7 份重复 `now_ms()`、4 份重复非原子文件写入（含无保护 `std::os::unix` 导入）、重复 `ScratchGuard` 以及 CLI/TUI 重复的登录/会话加载/日志 demux 代码。
   - **改造动作**：在 `envoy-core::search` 内部用 `regex` + `globset` + `ignore`（流式带上限遍历 + `.gitignore` 支持）替换手写引擎；移除 `tree-sitter` + `tree-sitter-rust`（改为统一稳健的缩进/签名折叠，或视决策引入 `tree-sitter-bash`）；把 `auth/cli.rs` 与 `mcp/mod.rs` 的 CLI 解析移回 `envoy-cli`，移除 `envoy-agent` 的 `clap` 与 `envoy-cli` 的死 `futures`；抽出统一的 frontmatter 解析器、时间戳 helper、安全原子写入与 `ScratchGuard`、共享登录/会话加载/日志流辅助函数。
@@ -301,19 +301,19 @@
 > 目标：清理边缘灰产风险与半成品特性，建立长期运维上限与可信 CI 护栏。
 > 目标 commit scope：`chore(auth,skills,memory,ci): isolate experimental OAuth, add log rotation, prune dead code, and tighten CI`
 
-- [ ] **P8-1** `[P2/认证隔离]` 非官方一厂 OAuth 标记隔离与并发/安全修复
+- [x] **P8-1** `[P2/认证隔离]` 非官方一厂 OAuth 标记隔离与并发/安全修复
   - **位置**：`crates/envoy-agent/src/auth/{oauth_anthropic.rs:50-67, oauth_openai.rs:45-107, 210-248, github.rs, refresh.rs:11-120, mod.rs:33-45, 177-189}`
   - **现状问题**：借用 Claude Code / Codex CLI / VS Code Copilot 一厂 Client ID 存在随时封禁风险；Anthropic OAuth 未验证 `state == expected_state`（CSRF）；OpenAI 回调 HTML 直接拼装错误参数（反射 XSS）且读头无超时、device auth 遇到 403/404 永久死等；`refresh.rs` 缺并发互斥导致并行 subagent 互相刷废 rotating refresh token，且会把 `ENVOY_BASE_URL` 临时覆盖永久写进 `auth.json`；`ModelPrefs` 夹带 TUI `theme`/`show_sidebar` 状态。
   - **改造动作**：若保留该功能，显式标记为 `experimental / unofficial` 并收拢提示与文档；修复 `exchange_anthropic_code` 的 `state` 校验；对 OpenAI 本地回调 HTML 转义、加读取超时、给 device 轮询加总超时与取消通道；用进程/异步互斥锁序列化同一 provider 的 token 刷新，且禁止 `routed` / env override 回写持久化 `auth.json`；将 `theme`/`show_sidebar` 移出 `envoy-agent` 放到 TUI 配置。
   - **回归验证**：单测验证错误 `state` 被拒绝、回调错误页 HTML 转义 `<script>`、并发两个 refresh 任务只发一次上游刷新请求、`ENVOY_BASE_URL` 刷新后不污染 `auth.json`。
 
-- [ ] **P8-2** `[P2/能力补齐]` Skills 与 Memory 机制收口
+- [x] **P8-2** `[P2/能力补齐]` Skills 与 Memory 机制收口
   - **位置**：`crates/envoy-agent/src/skills/{loader.rs:24, 101-142, 360-434, prefs.rs}`、`crates/envoy-agent/src/memory.rs`、`crates/envoy-agent/src/agent/prompt.rs:232-238`
   - **现状问题**：`SKILL.md` 的 `allowed_tools` 仅作文本展示不执行；`skill_root_kind` 把项目级 skill 误标为 `"user"`；`walk_rel` 递归无 symlink 防环；`memory.rs` 没有供 Agent 读写的工具、按 4000 **字节**而非字符截断（中文仅 ~1300 字）且跨全工作区混杂注入、`split_note` 无尾换行符解析失败；`prompt.rs` 加载到 `AGENTS.md` 后直接跳过同级 `ENVOY.md`。
   - **改造动作**：将 `allowed_tools` 接入 `ToolFilter`/激活期授权（或从 schema 删除避免虚假安全感）；修复 `skill_root_kind` 与 `walk_rel` symlink inode/深度防环；`memory.rs` 支持按当前 workspace scope 隔离过滤与字符上限+截断标记，修复 `split_note` EOF 解析，并决定是否开放 Agent 记忆工具；`prompt.rs` 同时兼容合并 `AGENTS.md` 与 `ENVOY.md`。
   - **回归验证**：单测覆盖 symlink 环不死循环、项目 skill 标签正确、中文长 memory 按字符边界截断并带提示、同时存在 `AGENTS.md` 与 `ENVOY.md` 均被注入。
 
-- [ ] **P8-3** `[P2/卫生]` 渲染减债、日志轮转、死代码清理与 CI 护栏对齐
+- [x] **P8-3** `[P2/卫生]` 渲染减债、日志轮转、死代码清理与 CI 护栏对齐
   - **位置**：`crates/envoy-cli/src/tui/{markdown.rs, markdown_table.rs, highlight.rs, decrypt.rs, text.rs:37-58, modals.rs:89}`、`crates/envoy-agent/src/runtime/{protocol.rs, server.rs, mod.rs}`、`crates/envoy-service/src/{server.rs, remote.rs, conduit/mod.rs}`、`crates/envoy-agent/src/agent/tools/schema.rs:328-397`、`crates/envoy-core/src/{audit.rs, fs.rs, log.rs}`、`scripts/{check-file-sizes.py, file-size-baseline.txt}`、`.github/workflows/ci.yml`、`docs/architecture.md:86`
   - **现状问题**：手写 Markdown/高亮/解密渲染约 1,800 行持续吃维护成本；`audit.log`、`permission_audit.jsonl`、`envoy.out` 永不轮转；存在整批零调用死协议与死代码（`AgentReq::{Ensure, Attach, List}`、`AgentResp::Sessions`、`SessionInfo`、`Op::Probe`、`AgentServer::with_device`、`schema.rs` 5 个 `#[allow(dead_code)]`、`expanded_prefix`、`ModelsModal::fetching` 等）；`check-file-sizes.py` 未按 `AGENTS.md` 排除测试文件，`file-size-baseline.txt` 空置；CI 缺 `--locked`、`shellcheck`、Python/benchmark 脚本检查与 MSRV 检查；`docs/architecture.md:86` 审计日志路径与实际不符。
   - **改造动作**：评估用 `pulldown-cmark` 替换手写 Markdown 块/行内/表格解析并简化或可选化 `decrypt.rs`；为 `audit.log`、`permission_audit.jsonl`、`envoy.out` 增加大小轮转上限；清理上述已确认死协议变体、死导出与死测试函数；修正 `scripts/check-file-sizes.py` 真正排除 `tests/` 与 `tests*.rs` 并清理无用 baseline；CI 增加 `--locked`、`shellcheck scripts/*.sh`、Python 语法检查及 MSRV 1.85 验证；同步修正 `docs/architecture.md:86` 路径说明。
@@ -331,9 +331,11 @@
 
 ## Next
 
-**Phase 1–5 已提交为 `f7b9a4e`。P6-1 已完成，并包含在其后的这次提交里（未 push）。** P6-1 门禁：`cargo clippy --workspace --all-targets -- -D warnings`、`cargo test --workspace`（352 passed, 0 failed）、`cargo check --workspace --all-targets`、`python3 scripts/check-file-sizes.py` 均为退出码 0。本机无 `rustfmt` / `shellcheck`，且当时无 TTY，未跑 `docs/MANUAL-TEST.md` 的 PTY 清单。
-
-**下一项只做 P6-2a**（恢复终端，覆盖 panic 和信号）。做完停。顺序接着是 `P6-2b` → `P6-2e`，然后 `P6-3a` → `P6-3c`。不要回退 Phase 1/2 的安全不变量，也不要回退 Phase 3 的并发/worktree 修复、Phase 4 的线协议与快照分片、Phase 5 的前缀冻结、压缩保真与 reasoning 回传，以及 P6-1 的绘制路径。
+**Phase 1–8 均已完成并通过验证（工作区当前变更尚未提交）。Phase 8 是本计划的最后一项，到此停止。**
+- **Phase 8 门禁**：`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`（392 passed, 0 failed, 0 ignored）、`cargo check --workspace --all-targets --locked`、`python3 scripts/check-file-sizes.py` 全部退出码 0。
+- **分项计数**：`envoy-agent` 222、`envoy-cli` 75 + `tests/stress_headless.rs` 2、`envoy-core` 51 + `tests/stress_jobs.rs` 2、`envoy-proto` 8、`envoy-service` 17 + 集成测试 15（`conduit_control` 6、`follow_and_audit` 3、`remote_policy` 3、`stress_server` 1、`wire_version` 2）。
+- **环境说明**：本机未安装 `rustfmt` / `shellcheck`，且未在交互终端会话中运行 `docs/MANUAL-TEST.md` PTY 清单。
+- 不要回退 Phase 1–8 的安全不变量与重构结果。未另行要求时不要 commit、不要 push。
 
 ## Verification
 

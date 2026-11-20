@@ -74,6 +74,7 @@ async fn overflow_triggers_one_compaction_retry_and_second_failure_errors() {
             key: "sk-test".into(),
         },
         custom_models: vec![],
+        fetched_models: vec![],
         model_routes: BTreeMap::new(),
         updated_ms: 0,
     };
@@ -105,6 +106,7 @@ async fn overflow_triggers_one_compaction_retry_and_second_failure_errors() {
         data_dir: dir.clone(),
         conduit: None,
         local_socket: None,
+        local_server: None,
         target: "local".into(),
         cwd: dir.clone(),
         provider: provider.clone(),
@@ -133,6 +135,10 @@ async fn overflow_triggers_one_compaction_retry_and_second_failure_errors() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut prov = provider;
     let mut plan = resolve_budget(&dir, "test", "test-model");
+    let mut total_in = 0u64;
+    let mut total_out = 0u64;
+    let mut cache_read = 0u64;
+    let mut cache_create = 0u64;
     let res = call_provider_with_overflow_retry(
         &reqwest::Client::new(),
         &cfg,
@@ -145,6 +151,10 @@ async fn overflow_triggers_one_compaction_retry_and_second_failure_errors() {
         &mut plan,
         None,
         0,
+        &mut total_in,
+        &mut total_out,
+        &mut cache_read,
+        &mut cache_create,
         &tx,
     )
     .await;

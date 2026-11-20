@@ -33,3 +33,4 @@ pub use context::CompactionTier;
 pub use events::{AgentEvent, AskOption};
 pub use monitors::{MonitorBroker, MonitorInfo, MonitorStartSpec};
 pub use r#loop::run_agent_turn;
+pub(crate) use providers::shared_http_client;

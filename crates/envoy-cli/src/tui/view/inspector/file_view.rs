@@ -1,5 +1,5 @@
 //! Inspector Tab 3: Syntax-highlighted, line-numbered workspace file previewer.
-use super::push_linked_rows;
+use super::{push_linked_rows, render_scrolled_lines};
 use crate::tui::highlight::{highlight_code_line, Lang};
 use crate::tui::inputs::PreviewBody;
 use crate::tui::links::{display_rel, LinkedSpan};
@@ -16,11 +16,11 @@ pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
         .split(area);
     let header_area = chunks[0];
     let body_area = chunks[1];
-    app.inspector.height = body_area.height;
+    app.ui.inspector.height = body_area.height;
 
-    let Some(raw_path) = app.inspector.file_path.clone() else {
-        app.inspector.max_scroll = 0;
-        app.inspector.scroll = 0;
+    let Some(raw_path) = app.ui.inspector.file_path.clone() else {
+        app.ui.inspector.max_scroll = 0;
+        app.ui.inspector.scroll = 0;
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(""),
@@ -42,7 +42,7 @@ pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
     let has_diff = app.inputs.has_diff;
 
     let line_label = app
-        .inspector
+        .ui.inspector
         .file_line
         .map(|l| format!(":{l}"))
         .unwrap_or_default();
@@ -86,8 +86,8 @@ pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
     );
 
     let FileBody::Text(text) = body else {
-        app.inspector.max_scroll = 0;
-        app.inspector.scroll = 0;
+        app.ui.inspector.max_scroll = 0;
+        app.ui.inspector.scroll = 0;
         let (message, bad) = match body {
             FileBody::Missing(path) => (format!("  cannot read {path}"), true),
             FileBody::Loading => ("  loading preview".to_string(), false),
@@ -103,9 +103,15 @@ pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
     };
 
     let lang = Lang::from_path(Path::new(&rel));
-    let target_line = app.inspector.file_line;
+    let target_line = app.ui.inspector.file_line;
 
     let mut lines: Vec<Line<'static>> = Vec::new();
+    if app.inputs.truncated {
+        lines.push(Line::styled(
+            "  [preview truncated at 512 KiB]",
+            Style::default().fg(theme.warn),
+        ));
+    }
     for (idx, raw) in text.lines().enumerate() {
         let lineno = idx + 1;
         let is_target = target_line == Some(lineno);
@@ -137,12 +143,11 @@ pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
         lines.push(Line::from(spans));
     }
 
-    let max_scroll = (lines.len() as u16).saturating_sub(body_area.height);
-    app.inspector.max_scroll = max_scroll;
-    app.inspector.scroll = app.inspector.scroll.min(max_scroll);
-
-    frame.render_widget(
-        Paragraph::new(lines).scroll((app.inspector.scroll, 0)),
+    render_scrolled_lines(
+        frame,
+        lines,
+        &mut app.ui.inspector.scroll,
+        &mut app.ui.inspector.max_scroll,
         body_area,
     );
 }
@@ -161,7 +166,7 @@ fn preview_text(app: &App, raw_path: &str) -> (String, FileBody) {
         PreviewBody::Missing { rel } => (rel.clone(), FileBody::Missing(rel.clone())),
         PreviewBody::Loading { rel } => (rel.clone(), FileBody::Loading),
         PreviewBody::Absent => (
-            display_rel(&app.session.cwd, Path::new(raw_path)),
+            display_rel(&app.session.current.cwd, Path::new(raw_path)),
             FileBody::Missing(raw_path.to_string()),
         ),
     }

@@ -7,10 +7,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 mod catalog;
-mod cli;
 mod github;
 mod oauth_anthropic;
 mod oauth_openai;
@@ -19,12 +17,17 @@ mod refresh;
 mod routing;
 
 pub use catalog::BUILTIN_PROVIDERS;
-pub use cli::{cmd_auth_list, cmd_auth_login, cmd_auth_logout};
-pub use github::{copilot_session_token, poll_github_copilot_device, start_github_copilot_device};
-pub use oauth_anthropic::{anthropic_authorize_url, exchange_anthropic_code};
+pub use github::{
+    copilot_session_token, poll_github_copilot_device, poll_github_copilot_device_default,
+    start_github_copilot_device, start_github_copilot_device_default,
+};
+pub use oauth_anthropic::{
+    anthropic_authorize_url, exchange_anthropic_code, exchange_anthropic_code_default,
+};
 pub use oauth_openai::{
-    bind_openai_callback_listener, exchange_openai_code, openai_authorize_url,
-    poll_openai_device_auth, start_openai_device_auth, wait_openai_browser_callback,
+    bind_openai_callback_listener, exchange_openai_code, exchange_openai_code_default,
+    openai_authorize_url, poll_openai_device_auth, poll_openai_device_auth_default,
+    start_openai_device_auth, start_openai_device_auth_default, wait_openai_browser_callback,
 };
 pub use pkce::{extract_query_param, generate_pkce, open_browser, random_state, Pkce};
 pub use refresh::ensure_fresh_provider;
@@ -124,6 +127,8 @@ pub struct StoredProvider {
     #[serde(default)]
     pub custom_models: Vec<String>,
     #[serde(default)]
+    pub fetched_models: Vec<String>,
+    #[serde(default)]
     pub model_routes: BTreeMap<String, ModelRoute>,
     #[serde(default)]
     pub updated_ms: u64,
@@ -145,14 +150,22 @@ impl StoredProvider {
         copy.base_url = route.base_url.clone();
         copy
     }
+
+    /// All candidate model IDs for this provider: user-configured `custom_models`
+    /// followed by deduplicated live `/models` entries in `fetched_models`.
+    pub fn all_models(&self) -> Vec<String> {
+        let mut out = Vec::with_capacity(self.custom_models.len() + self.fetched_models.len());
+        for m in self.custom_models.iter().chain(&self.fetched_models) {
+            if !out.contains(m) {
+                out.push(m.clone());
+            }
+        }
+        out
+    }
 }
 
 pub fn is_retired_model(provider_id: &str, model_id: &str) -> bool {
-    provider_id == "deepseek"
-        && matches!(
-            model_id,
-            "deepseek-chat" | "deepseek-reasoner" | "deepseek-v4.1-flash"
-        )
+    crate::model_registry::is_retired_model(provider_id, model_id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -173,15 +186,13 @@ impl ModelRef {
     }
 }
 
+/// Model selection persisted in `model.json`. Console chrome (theme, sidebar)
+/// lives in the TUI's own `console.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPrefs {
     pub active: Option<ModelRef>,
     #[serde(default)]
     pub recent: Vec<ModelRef>,
-    #[serde(default)]
-    pub theme: usize,
-    #[serde(default)]
-    pub show_sidebar: bool,
     #[serde(default)]
     pub budget_tier: crate::agent::CompactionTier,
     #[serde(default)]
@@ -193,8 +204,6 @@ impl Default for ModelPrefs {
         Self {
             active: None,
             recent: Vec::new(),
-            theme: 0,
-            show_sidebar: true,
             budget_tier: crate::agent::CompactionTier::Native,
             model_budgets: BTreeMap::new(),
         }
@@ -299,14 +308,10 @@ pub fn available_models(data_dir: &Path) -> Vec<AvailableModel> {
     let providers = effective_providers(data_dir);
     let mut out = Vec::new();
     for prov in providers.values() {
-        let mut seen = Vec::new();
-        for m in &prov.custom_models {
-            if is_retired_model(&prov.id, m) || seen.contains(m) {
+        for m in prov.all_models() {
+            if is_retired_model(&prov.id, &m) {
                 continue;
             }
-            seen.push(m.clone());
-        }
-        for m in seen {
             out.push(AvailableModel {
                 provider_id: prov.id.clone(),
                 provider_name: prov.name.clone(),
@@ -320,10 +325,9 @@ pub fn available_models(data_dir: &Path) -> Vec<AvailableModel> {
 
 pub fn default_model_for(provider: &StoredProvider) -> String {
     provider
-        .custom_models
-        .iter()
+        .all_models()
+        .into_iter()
         .find(|m| !is_retired_model(&provider.id, m))
-        .cloned()
         .unwrap_or_default()
 }
 
@@ -424,28 +428,7 @@ pub fn slugify_provider_id(name: &str) -> String {
 }
 
 pub fn resolve_active_provider(data_dir: &Path) -> Option<(StoredProvider, ModelRef)> {
-    let providers = effective_providers(data_dir);
-    let prefs = load_prefs(data_dir);
-    if let Some(active) = prefs.active {
-        if let Some(prov) = providers.get(&active.provider_id) {
-            if is_retired_model(&active.provider_id, &active.model_id) {
-                return Some((
-                    prov.clone(),
-                    ModelRef {
-                        provider_id: prov.id.clone(),
-                        model_id: default_model_for(prov),
-                    },
-                ));
-            }
-            return Some((prov.clone(), active));
-        }
-    }
-    let first = providers.values().next()?.clone();
-    let model = ModelRef {
-        provider_id: first.id.clone(),
-        model_id: default_model_for(&first),
-    };
-    Some((first, model))
+    resolve_provider_with_overrides(data_dir, None)
 }
 
 pub fn mask_secret(s: &str) -> String {
@@ -462,10 +445,7 @@ pub fn mask_secret(s: &str) -> String {
 }
 
 pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    envoy_core::now_ms()
 }
 
 #[cfg(test)]
@@ -539,6 +519,7 @@ mod tests {
                 key: "sk-test-1234567890".into(),
             },
             custom_models: vec![],
+            fetched_models: vec![],
             model_routes: BTreeMap::new(),
             updated_ms: now_ms(),
         };
@@ -560,7 +541,10 @@ mod tests {
 
         let (active_prov, active_model) = resolve_active_provider(&dir).unwrap();
         assert_eq!(active_prov.id, "deepseek");
-        assert!(active_model.model_id.is_empty());
+        assert_eq!(
+            active_model.model_id,
+            crate::model_registry::default_env_model("deepseek")
+        );
 
         assert!(remove_provider(&dir, "deepseek").unwrap());
         assert!(load_auth(&dir).credentials.is_empty());
@@ -579,6 +563,7 @@ mod tests {
                 key: "sk-ant".into(),
             },
             custom_models: vec!["claude-test".into()],
+            fetched_models: vec![],
             model_routes: BTreeMap::new(),
             updated_ms: now_ms(),
         };
@@ -590,7 +575,8 @@ mod tests {
             credential: Credential::ApiKey {
                 key: "sk-ds".into(),
             },
-            custom_models: vec!["deepseek-chat".into(), "deepseek-flash".into()],
+            custom_models: vec!["deepseek-v4.1-flash".into(), "deepseek-flash".into()],
+            fetched_models: vec![],
             model_routes: BTreeMap::new(),
             updated_ms: now_ms(),
         };
@@ -599,13 +585,15 @@ mod tests {
         let mut prefs = load_prefs(&dir);
         prefs.active = Some(ModelRef {
             provider_id: "deepseek".into(),
-            model_id: "deepseek-chat".into(),
+            model_id: "deepseek-v4.1-flash".into(),
         });
         save_prefs(&dir, &prefs).unwrap();
 
         let (prov, model) = resolve_active_provider(&dir).unwrap();
         assert_eq!(prov.id, "deepseek");
         assert_eq!(model.model_id, "deepseek-flash");
+        assert!(!is_retired_model("deepseek", "deepseek-chat"));
+        assert!(!is_retired_model("deepseek", "deepseek-reasoner"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

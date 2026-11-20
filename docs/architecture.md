@@ -34,6 +34,8 @@ Envoy is a daemon-owned agent with a thin terminal client.
 - `agent.sock` and control sockets are local, mode `0600`.
 - The daemon is the source of truth for `running`; the console may be stale and
   must recover from a snapshot.
+- The console keeps its own width-aware markdown renderer (linked spans, tables,
+  and the decrypt view). It does not take a `pulldown-cmark` dependency.
 
 ## Module map
 
@@ -89,7 +91,7 @@ crates/envoy-cli/src/
 2. Explicit rule precedence (`Managed Deny > Local Deny > Hard Protected Guard > Managed Ask > Local Ask > Managed Allow > Local Allow > Mode Baseline`) produces `allow`/`ask`/`deny`.
 3. A `deny` short-circuits; an `ask` creates an approval request (`AskBroker`) or fails cleanly on non-interactive MCP stdio.
 4. `envoy-core::sandbox` enforces filesystem and network limits after approval. Backends are `bwrap`, then Linux Landlock, then macOS Seatbelt (`sandbox-exec`). With no backend the command is refused. Local and remote agent `exec` default to an offline workspace write. Landlock cannot hide `~/.ssh`, `~/.aws`, or `.env`. Human shell and `envoy run` stay unsandboxed.
-5. The decision and sandbox mode are written to the audit log (`~/.envoy/audit/permissions.jsonl`).
+5. The decision and sandbox mode are appended to `<data_dir>/agent/permission_audit.jsonl` (the data directory defaults to `~/.envoy`). Hook decisions go to `<data_dir>/agent/hook_audit.jsonl`, and agent invocations to `<data_dir>/agent/audit.log`. Each of those logs rotates at 10 MiB, keeping one previous generation named with a `.1` suffix.
 6. A rejection is returned to the model with actionable context.
 
 ## Where to look

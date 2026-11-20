@@ -41,6 +41,15 @@ pub struct AgentServer {
     inner: Arc<Inner>,
 }
 
+impl std::fmt::Debug for AgentServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentServer")
+            .field("root", &self.inner.root)
+            .field("device", &self.inner.device)
+            .finish()
+    }
+}
+
 struct Inner {
     host: Arc<dyn AgentHost>,
     jobs: Jobs,
@@ -86,6 +95,14 @@ impl AgentServer {
     /// The shared job table (used by embedded hosts and tests).
     pub fn jobs(&self) -> &Jobs {
         &self.inner.jobs
+    }
+
+    pub(crate) fn host(&self) -> &dyn AgentHost {
+        self.inner.host.as_ref()
+    }
+
+    pub(crate) fn device(&self) -> Option<&str> {
+        self.inner.device.as_deref()
     }
 
     /// Handle one request stream end-to-end.

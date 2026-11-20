@@ -8,12 +8,7 @@ use serde_json::{json, Value};
 /// DeepSeek-R1 style models echo `reasoning_content` on the same turn.
 /// The provider id is not the signal: a gateway can host the model.
 pub(crate) fn echoes_reasoning_content(model_id: &str) -> bool {
-    let id = model_id.to_ascii_lowercase();
-    let name = id.rsplit(['/', ':']).next().unwrap_or(&id);
-    name.contains("deepseek")
-        || name.contains("reasoner")
-        || name.starts_with("qwq")
-        || name.contains("-r1")
+    crate::model_registry::echoes_reasoning_content(model_id)
 }
 
 pub(crate) fn chat_body(
@@ -25,14 +20,18 @@ pub(crate) fn chat_body(
     extra_tools: &[Value],
     session_id: &str,
 ) -> Value {
-    json!({
+    let tools = openai_tools_json_filtered(permissions, tool_filter, extra_tools);
+    let mut body = json!({
         "model": model,
         "messages": chat_messages(model, system, history),
-        "tools": openai_tools_json_filtered(permissions, tool_filter, extra_tools),
         "stream": true,
         "stream_options": { "include_usage": true },
         "prompt_cache_key": prompt_cache_key(session_id),
-    })
+    });
+    if !tools.is_empty() {
+        body["tools"] = json!(tools);
+    }
+    body
 }
 
 pub(crate) fn chat_messages(model: &str, system: &str, history: &[ChatMessage]) -> Vec<Value> {
@@ -82,14 +81,15 @@ fn assistant_message(message: &ChatMessage) -> Value {
     })
 }
 
-/// Same-turn tool calls keep `reasoning_content`. A later user message strips it.
+/// Same-turn tool calls keep `reasoning_content`. A later user message strips it,
+/// except synthetic `<environment_update>` / `<pre_model_context>` tail injections.
 fn replay_reasoning(model: &str, history: &[ChatMessage], index: usize) -> Option<String> {
     if !echoes_reasoning_content(model) {
         return None;
     }
-    let later_user = history[index + 1..]
-        .iter()
-        .any(|message| message.role == ChatRole::User);
+    let later_user = history[index + 1..].iter().any(|message| {
+        message.role == ChatRole::User && !crate::agent::prompt::is_synthetic_tail_message(message)
+    });
     if later_user {
         return None;
     }

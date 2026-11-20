@@ -6,12 +6,52 @@
 
 use super::*;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::signal::unix::{signal, Signal, SignalKind};
 
 const FRAME_MS: u64 = 33;
 const ASK_FRAME_MS: u64 = 250;
 const SHELL_POLL: Duration = Duration::from_millis(200);
 
 type ModelMsg = (String, Vec<envoy_agent::agent::context::ListedModel>);
+
+struct TtyReader {
+    stop: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TtyReader {
+    fn spawn() -> Result<(Self, mpsc::UnboundedReceiver<Event>)> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let handle = std::thread::Builder::new()
+            .name("envoy-tty".into())
+            .spawn(move || tty_reader(tx, worker_stop))
+            .map_err(|err| anyhow::anyhow!("tty reader failed to start: {err}"))?;
+        Ok((
+            Self {
+                stop,
+                handle: Some(handle),
+            },
+            rx,
+        ))
+    }
+
+    fn stop_and_join(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for TtyReader {
+    fn drop(&mut self) {
+        self.stop_and_join();
+    }
+}
 
 struct WakePlan {
     after: Duration,
@@ -20,6 +60,7 @@ struct WakePlan {
 
 enum ConsoleWake {
     Term(Option<Event>),
+    Signal,
     Notice(Option<UiNotice>),
     Agent(Option<AgentResp>),
     Login(Option<LoginEvent>),
@@ -32,11 +73,18 @@ enum Step {
     Stay { redraw: bool },
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TermOutcome {
+    Stay,
+    Redraw,
+    Quit,
+}
+
 /// Idle consoles do not arm this. Decrypt and ask countdown do.
 pub(crate) fn animation_tick(app: &App) -> Option<Duration> {
-    if app.agent_running {
+    if app.agent.running {
         Some(Duration::from_millis(FRAME_MS))
-    } else if app.pending_ask.is_some() {
+    } else if app.agent.pending_ask.is_some() {
         Some(Duration::from_millis(ASK_FRAME_MS))
     } else {
         None
@@ -48,14 +96,9 @@ pub(crate) async fn console_loop(
     tui: &mut Tui,
     remote: &mut Remote<AnyDialer>,
 ) -> Result<()> {
-    let (tx, mut term_rx) = mpsc::unbounded_channel();
-    if std::thread::Builder::new()
-        .name("envoy-tty".into())
-        .spawn(move || tty_reader(tx))
-        .is_err()
-    {
-        bail!("tty reader failed to start");
-    }
+    let (mut tty, mut term_rx) = TtyReader::spawn()?;
+    let mut sigterm = signal(SignalKind::terminate()).ok();
+    let mut sighup = signal(SignalKind::hangup()).ok();
     let mut redraw = false;
     loop {
         if inputs::pull_remote(app, remote).await {
@@ -68,22 +111,35 @@ pub(crate) async fn console_loop(
                 continue;
             }
         }
-        match step(app, tui, remote, &mut term_rx).await? {
-            Step::Quit => return Ok(()),
+        match step(
+            app,
+            tui,
+            remote,
+            &mut tty,
+            &mut term_rx,
+            &mut sigterm,
+            &mut sighup,
+        )
+        .await?
+        {
+            Step::Quit => {
+                app.persist_session();
+                return Ok(());
+            }
             Step::Stay { redraw: again } => redraw = again,
         }
     }
 }
 
-fn tty_reader(tx: mpsc::UnboundedSender<Event>) {
+fn tty_reader(tx: mpsc::UnboundedSender<Event>, stop: Arc<AtomicBool>) {
     loop {
-        if tx.is_closed() {
+        if stop.load(Ordering::Acquire) || tx.is_closed() {
             break;
         }
-        match event::poll(Duration::from_millis(100)) {
+        match event::poll(Duration::from_millis(50)) {
             Ok(true) => match event::read() {
                 Ok(ev) => {
-                    if tx.send(ev).is_err() {
+                    if stop.load(Ordering::Acquire) || tx.send(ev).is_err() {
                         break;
                     }
                 }
@@ -96,6 +152,7 @@ fn tty_reader(tx: mpsc::UnboundedSender<Event>) {
 }
 
 fn paint_now(tui: &mut Tui, app: &mut App) -> Result<()> {
+    inputs::sync(app);
     let _ = execute!(stdout(), BeginSynchronizedUpdate);
     tui.terminal.draw(|frame| paint(frame, app))?;
     let _ = execute!(stdout(), EndSynchronizedUpdate);
@@ -106,29 +163,30 @@ async fn step(
     app: &mut App,
     tui: &mut Tui,
     remote: &mut Remote<AnyDialer>,
+    tty: &mut TtyReader,
     term_rx: &mut mpsc::UnboundedReceiver<Event>,
+    sigterm: &mut Option<Signal>,
+    sighup: &mut Option<Signal>,
 ) -> Result<Step> {
     let plan = next_wake(app);
-    let draw = plan.as_ref().is_some_and(|plan| plan.draw);
-    let delay = plan.map(|plan| plan.after);
-    let mut agent_rx = app.agent_stream.take();
-    let mut login_rx = app.login_rx.take();
-    let mut model_rx = app.models_rx.take();
+    let mut agent_rx = app.agent.stream.take();
+    let mut login_rx = app.login.rx.take();
+    let mut model_rx = app.login.models_rx.take();
     let wake = wait_console(
         term_rx,
+        (sigterm, sighup),
         &mut app.notice_rx,
         &mut agent_rx,
         &mut login_rx,
         &mut model_rx,
-        delay,
-        draw,
+        plan,
     )
     .await;
-    app.agent_stream = agent_rx;
-    app.login_rx = login_rx;
-    app.models_rx = model_rx;
+    app.agent.stream = agent_rx;
+    app.login.rx = login_rx;
+    app.login.models_rx = model_rx;
     let mut redraw = false;
-    if dispatch_wake(app, tui, remote, term_rx, wake, &mut redraw).await? {
+    if dispatch_wake(app, tui, remote, tty, term_rx, wake, &mut redraw).await? {
         return Ok(Step::Quit);
     }
     if settle_background(app, remote).await {
@@ -141,22 +199,26 @@ async fn dispatch_wake(
     app: &mut App,
     tui: &mut Tui,
     remote: &mut Remote<AnyDialer>,
+    tty: &mut TtyReader,
     term_rx: &mut mpsc::UnboundedReceiver<Event>,
     wake: ConsoleWake,
     redraw: &mut bool,
 ) -> Result<bool> {
     match wake {
-        ConsoleWake::Term(None) => return Ok(true),
+        ConsoleWake::Term(None) | ConsoleWake::Signal => return Ok(true),
         ConsoleWake::Term(Some(ev)) => {
-            if on_terminal(app, tui, remote, ev).await? {
-                return Ok(true);
+            match on_terminal(app, tui, remote, tty, term_rx, ev).await? {
+                TermOutcome::Quit => return Ok(true),
+                TermOutcome::Redraw => *redraw = true,
+                TermOutcome::Stay => {}
             }
             while let Ok(ev) = term_rx.try_recv() {
-                if on_terminal(app, tui, remote, ev).await? {
-                    return Ok(true);
+                match on_terminal(app, tui, remote, tty, term_rx, ev).await? {
+                    TermOutcome::Quit => return Ok(true),
+                    TermOutcome::Redraw => *redraw = true,
+                    TermOutcome::Stay => {}
                 }
             }
-            *redraw = true;
         }
         ConsoleWake::Notice(Some(notice)) => {
             app.apply_notice(notice);
@@ -168,7 +230,7 @@ async fn dispatch_wake(
             *redraw = true;
         }
         ConsoleWake::Login(None) => {
-            app.login_rx = None;
+            app.login.rx = None;
         }
         ConsoleWake::Login(Some(ev)) => {
             app.drain_login_from(Some(ev));
@@ -196,16 +258,20 @@ async fn dispatch_wake(
 
 async fn wait_console(
     term_rx: &mut mpsc::UnboundedReceiver<Event>,
+    (sigterm, sighup): (&mut Option<Signal>, &mut Option<Signal>),
     notice_rx: &mut mpsc::UnboundedReceiver<UiNotice>,
     agent_rx: &mut Option<mpsc::UnboundedReceiver<AgentResp>>,
     login_rx: &mut Option<mpsc::UnboundedReceiver<LoginEvent>>,
     model_rx: &mut Option<oneshot::Receiver<ModelMsg>>,
-    delay: Option<Duration>,
-    draw: bool,
+    plan: Option<WakePlan>,
 ) -> ConsoleWake {
+    let draw = plan.as_ref().is_some_and(|p| p.draw);
+    let delay = plan.map(|p| p.after);
     let model_open = model_rx.is_some();
     tokio::select! {
         biased;
+        _ = wait_signal(sigterm) => ConsoleWake::Signal,
+        _ = wait_signal(sighup) => ConsoleWake::Signal,
         ev = term_rx.recv() => ConsoleWake::Term(ev),
         notice = notice_rx.recv() => ConsoleWake::Notice(notice),
         message = wait_stream(agent_rx) => ConsoleWake::Agent(message),
@@ -215,6 +281,15 @@ async fn wait_console(
             ConsoleWake::Model(result)
         }
         _ = sleep_for(delay) => ConsoleWake::Timer { draw },
+    }
+}
+
+async fn wait_signal(sig: &mut Option<Signal>) {
+    match sig.as_mut() {
+        Some(s) => {
+            let _ = s.recv().await;
+        }
+        None => std::future::pending::<()>().await,
     }
 }
 
@@ -246,20 +321,20 @@ fn next_wake(app: &App) -> Option<WakePlan> {
     if let Some(after) = animation_tick(app) {
         push_wake(&mut best, after, true);
     }
-    if let Some((_, _, at)) = &app.toast {
+    if let Some((_, _, at)) = &app.ui.toast {
         if at.elapsed() < Duration::from_secs(6) {
             let left = Duration::from_secs(6).saturating_sub(at.elapsed());
             push_wake(&mut best, left, true);
         }
     }
-    let refresh_left = app.interval.saturating_sub(app.last_refresh.elapsed());
+    let refresh_left = app.jobs.interval.saturating_sub(app.jobs.last_refresh.elapsed());
     push_wake(&mut best, refresh_left, false);
-    if !app.shell_watches.is_empty() {
-        let left = SHELL_POLL.saturating_sub(app.last_shell_poll.elapsed());
+    if !app.jobs.shell_watches.is_empty() {
+        let left = SHELL_POLL.saturating_sub(app.jobs.last_shell_poll.elapsed());
         push_wake(&mut best, left, false);
     }
-    if app.welcome.is_none() && app.agent_stream.is_none() {
-        let left = app.agent_retry_at.saturating_duration_since(Instant::now());
+    if app.ui.welcome.is_none() && app.agent.stream.is_none() {
+        let left = app.agent.retry_at.saturating_duration_since(Instant::now());
         push_wake(&mut best, left, false);
     }
     best
@@ -268,12 +343,7 @@ fn next_wake(app: &App) -> Option<WakePlan> {
 fn push_wake(best: &mut Option<WakePlan>, after: Duration, draw: bool) {
     match best {
         None => *best = Some(WakePlan { after, draw }),
-        Some(plan) if after < plan.after => {
-            *best = Some(WakePlan {
-                after,
-                draw: plan.draw || draw,
-            })
-        }
+        Some(plan) if after < plan.after => *best = Some(WakePlan { after, draw }),
         Some(plan) if after == plan.after => plan.draw |= draw,
         _ => {}
     }
@@ -281,18 +351,18 @@ fn push_wake(best: &mut Option<WakePlan>, after: Duration, draw: bool) {
 
 async fn settle_background(app: &mut App, remote: &Remote<AnyDialer>) -> bool {
     let mut dirty = false;
-    if app.last_refresh.elapsed() >= app.interval {
+    if app.jobs.last_refresh.elapsed() >= app.jobs.interval {
         let before = job_fingerprint(app);
-        let connected = app.connected;
+        let connected = app.jobs.connected;
         app.refresh(remote).await;
-        dirty |= app.connected != connected || job_fingerprint(app) != before;
+        dirty |= app.jobs.connected != connected || job_fingerprint(app) != before;
     }
     if shell_poll_due(app) {
         app.poll_shell_cards(remote).await;
-        app.last_shell_poll = Instant::now();
+        app.jobs.last_shell_poll = Instant::now();
         dirty = true;
     }
-    if app.welcome.is_none() && app.agent_stream.is_none() && Instant::now() >= app.agent_retry_at
+    if app.ui.welcome.is_none() && app.agent.stream.is_none() && Instant::now() >= app.agent.retry_at
     {
         app.spawn_agent_attach();
         dirty = true;
@@ -301,11 +371,11 @@ async fn settle_background(app: &mut App, remote: &Remote<AnyDialer>) -> bool {
 }
 
 fn shell_poll_due(app: &App) -> bool {
-    !app.shell_watches.is_empty() && app.last_shell_poll.elapsed() >= SHELL_POLL
+    !app.jobs.shell_watches.is_empty() && app.jobs.last_shell_poll.elapsed() >= SHELL_POLL
 }
 
-fn job_fingerprint(app: &App) -> Vec<(u64, u64, Option<u32>, JobState)> {
-    app.jobs
+fn job_fingerprint(app: &App) -> Vec<(u64, u64, Option<u32>, ProtoJobState)> {
+    app.jobs.list
         .iter()
         .map(|job| (job.id, job.log_bytes, job.pid, job.state.clone()))
         .collect()
@@ -315,31 +385,63 @@ async fn on_terminal(
     app: &mut App,
     tui: &mut Tui,
     remote: &mut Remote<AnyDialer>,
+    tty: &mut TtyReader,
+    term_rx: &mut mpsc::UnboundedReceiver<Event>,
     ev: Event,
-) -> Result<bool> {
+) -> Result<TermOutcome> {
     match ev {
         Event::Key(key) => {
             if key.kind != KeyEventKind::Press {
-                return Ok(false);
+                return Ok(TermOutcome::Stay);
             }
-            app.selection = None;
-            app.screen_lines.clear();
+            app.ui.selection = None;
+            app.ui.screen_lines.clear();
             let action = app.handle_key(key);
-            on_action(app, tui, remote, action).await
+            if on_action(app, tui, remote, Some((tty, term_rx)), action).await? {
+                Ok(TermOutcome::Quit)
+            } else {
+                Ok(TermOutcome::Redraw)
+            }
         }
         Event::Paste(text) => {
-            app.selection = None;
-            app.screen_lines.clear();
+            app.ui.selection = None;
+            app.ui.screen_lines.clear();
             app.handle_paste(&text);
-            Ok(false)
+            Ok(TermOutcome::Redraw)
         }
         Event::Mouse(mouse) => {
-            if let Some(Action::AttachJob(job)) = app.handle_mouse(mouse) {
-                app.attach_job_card(remote, job).await;
+            if matches!(mouse.kind, MouseEventKind::Moved) {
+                let prev_hover = app.ui.inspector.hover_divider;
+                app.handle_mouse(mouse);
+                return Ok(if app.ui.inspector.hover_divider != prev_hover {
+                    TermOutcome::Redraw
+                } else {
+                    TermOutcome::Stay
+                });
             }
-            Ok(false)
+            if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
+                && app.ui.selection.as_ref().is_some_and(|s| s.active)
+                && app.ui.screen_lines.is_empty()
+            {
+                view::snapshot_screen_lines(
+                    tui.terminal.current_buffer_mut(),
+                    &mut app.ui.screen_lines,
+                );
+            }
+            if let Some(action) = app.handle_mouse(mouse) {
+                if on_action(app, tui, remote, Some((tty, term_rx)), action).await? {
+                    return Ok(TermOutcome::Quit);
+                }
+            }
+            Ok(TermOutcome::Redraw)
         }
-        _ => Ok(false),
+        Event::Resize(_, _) => {
+            app.ui.selection = None;
+            app.ui.drag_start = None;
+            app.ui.screen_lines.clear();
+            Ok(TermOutcome::Redraw)
+        }
+        _ => Ok(TermOutcome::Stay),
     }
 }
 
@@ -347,6 +449,7 @@ async fn on_action(
     app: &mut App,
     tui: &mut Tui,
     remote: &mut Remote<AnyDialer>,
+    tty_ctl: Option<(&mut TtyReader, &mut mpsc::UnboundedReceiver<Event>)>,
     action: Action,
 ) -> Result<bool> {
     match action {
@@ -381,12 +484,12 @@ async fn on_action(
         }
         Action::Switch(target) => {
             app.switch_to(target);
-            if app.target == "local" {
+            if app.jobs.target == "local" {
                 daemon::ensure(&app.data_dir).await?;
             }
             *remote = Remote::new(dialer_for(
                 &app.data_dir,
-                &app.target,
+                &app.jobs.target,
                 app.conduit.clone(),
             ));
             app.refresh(remote).await;
@@ -399,7 +502,7 @@ async fn on_action(
         Action::ToggleMouseCapture => {
             let next = !tui.mouse_capture;
             tui.set_mouse_capture(next);
-            app.mouse_capture = next;
+            app.ui.mouse_capture = next;
             app.set_toast(
                 if next {
                     "mouse capture: on (drag to OSC52 copy, click links)"
@@ -412,15 +515,68 @@ async fn on_action(
         }
         Action::SetMouseCapture(on) => {
             tui.set_mouse_capture(on);
-            app.mouse_capture = on;
+            app.ui.mouse_capture = on;
             Ok(false)
         }
         Action::EditFile(path) => {
-            if let Err(err) = edit_file::run(tui, &path) {
+            if let Some((tty, term_rx)) = tty_ctl {
+                tty.stop_and_join();
+                while term_rx.try_recv().is_ok() {}
+                if let Err(err) = edit_file::run(tui, &path) {
+                    app.set_toast(err, true);
+                }
+                let (next_tty, next_rx) = TtyReader::spawn()?;
+                *tty = next_tty;
+                *term_rx = next_rx;
+            } else if let Err(err) = edit_file::run(tui, &path) {
                 app.set_toast(err, true);
             }
             Ok(false)
         }
+    }
+}
+
+#[cfg(test)]
+pub(super) async fn dispatch_action_for_test(
+    app: &mut App,
+    remote: &mut Remote<AnyDialer>,
+    action: Action,
+) -> Result<bool> {
+    match action {
+        Action::Quit => {
+            app.persist_session();
+            Ok(true)
+        }
+        Action::None => Ok(false),
+        Action::SubmitShell(req) => {
+            app.submit_shell(remote, req).await;
+            Ok(false)
+        }
+        Action::SubmitAgent(prompt) => {
+            app.submit_agent(prompt);
+            Ok(false)
+        }
+        Action::SubmitAgentFollowup(prompt) => {
+            app.queue_followup(prompt);
+            Ok(false)
+        }
+        Action::Cancel => {
+            app.cancel_active(remote).await;
+            Ok(false)
+        }
+        Action::CancelJob(id) => {
+            app.cancel_job(remote, id).await;
+            Ok(false)
+        }
+        Action::Refresh => {
+            app.refresh(remote).await;
+            Ok(false)
+        }
+        Action::AttachJob(job) => {
+            app.attach_job_card(remote, job).await;
+            Ok(false)
+        }
+        _ => Ok(false),
     }
 }
 
@@ -443,14 +599,15 @@ mod tests {
     fn idle_does_not_arm_a_frame_tick() {
         let dir = tmpdir();
         let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-        app.agent_running = false;
-        app.pending_ask = None;
-        app.toast = None;
-        app.last_refresh = Instant::now();
+        app.agent.running = false;
+        app.agent.pending_ask = None;
+        app.ui.toast = None;
+        app.jobs.last_refresh = Instant::now();
+        app.agent.retry_at = Instant::now() + Duration::from_secs(1);
         assert!(animation_tick(&app).is_none());
         let plan = next_wake(&app).expect("refresh still schedules background work");
         assert!(!plan.draw);
-        app.agent_running = true;
+        app.agent.running = true;
         assert_eq!(animation_tick(&app), Some(Duration::from_millis(FRAME_MS)));
         assert!(next_wake(&app).is_some_and(|plan| plan.draw));
         let _ = std::fs::remove_dir_all(&dir);
@@ -460,19 +617,19 @@ mod tests {
     fn persist_hold_writes_once_when_released() {
         let dir = tmpdir();
         let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-        let id = app.session.alloc_id();
-        app.session.items.push(TranscriptItem::Notice {
+        let id = app.session.current.alloc_id();
+        app.session.current.items.push(TranscriptItem::Notice {
             id,
             text: "held".into(),
             is_error: false,
         });
-        let path = dir.join("sessions").join(format!("{}.json", app.session.id));
-        app.persist_hold.set(true);
+        let path = dir.join("sessions").join(format!("{}.json", app.session.current.id));
+        app.session.persist_hold.set(true);
         app.persist_session();
         assert!(!path.exists());
-        assert!(app.persist_due.get());
-        app.persist_hold.set(false);
-        if app.persist_due.take() {
+        assert!(app.session.persist_due.get());
+        app.session.persist_hold.set(false);
+        if app.session.persist_due.take() {
             app.persist_session();
         }
         assert!(path.is_file());

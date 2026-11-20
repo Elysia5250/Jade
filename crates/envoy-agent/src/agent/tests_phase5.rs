@@ -6,8 +6,8 @@ use super::context::{
 };
 use super::prompt::{sync_environment, sync_pre_model_tail, ENV_PREFIX, ENV_UPDATE_PREFIX, PRE_MODEL_PREFIX};
 use super::providers::{
-    anthropic_messages, chat_messages, codex_request_body, mark_last_tool, prompt_cache_key,
-    system_blocks,
+    anthropic_messages, chat_body, chat_messages, codex_request_body, mark_last_tool,
+    prompt_cache_key, system_blocks,
 };
 use super::tools::{openai_tools_json_filtered, ToolFilter};
 use crate::auth::{Credential, ProviderProtocol, StoredProvider};
@@ -107,6 +107,7 @@ fn provider() -> StoredProvider {
         base_url: "http://127.0.0.1:9/v1".into(),
         credential: Credential::ApiKey { key: "sk-test".into() },
         custom_models: Vec::new(),
+        fetched_models: Vec::new(),
         model_routes: Default::default(),
         updated_ms: 0,
     }
@@ -415,4 +416,46 @@ fn prompt_cache_key_is_stable_and_old_sessions_default_the_new_fields() {
     assert!(message.reasoning_blocks.is_empty());
     assert_eq!(TokenCalibration::from_stored(0.0).factor, 1.0);
     assert_eq!(TokenCalibration::from_stored(1.3).factor, 1.3);
+}
+
+#[test]
+fn mid_turn_synthetic_env_preserves_reasoning_and_empty_tools_omitted() {
+    let mut assistant = ChatMessage::text(ChatRole::Assistant, "thinking");
+    assistant.reasoning = Some("step-by-step".into());
+    assistant.tool_calls = vec![ToolCall {
+        id: "c1".into(),
+        name: "exec".into(),
+        arguments: "{}".into(),
+    }];
+    let history = vec![
+        assistant,
+        tool_result("c1", "exec", "ok"),
+        user("<environment_update>\ntodos updated\n</environment_update>"),
+    ];
+    for model in [
+        "deepseek-r1",
+        "moonshotai/kimi-k2-thinking",
+        "z-ai/glm-5",
+        "qwen3-235b-thinking",
+    ] {
+        let msgs = chat_messages(model, "sys", &history);
+        let replayed = msgs
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .unwrap();
+        assert_eq!(replayed["reasoning_content"], "step-by-step", "{model}");
+    }
+    let body = chat_body(
+        "gpt-5",
+        "sys",
+        &history,
+        None,
+        &ToolFilter {
+            depth: 0,
+            allowed: Some(Vec::new()),
+        },
+        &[],
+        "sess-empty",
+    );
+    assert!(body.get("tools").is_none(), "{body}");
 }

@@ -5,7 +5,11 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use std::path::Path;
 
-pub(crate) fn skill_tool(data_dir: &Path, cwd: &Path, args: &Value) -> Result<String> {
+pub(crate) fn skill_tool(
+    data_dir: &Path,
+    cwd: &Path,
+    args: &Value,
+) -> Result<(String, Option<Vec<String>>)> {
     let name = args["name"]
         .as_str()
         .map(str::trim)
@@ -35,5 +39,10 @@ pub(crate) fn skill_tool(data_dir: &Path, cwd: &Path, args: &Value) -> Result<St
     }
     out.push('\n');
     out.push_str(&loaded.body);
-    Ok(out)
+    let allow = if loaded.summary.allowed_tools.is_empty() {
+        None
+    } else {
+        Some(loaded.summary.allowed_tools.clone())
+    };
+    Ok((out, allow))
 }

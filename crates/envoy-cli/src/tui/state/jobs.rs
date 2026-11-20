@@ -3,28 +3,28 @@ use super::*;
 
 impl App {
     pub(in crate::tui) async fn refresh(&mut self, remote: &Remote<AnyDialer>) {
-        self.last_refresh = Instant::now();
-        if let Some(watch) = &self.watch {
+        self.jobs.last_refresh = Instant::now();
+        if let Some(watch) = &self.jobs.watch {
             if let Some(status) = watch.borrow().clone() {
-                self.status = Some(status);
+                self.jobs.status = Some(status);
             }
         }
-        match remote.jobs(&self.target).await {
+        match remote.jobs(&self.jobs.target).await {
             Ok(jobs) => {
-                let keep = self.jobs.get(self.job_selected).map(|j| j.id);
-                self.jobs = jobs;
-                self.job_selected =
-                    match keep.and_then(|id| self.jobs.iter().position(|j| j.id == id)) {
+                let keep = self.jobs.list.get(self.jobs.selected).map(|j| j.id);
+                self.jobs.list = jobs;
+                self.jobs.selected =
+                    match keep.and_then(|id| self.jobs.list.iter().position(|j| j.id == id)) {
                         Some(pos) => pos,
-                        None => self.jobs.len().saturating_sub(1),
+                        None => self.jobs.list.len().saturating_sub(1),
                     };
-                self.connected = true;
+                self.jobs.connected = true;
             }
             Err(_) => {
                 // Keep the console usable while the daemon is down: the
                 // status line carries the state, and a toast every refresh
                 // would stomp on whatever the user is doing.
-                self.connected = false;
+                self.jobs.connected = false;
             }
         }
     }
@@ -35,9 +35,9 @@ impl App {
         req: SubmitRequest,
     ) {
         let command = req.spec.display();
-        self.session.maybe_set_title_from(&format!("$ {command}"));
-        let user_id = self.session.alloc_id();
-        self.session.items.push(TranscriptItem::User {
+        self.session.current.maybe_set_title_from(&format!("$ {command}"));
+        let user_id = self.session.current.alloc_id();
+        self.session.current.items.push(TranscriptItem::User {
             id: user_id,
             text: format!("$ {command}"),
             mode: "Shell".into(),
@@ -45,17 +45,17 @@ impl App {
             ts_ms: now_ms(),
         });
 
-        match remote.submit(&self.target, req).await {
+        match remote.submit(&self.jobs.target, req).await {
             Ok(job) => {
-                let card_id = self.session.alloc_id();
-                self.session.items.push(TranscriptItem::Tool {
+                let card_id = self.session.current.alloc_id();
+                self.session.current.items.push(TranscriptItem::Tool {
                     id: card_id,
                     call_id: format!("job-{}", job.id),
                     name: "shell".into(),
                     title: format!("$ {command}"),
                     subtitle: self.cwd_label(),
                     job_id: Some(job.id),
-                    target: self.target.clone(),
+                    target: self.jobs.target.clone(),
                     output: Vec::new(),
                     status: CardStatus::Running,
                     collapsed: true,
@@ -63,7 +63,7 @@ impl App {
                     exit_code: None,
                     started_ms: now_ms(),
                 });
-                self.shell_watches.push(ShellWatch {
+                self.jobs.shell_watches.push(ShellWatch {
                     item_id: card_id,
                     job_id: job.id,
                     cursor: 0,
@@ -71,9 +71,9 @@ impl App {
                     partial_err: Vec::new(),
                     started: Instant::now(),
                 });
-                self.session.touch();
+                self.session.current.touch();
                 self.persist_session();
-                self.follow = true;
+                self.ui.follow = true;
                 self.refresh(remote).await;
             }
             Err(e) => {
@@ -84,28 +84,28 @@ impl App {
 
     pub(in crate::tui) async fn attach_job_card(&mut self, remote: &Remote<AnyDialer>, job: Job) {
         self.open_job_output(job.id);
-        if let Some(pos) = self.session.items.iter().position(
+        if let Some(pos) = self.session.current.items.iter().position(
             |it| matches!(it, TranscriptItem::Tool { job_id: Some(id), .. } if *id == job.id),
         ) {
-            self.selected_card = Some(pos);
+            self.ui.selected_card = Some(pos);
             return;
         }
-        let card_id = self.session.alloc_id();
+        let card_id = self.session.current.alloc_id();
         let status = match &job.state {
-            JobState::Queued { .. } => CardStatus::Queued,
-            JobState::Running { .. } => CardStatus::Running,
-            JobState::Done { result, .. } if result.ok() => CardStatus::Done,
-            JobState::Done { .. } => CardStatus::Error,
+            ProtoJobState::Queued { .. } => CardStatus::Queued,
+            ProtoJobState::Running { .. } => CardStatus::Running,
+            ProtoJobState::Done { result, .. } if result.ok() => CardStatus::Done,
+            ProtoJobState::Done { .. } => CardStatus::Error,
         };
         let exit_code = job.state.exit_code();
-        self.session.items.push(TranscriptItem::Tool {
+        self.session.current.items.push(TranscriptItem::Tool {
             id: card_id,
             call_id: format!("job-{}", job.id),
             name: "job".into(),
             title: format!("$ {}", job.command()),
             subtitle: job.cwd.clone(),
             job_id: Some(job.id),
-            target: self.target.clone(),
+            target: self.jobs.target.clone(),
             output: Vec::new(),
             status,
             collapsed: true,
@@ -121,26 +121,26 @@ impl App {
             partial_err: Vec::new(),
             started: Instant::now(),
         };
-        Self::poll_one_watch(remote, &self.target, &mut self.session, &mut watch).await;
+        Self::poll_one_watch(remote, &self.jobs.target, &mut self.session.current, &mut watch).await;
         if exit_code.is_none() {
-            self.shell_watches.push(watch);
+            self.jobs.shell_watches.push(watch);
         }
-        self.follow = true;
+        self.ui.follow = true;
     }
 
     pub(in crate::tui) async fn poll_shell_cards(&mut self, remote: &Remote<AnyDialer>) {
-        if self.shell_watches.is_empty() {
+        if self.jobs.shell_watches.is_empty() {
             return;
         }
         let mut still_running = Vec::new();
-        let mut watches = std::mem::take(&mut self.shell_watches);
+        let mut watches = std::mem::take(&mut self.jobs.shell_watches);
         for mut w in watches.drain(..) {
-            let done = Self::poll_one_watch(remote, &self.target, &mut self.session, &mut w).await;
+            let done = Self::poll_one_watch(remote, &self.jobs.target, &mut self.session.current, &mut w).await;
             if !done {
                 still_running.push(w);
             }
         }
-        self.shell_watches = still_running;
+        self.jobs.shell_watches = still_running;
     }
 
     pub(in crate::tui) async fn poll_one_watch(
@@ -226,50 +226,25 @@ impl App {
     }
 
     pub(in crate::tui) async fn cancel_active(&mut self, remote: &Remote<AnyDialer>) {
-        if self.agent_running {
+        if self.agent.running {
             self.interrupt_agent();
-            self.agent_running = false;
-            self.pending_ask = None;
-            // The daemon publishes the authoritative TurnError; just stop the
-            // local spinner and leave the id in place so that event lands on
-            // the open assistant item.
-            if let Some(id) = self.active_assistant_id {
-                if let Some(TranscriptItem::Assistant { done, .. }) =
-                    self.session.items.iter_mut().find(|i| i.id() == id)
-                {
-                    *done = true;
-                }
-            }
-            for item_id in self.active_tool_items.values() {
-                if let Some(TranscriptItem::Tool { status, job_id, .. }) =
-                    self.session.items.iter_mut().find(|i| i.id() == *item_id)
-                {
-                    if *status == CardStatus::Running {
-                        *status = CardStatus::Error;
-                    }
-                    if let Some(jid) = *job_id {
-                        let _ = remote.cancel(&self.target, jid).await;
-                    }
-                }
-            }
-            self.active_tool_items.clear();
-            self.set_toast("turn cancelled", false);
-            self.persist_session();
+            self.agent.pending_ask = None;
+            self.set_toast("interrupting turn...", false);
             return;
         }
-        if let Some(w) = self.shell_watches.last() {
+        if let Some(w) = self.jobs.shell_watches.last() {
             let jid = w.job_id;
             self.cancel_job(remote, jid).await;
             return;
         }
-        if let Some(job) = self.jobs.get(self.job_selected) {
+        if let Some(job) = self.jobs.list.get(self.jobs.selected) {
             let jid = job.id;
             self.cancel_job(remote, jid).await;
         }
     }
 
     pub(in crate::tui) async fn cancel_job(&mut self, remote: &Remote<AnyDialer>, id: JobId) {
-        match remote.cancel(&self.target, id).await {
+        match remote.cancel(&self.jobs.target, id).await {
             Ok(()) => self.set_toast(format!("cancel requested for #{id}"), false),
             Err(e) => self.set_toast(format!("{e:#}"), true),
         }

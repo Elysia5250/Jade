@@ -1,8 +1,21 @@
 //! Generic modals and the login wizard.
 use crate::tui::*;
 
+fn modal_rect(area: Rect, want_w: u16, want_h: u16) -> Rect {
+    let width = want_w
+        .min(area.width.saturating_sub(4).max(1))
+        .min(area.width);
+    let height = want_h
+        .min(area.height.saturating_sub(2).max(1))
+        .min(area.height);
+    centered_rect(area, width, height)
+}
+
 pub(super) fn draw_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let Some(modal) = app.modal.as_ref() else {
+    if area.width < 4 || area.height < 4 {
+        return;
+    }
+    let Some(modal) = app.ui.modal.as_ref() else {
         return;
     };
     match modal {
@@ -17,12 +30,8 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
                             .contains(&p.query.to_ascii_lowercase())
                 })
                 .collect();
-            let width = 62u16.min(area.width.saturating_sub(4));
-            let height = ((filtered.len() as u16) + 4)
-                .max(6)
-                .min(area.height.saturating_sub(2))
-                .min(18);
-            let popup = centered_rect(area, width, height);
+            let want_h = ((filtered.len() as u16) + 4).clamp(6, 18);
+            let popup = modal_rect(area, 62, want_h);
             frame.render_widget(Clear, popup);
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -76,12 +85,8 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
                             .contains(&m.filter.to_ascii_lowercase())
                 })
                 .collect();
-            let width = 66u16.min(area.width.saturating_sub(4));
-            let height = ((filtered.len() as u16) + 6)
-                .max(8)
-                .min(area.height.saturating_sub(2))
-                .min(20);
-            let popup = centered_rect(area, width, height);
+            let want_h = ((filtered.len() as u16) + 6).clamp(8, 20);
+            let popup = modal_rect(area, 66, want_h);
             frame.render_widget(Clear, popup);
             let title = " model ";
             let block = Block::default()
@@ -137,12 +142,8 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
             frame.render_stateful_widget(list, parts[1], &mut state);
         }
         Modal::Sessions(s) => {
-            let width = 72u16.min(area.width.saturating_sub(4));
-            let height = ((s.sessions.len() as u16) + 4)
-                .max(7)
-                .min(area.height.saturating_sub(2))
-                .min(18);
-            let popup = centered_rect(area, width, height);
+            let want_h = ((s.sessions.len() as u16) + 4).clamp(7, 18);
+            let popup = modal_rect(area, 72, want_h);
             frame.render_widget(Clear, popup);
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -163,7 +164,7 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
                 s.sessions
                     .iter()
                     .map(|item| {
-                        let cur = if item.id == app.session.id {
+                        let cur = if item.id == app.session.current.id {
                             "* "
                         } else {
                             "  "
@@ -191,12 +192,8 @@ pub(super) fn draw_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect
             frame.render_stateful_widget(list, inner, &mut state);
         }
         Modal::Rewind(r) => {
-            let width = 76u16.min(area.width.saturating_sub(4));
-            let height = ((r.checkpoints.len() as u16) + 5)
-                .max(8)
-                .min(area.height.saturating_sub(2))
-                .min(18);
-            let popup = centered_rect(area, width, height);
+            let want_h = ((r.checkpoints.len() as u16) + 5).clamp(8, 18);
+            let popup = modal_rect(area, 76, want_h);
             frame.render_widget(Clear, popup);
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -244,13 +241,9 @@ fn draw_login_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, log
     match login {
         LoginModal::SelectProvider { filter, selected } => {
             let providers = app.filtered_login_providers(filter);
-            let connected = effective_providers(&app.data_dir);
-            let width = 70u16.min(area.width.saturating_sub(4));
-            let height = ((providers.len() as u16) + 5)
-                .max(8)
-                .min(area.height.saturating_sub(2))
-                .min(18);
-            let popup = centered_rect(area, width, height);
+            let connected = &app.inputs.catalog.connected_providers;
+            let want_h = ((providers.len() as u16) + 5).clamp(8, 18);
+            let popup = modal_rect(area, 70, want_h);
             frame.render_widget(Clear, popup);
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -275,7 +268,7 @@ fn draw_login_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, log
                 .iter()
                 .map(|(_, p)| {
                     let badge = match connected.get(p.id) {
-                        Some(sp) => format!("[✓ {}]", sp.credential.kind_label()),
+                        Some(label) => format!("[✓ {label}]"),
                         None => String::new(),
                     };
                     ListItem::new(Line::from(vec![
@@ -307,9 +300,7 @@ fn draw_login_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, log
             selected,
         } => {
             let prov = &BUILTIN_PROVIDERS[*provider_idx];
-            let width = 72u16.min(area.width.saturating_sub(4));
-            let height = ((prov.methods.len() as u16) * 2 + 4).min(area.height.saturating_sub(2));
-            let popup = centered_rect(area, width, height);
+            let popup = modal_rect(area, 72, (prov.methods.len() as u16) * 2 + 4);
             frame.render_widget(Clear, popup);
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -353,8 +344,7 @@ fn draw_login_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, log
             error,
         } => {
             let prov = &BUILTIN_PROVIDERS[*provider_idx];
-            let width = 68u16.min(area.width.saturating_sub(4));
-            let popup = centered_rect(area, width, 12);
+            let popup = modal_rect(area, 68, 12);
             frame.render_widget(Clear, popup);
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -413,8 +403,7 @@ fn draw_login_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, log
             focus_field,
             error,
         } => {
-            let width = 72u16.min(area.width.saturating_sub(4));
-            let popup = centered_rect(area, width, 14);
+            let popup = modal_rect(area, 72, 14);
             frame.render_widget(Clear, popup);
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -480,8 +469,7 @@ fn draw_login_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, log
             error,
             ..
         } => {
-            let width = 76u16.min(area.width.saturating_sub(4));
-            let popup = centered_rect(area, width, 15);
+            let popup = modal_rect(area, 76, 15);
             frame.render_widget(Clear, popup);
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -492,8 +480,10 @@ fn draw_login_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, log
                 ));
             let inner = block.inner(popup);
             frame.render_widget(block, popup);
-
-            let w = inner.width.saturating_sub(4) as usize;
+            if inner.width < 2 || inner.height == 0 {
+                return;
+            }
+            let w = inner.width.saturating_sub(4).max(8) as usize;
             let mut lines = vec![
                 Line::styled(
                     format!("  {status}"),
@@ -533,8 +523,7 @@ fn draw_login_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, log
             error,
             ..
         } => {
-            let width = 76u16.min(area.width.saturating_sub(4));
-            let popup = centered_rect(area, width, 15);
+            let popup = modal_rect(area, 76, 15);
             frame.render_widget(Clear, popup);
             let block = Block::default()
                 .borders(Borders::ALL)
@@ -545,8 +534,10 @@ fn draw_login_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, log
                 ));
             let inner = block.inner(popup);
             frame.render_widget(block, popup);
-
-            let w = inner.width.saturating_sub(4) as usize;
+            if inner.width < 2 || inner.height == 0 {
+                return;
+            }
+            let w = inner.width.saturating_sub(4).max(8) as usize;
             let mut lines = vec![Line::styled(
                 "  Open this URL in your browser to authorize:",
                 Style::default().fg(theme.dim),
@@ -585,8 +576,7 @@ fn draw_login_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, log
             status,
             error,
         } => {
-            let width = 66u16.min(area.width.saturating_sub(4));
-            let popup = centered_rect(area, width, 12);
+            let popup = modal_rect(area, 66, 12);
             frame.render_widget(Clear, popup);
             let block = Block::default()
                 .borders(Borders::ALL)

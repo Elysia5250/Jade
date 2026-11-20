@@ -4,6 +4,7 @@ use super::types::{
     HookContext, HookDecision, HookEvent, HookOutput, HookRule, HookStepStatus, HookStepTrace,
     StageCapability,
 };
+use envoy_core::ScratchGuard;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -88,16 +89,6 @@ fn hook_launch(rule: &HookRule, ctx: &HookContext) -> Result<HookLaunch, String>
         cwd,
         landlock: prepared.landlock,
     })
-}
-
-struct ScratchGuard(Option<PathBuf>);
-
-impl Drop for ScratchGuard {
-    fn drop(&mut self) {
-        if let Some(path) = self.0.take() {
-            let _ = std::fs::remove_dir_all(path);
-        }
-    }
 }
 
 fn kill_process_group(pid: Option<u32>) {

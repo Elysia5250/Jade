@@ -7,14 +7,14 @@ impl App {
         if trimmed.is_empty() || trimmed == "status" {
             let eng = PermissionEngine::new(
                 self.data_dir.clone(),
-                self.session.cwd.clone(),
-                self.session.id.clone(),
-                self.target.clone(),
-                self.perm_mode,
+                self.session.current.cwd.clone(),
+                self.session.current.id.clone(),
+                self.jobs.target.clone(),
+                self.session.perm_mode,
             );
             let loaded = eng.loaded_policies();
             let trusted = eng.is_trusted();
-            let sandbox = if self.target == "local" || self.target.is_empty() {
+            let sandbox = if self.jobs.target == "local" || self.jobs.target.is_empty() {
                 envoy_core::sandbox::backend_label()
             } else {
                 "peer"
@@ -22,7 +22,7 @@ impl App {
             self.push_notice(
                 format!(
                     "Permissions: mode={} - sandbox={} - workspace_trusted={} - rules={} - extra_rw={}",
-                    self.perm_mode.label(),
+                    self.session.perm_mode.label(),
                     sandbox,
                     trusted,
                     loaded.rules.len(),
@@ -41,14 +41,14 @@ impl App {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            let scope = if is_workspace_trusted(&self.data_dir, &self.session.cwd) {
+            let scope = if is_workspace_trusted(&self.data_dir, &self.session.current.cwd) {
                 RuleScope::Project
             } else {
                 RuleScope::User
             };
             match envoy_agent::permissions::rules::save_rule(
                 &self.data_dir,
-                &self.session.cwd,
+                &self.session.current.cwd,
                 scope,
                 envoy_agent::permissions::Effect::Allow,
                 pat,
@@ -63,14 +63,14 @@ impl App {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            let scope = if is_workspace_trusted(&self.data_dir, &self.session.cwd) {
+            let scope = if is_workspace_trusted(&self.data_dir, &self.session.current.cwd) {
                 RuleScope::Project
             } else {
                 RuleScope::User
             };
             match envoy_agent::permissions::rules::save_rule(
                 &self.data_dir,
-                &self.session.cwd,
+                &self.session.current.cwd,
                 scope,
                 envoy_agent::permissions::Effect::Deny,
                 pat,
@@ -87,36 +87,26 @@ impl App {
     }
 
     pub(in crate::tui) fn run_mcp_command(&mut self, arg: &str) {
-        let report = envoy_agent::mcp::config::load_mcp_configs(&self.data_dir, &self.session.cwd);
+        let report = envoy_agent::mcp::config::load_mcp_configs(&self.data_dir, &self.session.current.cwd);
         if arg.trim() == "probe" {
             let data_dir = self.data_dir.clone();
-            let cwd = self.session.cwd.clone();
+            let cwd = self.session.current.cwd.clone();
             let notice = self.notice_tx.clone();
+            let sid = self.session.current.id.clone();
             self.set_toast("probing MCP servers.", false);
             tokio::spawn(async move {
-                let mgr =
-                    envoy_agent::mcp::client::McpManager::connect_configured(&data_dir, &cwd).await;
-                let mut lines = Vec::new();
-                for p in mgr.skipped_untrusted() {
-                    lines.push(format!(
-                        "skipped untrusted project MCP config: {}",
-                        p.display()
-                    ));
-                }
-                for s in mgr.statuses() {
-                    if let Some(err) = &s.error {
-                        lines.push(format!("{} [{}] error: {}", s.name, s.transport_label, err));
-                    } else {
-                        lines.push(format!(
-                            "{} [{}] connected ({} tools)",
-                            s.name, s.transport_label, s.tool_count
-                        ));
-                    }
-                }
-                if lines.is_empty() {
-                    lines.push("no MCP servers configured".into());
-                }
-                let _ = notice.send(UiNotice::Notice(lines.join("\n"), false));
+                let (msg, err) = match runtime::request(&data_dir, &AgentReq::ProbeMcp { cwd }).await
+                {
+                    Ok(AgentResp::McpProbe(lines)) => (lines.join("\n"), false),
+                    Ok(AgentResp::Error(reason)) => (reason, true),
+                    Ok(_) => ("unexpected daemon reply to MCP probe".into(), true),
+                    Err(err) => (format!("mcp probe failed: {err:#}"), true),
+                };
+                let _ = notice.send(UiNotice::Notice {
+                    session_id: sid,
+                    msg,
+                    err,
+                });
             });
             return;
         }
@@ -151,7 +141,7 @@ impl App {
     pub(in crate::tui) fn run_skill_command(&mut self, arg: &str) {
         let name = arg.trim();
         if name.is_empty() {
-            let skills = envoy_agent::skills::discover_skills(&self.data_dir, &self.session.cwd);
+            let skills = envoy_agent::skills::discover_skills(&self.data_dir, &self.session.current.cwd);
             if skills.is_empty() {
                 self.push_notice(
                     "Skills: none found (add ~/.envoy/skills/<name>/SKILL.md or trust project .envoy/skills)",
@@ -166,7 +156,7 @@ impl App {
             self.push_notice(lines.join("\n"), false);
             return;
         }
-        match envoy_agent::skills::load_skill(&self.data_dir, &self.session.cwd, name) {
+        match envoy_agent::skills::load_skill(&self.data_dir, &self.session.current.cwd, name) {
             Ok(loaded) => {
                 let preview: String = loaded.body.chars().take(600).collect();
                 self.push_notice(
@@ -272,15 +262,15 @@ impl App {
     }
 
     pub(in crate::tui) fn run_worktree_command(&mut self, arg: &str) {
-        if !self.target.is_empty() && self.target != "local" {
+        if !self.jobs.target.is_empty() && self.jobs.target != "local" {
             self.set_toast("worktree is local only", true);
             return;
         }
-        if self.agent_running {
+        if self.agent.running {
             self.set_toast("wait for the active turn to finish", true);
             return;
         }
-        match envoy_agent::worktree::execute(&self.session.cwd, arg) {
+        match envoy_agent::worktree::execute(&self.session.current.cwd, arg) {
             Ok(envoy_agent::worktree::Effect::Listed(text)) => self.push_notice(text, false),
             Ok(envoy_agent::worktree::Effect::Toast(text)) => self.set_toast(text, false),
             Ok(envoy_agent::worktree::Effect::Enter {
@@ -308,15 +298,9 @@ impl App {
             return;
         }
         self.persist_session();
-        let target = self.session.target.clone();
-        self.session = Session::new(path, target);
-        self.selected_card = None;
-        self.follow = true;
-        self.expanded_explore_groups.clear();
-        self.transcript_cache.clear();
-        self.inspector = InspectorState::default();
-        self.workspace_index.invalidate();
-        self.reset_agent_view();
+        let target = self.session.current.target.clone();
+        self.session.current = Session::new(path, target);
+        self.reset_session_view();
         self.spawn_agent_attach();
     }
 }

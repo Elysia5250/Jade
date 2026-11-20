@@ -69,10 +69,7 @@ pub(crate) fn isolation_refusal(cwd: &Path) -> Option<String> {
 }
 
 pub(crate) fn create_branch_tree(cwd: &Path, index: usize) -> Result<Created, String> {
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+    let millis = envoy_core::now_ms();
     let base = format!("w{index}-{millis}");
     for suffix in 0..20 {
         let name = if suffix == 0 {
@@ -175,7 +172,7 @@ fn abort_merge(cwd: &Path) {
     let _ = git(cwd, &["merge", "--abort"]);
 }
 
-fn delete_branch(repo: &Path, branch: &str) -> Result<(), String> {
+pub(crate) fn delete_branch(repo: &Path, branch: &str) -> Result<(), String> {
     let main = main_root(repo).unwrap_or_else(|_| repo.to_path_buf());
     git_text(&main, &["branch", "-D", branch])?;
     Ok(())
@@ -228,6 +225,7 @@ fn finish_merged(session: &Path, tree: &PendingTree) -> TreeSettlement {
 fn try_create(cwd: &Path, name: &str) -> Result<PathBuf, String> {
     validate_name(name)?;
     let main = main_root(cwd)?;
+    let start = git_text(cwd, &["rev-parse", "HEAD"])?;
     let path = linked_path(&main, name)?;
     if path.exists() || branch_exists(&main, name)? {
         return Err(format!("worktree name `{name}` is taken"));
@@ -243,7 +241,7 @@ fn try_create(cwd: &Path, name: &str) -> Result<PathBuf, String> {
             "-b",
             name,
             &path.display().to_string(),
-            "HEAD",
+            &start,
         ],
     )?;
     Ok(canon(&path))
@@ -435,6 +433,36 @@ mod tests {
         assert!(!bad.path.exists());
         assert!(!super::branch_exists(&root, &ok_tree.branch).unwrap());
         assert!(super::branch_exists(&root, &bad.branch).unwrap());
+        cleanup(&root);
+    }
+
+    #[test]
+    fn linked_worktree_subagents_branch_from_active_tree_head() {
+        let root = init_repo();
+        git_ok(&root, &["checkout", "-b", "feat"]);
+        std::fs::write(root.join("note.txt"), "feat-base\n").unwrap();
+        git_ok(&root, &["add", "note.txt"]);
+        git_ok(&root, &["commit", "-m", "feat base"]);
+        git_ok(&root, &["checkout", "main"]);
+        let feat_tree_path = linked_path(&root, "feat").unwrap();
+        std::fs::create_dir_all(feat_tree_path.parent().unwrap()).unwrap();
+        git_ok(
+            &root,
+            &[
+                "worktree",
+                "add",
+                &feat_tree_path.display().to_string(),
+                "feat",
+            ],
+        );
+        let child = create_branch_tree(&feat_tree_path, 1).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(child.path.join("note.txt")).unwrap(),
+            "feat-base\n"
+        );
+        remove_tree_at(&child.path).unwrap();
+        let _ = delete_branch(&root, &child.branch);
+        remove_tree_at(&feat_tree_path).unwrap();
         cleanup(&root);
     }
 

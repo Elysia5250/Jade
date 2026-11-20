@@ -1,18 +1,16 @@
-//! MCP server tool definitions (with annotations + outputSchema) and handlers.
+//! MCP server tool definitions (with annotations + outputSchema) and thin adapters over `crate::tools_core`.
 
+use crate::tools_core::{self, EXEC_OUTPUT_SIDE};
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
-use envoy_core::parse_mode;
-use envoy_proto::{
-    Job, JobState, LogRecord, SandboxPolicy, SubmitRequest, TaskSpec, DEFAULT_GROUP,
-};
+use envoy_proto::{Job, JobState, LogRecord, SandboxPolicy};
 use envoy_service::{AgentDialer, Remote};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::time::Duration;
 
-pub(crate) const CAP: usize = 256 * 1024;
+pub(crate) const CAP: usize = EXEC_OUTPUT_SIDE * 2;
 const DEFAULT_WAIT_S: u64 = 120;
 pub(crate) const RECORD_HEADER: u64 = 5;
 
@@ -197,57 +195,6 @@ fn job_id(args: &Value) -> Result<u64> {
         .context("missing `id` (required for this action)")
 }
 
-pub(crate) fn validate_env_arg(args: &Value) -> Result<()> {
-    let _ = env_arg(args)?;
-    Ok(())
-}
-
-fn env_arg(args: &Value) -> Result<Vec<(String, String)>> {
-    let Some(m) = args["env"].as_object() else {
-        return Ok(Vec::new());
-    };
-    let mut out = Vec::with_capacity(m.len());
-    for (k, v) in m {
-        if let Some(val) = v.as_str() {
-            if envoy_core::sandbox::is_dangerous_env_var(k) || val.contains('\0') {
-                anyhow::bail!("disallowed environment variable `{k}`");
-            }
-            out.push((k.clone(), val.to_string()));
-        }
-    }
-    Ok(out)
-}
-
-pub(crate) fn exec_request(
-    args: &Value,
-    default_cwd: &Path,
-    sandbox: SandboxPolicy,
-) -> Result<SubmitRequest> {
-    let command = args["command"]
-        .as_str()
-        .filter(|c| !c.trim().is_empty())
-        .context("missing `command`")?;
-    let cwd = args["cwd"]
-        .as_str()
-        .map(str::to_string)
-        .or_else(|| Some(default_cwd.display().to_string()));
-    Ok(SubmitRequest {
-        spec: TaskSpec::Shell {
-            command: command.to_string(),
-        },
-        cwd,
-        env: env_arg(args)?,
-        label: args["label"].as_str().map(str::to_string),
-        group: args["group"]
-            .as_str()
-            .filter(|g| !g.is_empty())
-            .unwrap_or(DEFAULT_GROUP)
-            .to_string(),
-        timeout_s: args["timeout_s"].as_u64().unwrap_or(0),
-        sandbox,
-    })
-}
-
 pub(crate) struct Sink {
     out: Vec<u8>,
     err: Vec<u8>,
@@ -350,7 +297,7 @@ pub(crate) async fn exec(
     sandbox: SandboxPolicy,
     args: &Value,
 ) -> Result<ToolReply> {
-    let req = exec_request(args, default_cwd, sandbox)?;
+    let req = tools_core::build_exec_request(args, default_cwd, sandbox, 0, true)?;
     let job = remote.submit(machine, req).await?;
     let wait_s = args["wait_s"].as_u64().unwrap_or(DEFAULT_WAIT_S).min(3600);
 
@@ -420,27 +367,18 @@ pub(crate) async fn read(
     machine: &str,
     args: &Value,
 ) -> Result<ToolReply> {
-    let path = args["path"].as_str().unwrap_or("");
-    if path.is_empty() {
+    if args["path"].as_str().unwrap_or("").is_empty() {
         return Ok(("missing `path`".into(), None, true));
     }
-    let (size, _mode, data) = remote
-        .read(
-            machine,
-            path,
-            args["offset"].as_u64().unwrap_or(0),
-            args["limit"].as_u64().unwrap_or(0),
-        )
-        .await?;
-    let body = match String::from_utf8(data) {
+    let raw = tools_core::read_raw(&remote, machine, None, args).await?;
+    let body = match String::from_utf8(raw.data) {
         Ok(text) => text,
         Err(e) => format!("[base64]\n{}", B64.encode(e.into_bytes())),
     };
-    let more = args["limit"].as_u64().unwrap_or(0) == 0 && size > envoy_proto::READ_LIMIT;
-    let out = if more {
+    let out = if raw.truncated {
         format!(
             "{body}\n\n[{} bytes total; read with offset={}]",
-            size,
+            raw.size,
             envoy_proto::READ_LIMIT
         )
     } else {
@@ -448,7 +386,7 @@ pub(crate) async fn read(
     };
     Ok((
         out.clone(),
-        Some(json!({ "path": path, "size": size, "content": out })),
+        Some(json!({ "path": raw.path, "size": raw.size, "content": out })),
         false,
     ))
 }
@@ -458,23 +396,18 @@ pub(crate) async fn write(
     machine: &str,
     args: &Value,
 ) -> Result<ToolReply> {
-    let path = args["path"].as_str().unwrap_or("");
-    if path.is_empty() {
+    if args["path"].as_str().unwrap_or("").is_empty() {
         return Ok(("missing `path`".into(), None, true));
     }
-    let Some(content) = args["content"].as_str() else {
+    if args["content"].as_str().is_none() {
         return Ok(("missing `content`".into(), None, true));
-    };
-    let mode = match args["mode"].as_str() {
-        None => None,
-        Some(m) => match parse_mode(m) {
-            Ok(v) => Some(v),
-            Err(e) => return Ok((format!("{e:#}"), None, true)),
-        },
-    };
-    let bytes = remote
-        .write(machine, path, content.as_bytes(), mode)
-        .await?;
+    }
+    if let Some(m) = args["mode"].as_str() {
+        if let Err(e) = envoy_core::parse_mode(m) {
+            return Ok((format!("{e:#}"), None, true));
+        }
+    }
+    let (path, bytes) = tools_core::write_raw(&remote, machine, None, args, true).await?;
     Ok((
         format!("wrote {bytes} bytes to {path} on {machine}"),
         Some(json!({ "path": path, "bytes": bytes })),
@@ -487,16 +420,14 @@ pub(crate) async fn edit(
     machine: &str,
     args: &Value,
 ) -> Result<ToolReply> {
-    let path = args["path"].as_str().unwrap_or("");
-    let Some(old) = args["old"].as_str() else {
+    if args["old"].as_str().is_none() {
         return Ok(("missing `old`".into(), None, true));
-    };
-    let Some(new) = args["new"].as_str() else {
+    }
+    if args["new"].as_str().is_none() {
         return Ok(("missing `new`".into(), None, true));
-    };
-    let replace_all = args["replace_all"].as_bool().unwrap_or(false);
-    match remote.edit(machine, path, old, new, replace_all).await {
-        Ok(n) => Ok((
+    }
+    match tools_core::edit_raw(&remote, machine, None, args).await {
+        Ok((path, n)) => Ok((
             format!("edited {path} on {machine}: {n} replacement(s)"),
             Some(json!({ "path": path, "replacements": n })),
             false,
@@ -510,8 +441,7 @@ pub(crate) async fn ls(
     machine: &str,
     args: &Value,
 ) -> Result<ToolReply> {
-    let path = args["path"].as_str().unwrap_or(".");
-    let entries = remote.list(machine, path).await?;
+    let entries = tools_core::ls_raw(&remote, machine, None, args).await?;
     let mut text = String::from("KIND      SIZE  MODE  NAME\n");
     for e in entries {
         let kind = match e.kind {
@@ -536,13 +466,10 @@ pub(crate) async fn glob(
     machine: &str,
     args: &Value,
 ) -> Result<ToolReply> {
-    let pattern = args["pattern"].as_str().unwrap_or("");
-    if pattern.trim().is_empty() {
+    if args["pattern"].as_str().unwrap_or("").trim().is_empty() {
         return Ok(("missing `pattern`".into(), None, true));
     }
-    let root = args["path"].as_str().unwrap_or(".");
-    let max_results = args["max_results"].as_u64().unwrap_or(200).clamp(1, 2000) as u32;
-    let paths = remote.glob(machine, root, pattern, max_results).await?;
+    let (paths, _max_results) = tools_core::glob_raw(&remote, machine, None, args).await?;
     let text = if paths.is_empty() {
         "(no matching files)".into()
     } else {
@@ -556,16 +483,10 @@ pub(crate) async fn grep(
     machine: &str,
     args: &Value,
 ) -> Result<ToolReply> {
-    let pattern = args["pattern"].as_str().unwrap_or("");
-    if pattern.is_empty() {
+    if args["pattern"].as_str().unwrap_or("").is_empty() {
         return Ok(("missing `pattern`".into(), None, true));
     }
-    let root = args["path"].as_str().unwrap_or(".");
-    let include = args["include"].as_str().filter(|s| !s.trim().is_empty());
-    let max_results = args["max_results"].as_u64().unwrap_or(100).clamp(1, 1000) as u32;
-    let hits = remote
-        .grep(machine, root, pattern, include, max_results)
-        .await?;
+    let (hits, _max_results) = tools_core::grep_raw(&remote, machine, None, args).await?;
     let text = if hits.is_empty() {
         "(no matches)".into()
     } else {
@@ -583,27 +504,10 @@ pub(crate) async fn job(
     cwd: &Path,
     args: &Value,
 ) -> Result<ToolReply> {
-    let is_local = machine.is_empty() || machine == "local";
-    let in_scope = |job_cwd: &str| -> bool {
-        !is_local
-            || (!job_cwd.is_empty()
-                && crate::permissions::paths::is_path_under_workspace(cwd, Path::new(job_cwd)))
-    };
-    let check_scope = |id: u64, job_cwd: &str| -> Result<()> {
-        if !in_scope(job_cwd) {
-            anyhow::bail!("job #{id} belongs to another workspace ({job_cwd})");
-        }
-        Ok(())
-    };
     let action = args["action"].as_str().unwrap_or("");
     match action {
         "list" => {
-            let jobs: Vec<_> = remote
-                .jobs(machine)
-                .await?
-                .into_iter()
-                .filter(|j| in_scope(&j.cwd))
-                .collect();
+            let jobs = tools_core::job_list_scoped(&remote, machine, cwd).await?;
             if jobs.is_empty() {
                 return Ok((
                     format!("no jobs on {machine}"),
@@ -616,8 +520,7 @@ pub(crate) async fn job(
         }
         "status" => {
             let id = job_id(args)?;
-            let job = remote.status(machine, id).await?;
-            check_scope(id, &job.cwd)?;
+            let job = tools_core::job_status_scoped(&remote, machine, cwd, id).await?;
             let structured = json!({
                 "id": job.id,
                 "state": job.state.label(),
@@ -638,8 +541,7 @@ pub(crate) async fn job(
         }
         "logs" => {
             let id = job_id(args)?;
-            let job = remote.status(machine, id).await?;
-            check_scope(id, &job.cwd)?;
+            let _ = tools_core::job_status_scoped(&remote, machine, cwd, id).await?;
             let offset = args["offset"].as_u64().unwrap_or(0);
             let mut sink = Sink::new(offset);
             let (_server_cursor, finished) = remote
@@ -662,8 +564,7 @@ pub(crate) async fn job(
         }
         "cancel" => {
             let id = job_id(args)?;
-            let job = remote.status(machine, id).await?;
-            check_scope(id, &job.cwd)?;
+            let _ = tools_core::job_status_scoped(&remote, machine, cwd, id).await?;
             remote.cancel(machine, id).await?;
             Ok((
                 format!("cancel requested for job {id} on {machine}"),

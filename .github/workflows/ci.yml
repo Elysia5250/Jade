@@ -17,13 +17,33 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Install shellcheck
+        run: |
+          if [ "$(uname)" = "Darwin" ]; then
+            brew install shellcheck
+          else
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          fi
       - name: Source size guard
         run: python3 scripts/check-file-sizes.py
+      - name: Python syntax
+        run: python3 -m py_compile scripts/check-file-sizes.py benchmarks/terminal-bench/envoy_agent.py
+      - name: Shellcheck
+        run: shellcheck scripts/*.sh
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test workspace
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
       - name: Check all targets
-        run: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets --locked
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - name: Check on MSRV 1.85
+        run: cargo check --workspace --all-targets --locked

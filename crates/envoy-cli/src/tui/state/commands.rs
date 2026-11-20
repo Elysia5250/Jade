@@ -5,7 +5,7 @@ impl App {
     pub(in crate::tui) fn run_command(&mut self, command: Command) -> Action {
         match command {
             Command::FocusInput => {
-                self.focus = Focus::Input;
+                self.ui.focus = Focus::Input;
                 Action::None
             }
             Command::OpenLogin => {
@@ -26,20 +26,18 @@ impl App {
             }
             Command::NewSession => {
                 self.persist_session();
-                self.session = Session::new(self.session.cwd.clone(), self.target.clone());
-                self.selected_card = None;
-                self.follow = true;
-                self.reset_agent_view();
+                self.session.current = Session::new(self.session.current.cwd.clone(), self.jobs.target.clone());
+                self.reset_session_view();
                 self.spawn_agent_attach();
                 self.set_toast("started new session", false);
                 Action::None
             }
             Command::ToggleMode => {
-                self.mode = match self.mode {
+                self.ui.mode = match self.ui.mode {
                     InputMode::Agent => InputMode::Shell,
                     InputMode::Shell => InputMode::Agent,
                 };
-                self.set_toast(format!("mode: {}", self.mode.label()), false);
+                self.set_toast(format!("mode: {}", self.ui.mode.label()), false);
                 Action::None
             }
             Command::OpenModePicker => {
@@ -71,7 +69,7 @@ impl App {
                 Action::None
             }
             Command::SetMode(mode) => {
-                self.mode = mode;
+                self.ui.mode = mode;
                 self.set_toast(format!("mode: {}", mode.label()), false);
                 Action::None
             }
@@ -80,13 +78,13 @@ impl App {
                 Action::None
             }
             Command::SetTheme(idx) => {
-                self.theme = idx % THEMES.len();
+                self.ui.theme = idx % THEMES.len();
                 self.save_ui_prefs();
-                self.set_toast(format!("theme: {}", THEMES[self.theme].0), false);
+                self.set_toast(format!("theme: {}", THEMES[self.ui.theme].0), false);
                 Action::None
             }
             Command::SetTrust(on) => {
-                match set_workspace_trusted(&self.data_dir, &self.session.cwd, on) {
+                match set_workspace_trusted(&self.data_dir, &self.session.current.cwd, on) {
                     Ok(()) => {
                         self.inputs.invalidate_catalog();
                         self.set_toast(
@@ -99,8 +97,8 @@ impl App {
                 Action::None
             }
             Command::SetSidebar(shown) => {
-                self.show_sidebar = shown;
-                self.inspector.force_open = shown;
+                self.ui.show_sidebar = shown;
+                self.ui.inspector.force_open = shown;
                 self.save_ui_prefs();
                 self.set_toast(
                     if shown {
@@ -113,14 +111,14 @@ impl App {
                 Action::None
             }
             Command::ResetSidebar => {
-                self.inspector.dragged_ratio = None;
-                self.show_sidebar = true;
-                self.inspector.force_open = true;
+                self.ui.inspector.dragged_ratio = None;
+                self.ui.show_sidebar = true;
+                self.ui.inspector.force_open = true;
                 self.set_toast("inspector width reset", false);
                 Action::None
             }
             Command::SetMouse(on) => {
-                self.mouse_capture = on;
+                self.ui.mouse_capture = on;
                 self.set_toast(
                     if on {
                         "mouse capture: on (drag to OSC52 copy, click links)"
@@ -141,15 +139,15 @@ impl App {
             }
             Command::Cancel => Action::Cancel,
             Command::ToggleSidebar => {
-                self.show_sidebar = !self.show_sidebar;
-                self.inspector.force_open = self.show_sidebar;
+                self.ui.show_sidebar = !self.ui.show_sidebar;
+                self.ui.inspector.force_open = self.ui.show_sidebar;
                 self.save_ui_prefs();
                 Action::None
             }
             Command::NextTheme => {
-                self.theme = (self.theme + 1) % THEMES.len();
+                self.ui.theme = (self.ui.theme + 1) % THEMES.len();
                 self.save_ui_prefs();
-                self.set_toast(format!("theme: {}", THEMES[self.theme].0), false);
+                self.set_toast(format!("theme: {}", THEMES[self.ui.theme].0), false);
                 Action::None
             }
             Command::Refresh => Action::Refresh,
@@ -159,8 +157,8 @@ impl App {
     }
 
     pub(in crate::tui) fn toggle_expand_cards(&mut self) {
-        if let Some(idx) = self.selected_card {
-            if let Some(item) = self.session.items.get_mut(idx) {
+        if let Some(idx) = self.ui.selected_card {
+            if let Some(item) = self.session.current.items.get_mut(idx) {
                 match item {
                     TranscriptItem::Tool { collapsed, .. } => *collapsed = !*collapsed,
                     TranscriptItem::Assistant {
@@ -173,7 +171,7 @@ impl App {
             }
         }
         // Otherwise fold/unfold every tool card and reasoning block.
-        let any_collapsed = self.session.items.iter().any(|i| {
+        let any_collapsed = self.session.current.items.iter().any(|i| {
             matches!(
                 i,
                 TranscriptItem::Tool {
@@ -189,7 +187,7 @@ impl App {
             )
         });
         let target_state = !any_collapsed;
-        for item in &mut self.session.items {
+        for item in &mut self.session.current.items {
             match item {
                 TranscriptItem::Tool { collapsed, .. } => *collapsed = target_state,
                 TranscriptItem::Assistant {
@@ -208,17 +206,22 @@ impl App {
             Some((name, arg)) => (name, arg.trim()),
             None => (body, ""),
         };
-        match name {
-            "login" | "connect" => {
+        let Some(kind) = lookup_slash(name) else {
+            self.set_toast(format!("unknown command: /{name} (try /help)"), true);
+            return Action::None;
+        };
+        match kind {
+            SlashCmdKind::Login => {
                 self.open_login_modal();
                 Action::None
             }
-            "logout" => {
+            SlashCmdKind::Logout => {
                 if arg.is_empty() {
                     if let Some((prov, _)) = resolve_active_provider(&self.data_dir) {
                         let id = prov.id.clone();
                         match remove_provider(&self.data_dir, &id) {
                             Ok(true) => {
+                                self.inputs.invalidate_catalog();
                                 self.set_toast(format!("logged out of {id}"), false);
                             }
                             Ok(false) => {
@@ -235,6 +238,7 @@ impl App {
                 } else {
                     match remove_provider(&self.data_dir, arg) {
                         Ok(true) => {
+                            self.inputs.invalidate_catalog();
                             self.set_toast(format!("logged out of {arg}"), false);
                         }
                         Ok(false) => {
@@ -245,7 +249,7 @@ impl App {
                 }
                 Action::None
             }
-            "models" | "model" => {
+            SlashCmdKind::Models => {
                 if arg.is_empty() {
                     self.open_models_modal();
                 } else if let Some((prov, _)) = resolve_active_provider(&self.data_dir) {
@@ -262,6 +266,7 @@ impl App {
                     ) {
                         self.set_toast(format!("{e:#}"), true);
                     } else {
+                        self.inputs.invalidate_catalog();
                         self.set_toast(format!("model: {pid}/{mid}"), false);
                     }
                 } else {
@@ -269,27 +274,27 @@ impl App {
                 }
                 Action::None
             }
-            "compact" => {
+            SlashCmdKind::Compact => {
                 self.request_compact(arg, false);
                 Action::None
             }
-            "handoff" => {
+            SlashCmdKind::Handoff => {
                 self.request_compact(arg, true);
                 Action::None
             }
-            "budget" => {
+            SlashCmdKind::Budget => {
                 self.run_budget_command(arg);
                 Action::None
             }
-            "delegate" => {
+            SlashCmdKind::Delegate => {
                 self.run_delegate_command(arg);
                 Action::None
             }
-            "effort" => {
+            SlashCmdKind::Effort => {
                 self.run_effort_command(arg);
                 Action::None
             }
-            "mode" => {
+            SlashCmdKind::Mode => {
                 if arg.is_empty() {
                     self.open_mode_picker();
                 } else {
@@ -300,7 +305,7 @@ impl App {
                     };
                     match mode {
                         Some(mode) => {
-                            self.mode = mode;
+                            self.ui.mode = mode;
                             self.set_toast(format!("mode: {}", mode.label()), false);
                         }
                         None => self.set_toast("usage: /mode [agent|shell]", true),
@@ -308,7 +313,7 @@ impl App {
                 }
                 Action::None
             }
-            "permissions" | "permission" | "perm" => {
+            SlashCmdKind::Permissions => {
                 if arg.is_empty() {
                     self.open_permission_picker();
                 } else {
@@ -316,11 +321,11 @@ impl App {
                 }
                 Action::None
             }
-            "plan" => {
+            SlashCmdKind::Plan => {
                 self.set_permission_mode(PermissionMode::Plan);
                 Action::None
             }
-            "trust" => {
+            SlashCmdKind::Trust => {
                 let target = match arg.trim().to_ascii_lowercase().as_str() {
                     "" => return self.run_command(Command::OpenTrustPicker),
                     "on" | "true" | "yes" | "1" => true,
@@ -330,7 +335,7 @@ impl App {
                         return Action::None;
                     }
                 };
-                match set_workspace_trusted(&self.data_dir, &self.session.cwd, target) {
+                match set_workspace_trusted(&self.data_dir, &self.session.current.cwd, target) {
                     Ok(()) => self.set_toast(
                         format!("workspace {}", if target { "trusted" } else { "untrusted" }),
                         false,
@@ -339,27 +344,27 @@ impl App {
                 }
                 Action::None
             }
-            "mcp" => {
+            SlashCmdKind::Mcp => {
                 self.run_mcp_command(arg);
                 Action::None
             }
-            "skill" | "skills" => {
+            SlashCmdKind::Skill => {
                 self.run_skill_command(arg);
                 Action::None
             }
-            "worktree" => {
+            SlashCmdKind::Worktree => {
                 self.run_worktree_command(arg);
                 Action::None
             }
-            "cd" => {
+            SlashCmdKind::Cd => {
                 if arg.is_empty() {
                     self.set_toast(format!("cwd: {}", self.cwd_label()), false);
                     return Action::None;
                 }
-                let candidate = resolve_cd_path(&self.session.cwd, arg);
+                let candidate = resolve_cd_path(&self.session.current.cwd, arg);
                 match std::fs::canonicalize(&candidate) {
                     Ok(path) if path.is_dir() => {
-                        let id = self.session.id.clone();
+                        let id = self.session.current.id.clone();
                         let cwd = path.clone();
                         self.session_cwd_set(path);
                         self.persist_session();
@@ -371,7 +376,7 @@ impl App {
                 }
                 Action::None
             }
-            "machine" | "machines" => {
+            SlashCmdKind::Machine => {
                 if arg.is_empty() {
                     let items = self.machine_items();
                     self.open_picker("machines", items);
@@ -380,16 +385,16 @@ impl App {
                     Action::Switch(arg.to_string())
                 }
             }
-            "new" => self.run_command(Command::NewSession),
-            "sessions" | "resume" => {
+            SlashCmdKind::New => self.run_command(Command::NewSession),
+            SlashCmdKind::Sessions => {
                 self.open_sessions_modal();
                 Action::None
             }
-            "expand" => {
+            SlashCmdKind::Expand => {
                 self.toggle_expand_cards();
                 Action::None
             }
-            "sidebar" | "panel" => {
+            SlashCmdKind::Sidebar => {
                 if arg.trim() == "reset" {
                     self.run_command(Command::ResetSidebar)
                 } else if arg.is_empty() {
@@ -400,94 +405,96 @@ impl App {
                     Action::None
                 }
             }
-            "diff" => {
+            SlashCmdKind::Diff => {
                 let target = arg.trim();
                 if target.is_empty() {
-                    self.show_sidebar = true;
-                    self.inspector.force_open = true;
-                    self.inspector.tab = InspectorTab::Diff;
-                    self.inspector.scroll = 0;
-                    if self.inspector.file_path.is_none() {
-                        if let Some(first) = self.session.changed_files.last() {
-                            self.inspector.selected_diff = self.session.changed_files.len() - 1;
-                            self.inspector.file_path = Some(first.path.clone());
+                    self.ui.show_sidebar = true;
+                    self.ui.inspector.force_open = true;
+                    self.ui.inspector.tab = InspectorTab::Diff;
+                    self.ui.inspector.scroll = 0;
+                    if self.ui.inspector.file_path.is_none() {
+                        if let Some(first) = self.session.current.changed_files.last() {
+                            self.ui.inspector.selected_diff = self.session.current.changed_files.len() - 1;
+                            self.ui.inspector.file_path = Some(first.path.clone());
                         }
                     }
                 } else {
                     self.open_file_in_inspector(target, None);
-                    self.inspector.tab = InspectorTab::Diff;
+                    self.ui.inspector.tab = InspectorTab::Diff;
                 }
                 Action::None
             }
-            "open" | "view" => {
+            SlashCmdKind::Open => {
                 let target = arg.trim();
                 if target.is_empty() {
                     self.set_toast("usage: /open <path[:line]>", true);
                 } else {
                     self.open_file_in_inspector(target, None);
-                    self.inspector.tab = InspectorTab::File;
+                    self.ui.inspector.tab = InspectorTab::File;
                 }
                 Action::None
             }
-            "mouse" => self.run_command(Command::OpenMousePicker),
-            "jobs" => {
-                self.show_sidebar = true;
-                self.inspector.force_open = true;
-                self.inspector.tab = InspectorTab::Overview;
-                self.focus = Focus::Sidebar;
+            SlashCmdKind::Mouse => self.run_command(Command::OpenMousePicker),
+            SlashCmdKind::Jobs => {
+                self.ui.show_sidebar = true;
+                self.ui.inspector.force_open = true;
+                self.ui.inspector.tab = InspectorTab::Overview;
+                self.ui.focus = Focus::Sidebar;
                 Action::None
             }
-            "logs" | "output" => {
-                self.show_sidebar = true;
-                self.inspector.force_open = true;
-                self.inspector.tab = InspectorTab::Output;
-                self.focus = Focus::Sidebar;
+            SlashCmdKind::Logs => {
+                self.ui.show_sidebar = true;
+                self.ui.inspector.force_open = true;
+                self.ui.inspector.tab = InspectorTab::Output;
+                self.ui.focus = Focus::Sidebar;
                 Action::None
             }
-            "cancel" => Action::Cancel,
-            "monitor" | "monitors" | "mon" => {
+            SlashCmdKind::Cancel => Action::Cancel,
+            SlashCmdKind::Monitor => {
                 self.run_monitor_command(arg);
                 Action::None
             }
-            "rewind" | "undo" => {
+            SlashCmdKind::Rewind => {
                 self.run_rewind_command(arg);
                 Action::None
             }
-            "clear" => {
-                let id = self.session.id.clone();
-                self.session.items.clear();
-                self.session.messages.clear();
-                self.session.changed_files.clear();
-                self.expanded_explore_groups.clear();
-                self.transcript_cache.clear();
-                self.selected_card = None;
-                self.transcript_scroll = 0;
+            SlashCmdKind::Clear => {
+                let id = self.session.current.id.clone();
+                self.session.current.items.clear();
+                self.session.current.messages.clear();
+                self.session.current.changed_files.clear();
+                self.session.expanded_explore_groups.clear();
+                self.session.transcript_cache.clear();
+                self.ui.selected_card = None;
+                self.ui.transcript_scroll = 0;
+                self.ui.transcript_max_scroll = 0;
+                self.ui.hit_regions.clear();
+                self.ui.selection = None;
+                self.ui.drag_start = None;
+                self.ui.screen_lines.clear();
+                self.ui.inspector = InspectorState::default();
                 self.sync_agent(AgentReq::Clear { id });
                 self.set_toast("transcript cleared", false);
                 Action::None
             }
-            "theme" | "themes" => self.run_command(Command::OpenThemePicker),
-            "help" => {
+            SlashCmdKind::Theme => self.run_command(Command::OpenThemePicker),
+            SlashCmdKind::Help => {
                 self.push_notice(
                     "Shortcuts: Click underlined paths to review in right Inspector - Drag divider to resize - Alt+1..5 switch Inspector tabs - Ctrl+B toggle panel - Ctrl+O expand/collapse tools & thinking - Shift+Tab cycle permissions - /monitor [list|stop <id>] - /rewind [id|last] - /mouse - /diff /open - /delegate [off|low|normal|high] - /effort [level] - /worktree [name|merge|remove]",
                     false,
                 );
                 Action::None
             }
-            "quit" | "q" | "exit" => Action::Quit,
-            other => {
-                self.set_toast(format!("unknown command: /{other} (try /help)"), true);
-                Action::None
-            }
+            SlashCmdKind::Quit => Action::Quit,
         }
     }
 
     /// Returns either matching slash commands OR `/cd` directory completions.
     pub(in crate::tui) fn slash_query(&self) -> Option<&str> {
-        if !self.input.starts_with('/') || self.input.contains('\n') {
+        if !self.ui.input.starts_with('/') || self.ui.input.contains('\n') {
             return None;
         }
-        let rest = &self.input[1..];
+        let rest = &self.ui.input[1..];
         if rest.contains(char::is_whitespace) {
             return None;
         }
@@ -510,16 +517,16 @@ impl App {
     }
 
     pub(in crate::tui) fn cd_query(&self) -> Option<&str> {
-        if self.input.contains('\n') {
+        if self.ui.input.contains('\n') {
             return None;
         }
-        self.input.strip_prefix("/cd ")
+        self.ui.input.strip_prefix("/cd ")
     }
 
     pub(in crate::tui) fn cd_completions(&self) -> Vec<(String, String)> {
         let Some(raw) = self.cd_query() else {
             return Vec::new();
         };
-        complete_directories(&self.session.cwd, raw)
+        complete_directories(&self.session.current.cwd, raw)
     }
 }

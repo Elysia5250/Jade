@@ -1,12 +1,11 @@
-//! Cross-workspace notes in `<data_dir>/memory/<id>.md`.
+//! Workspace notes in `<data_dir>/memory/<id>.md`.
 //!
-//! The welcome screen lists and toggles these. Enabled bodies are injected
-//! into the depth-0 environment note, capped near 4000 characters.
+//! The welcome screen lists and toggles notes for the current workspace.
+//! Enabled bodies are injected into the depth-0 environment note, capped at
+//! 4000 characters. Notes without a `workspace` field stay on disk and are
+//! not injected.
 
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const MEMORY_CAP: usize = 4000;
 
@@ -16,6 +15,7 @@ pub struct MemoryNote {
     pub title: String,
     pub enabled: bool,
     pub body: String,
+    pub workspace: Option<String>,
     pub path: PathBuf,
 }
 
@@ -42,7 +42,7 @@ pub fn list(data_dir: &Path) -> Vec<MemoryNote> {
     notes
 }
 
-pub fn create(data_dir: &Path, title: &str) -> Result<MemoryNote, String> {
+pub fn create(data_dir: &Path, cwd: &Path, title: &str) -> Result<MemoryNote, String> {
     let title = title.trim().replace(['\r', '\n'], " ");
     if title.is_empty() {
         return Err("title is empty".into());
@@ -51,29 +51,53 @@ pub fn create(data_dir: &Path, title: &str) -> Result<MemoryNote, String> {
     std::fs::create_dir_all(&dir).map_err(|err| format!("cannot create: {err}"))?;
     let id = unique_id(&dir, &title);
     let path = dir.join(format!("{id}.md"));
-    write_note(&path, &title, true, "")?;
+    let workspace = workspace_key(cwd);
+    write_note(&path, &title, true, Some(&workspace), "")?;
     Ok(MemoryNote {
         id,
         title,
         enabled: true,
         body: String::new(),
+        workspace: Some(workspace),
         path,
     })
 }
 
+pub fn list_for(data_dir: &Path, cwd: &Path) -> Vec<MemoryNote> {
+    let want = workspace_key(cwd);
+    list(data_dir)
+        .into_iter()
+        .filter(|note| note.workspace.as_deref() == Some(want.as_str()))
+        .collect()
+}
+
 pub fn set_enabled(note: &MemoryNote, enabled: bool) -> Result<(), String> {
-    write_note(&note.path, &note.title, enabled, &note.body)
+    write_note(
+        &note.path,
+        &note.title,
+        enabled,
+        note.workspace.as_deref(),
+        &note.body,
+    )
 }
 
 pub fn delete(note: &MemoryNote) -> Result<(), String> {
     std::fs::remove_file(&note.path).map_err(|err| format!("cannot delete: {err}"))
 }
 
-/// Enabled notes for the depth-0 environment block. `None` when nothing is on.
-pub fn prompt_block(data_dir: &Path) -> Option<String> {
+/// Enabled notes for this workspace, for the depth-0 environment block.
+/// `None` when nothing is on. The 4000-character cap applies to the notes
+/// body; a truncation marker may extend past that cap.
+pub fn prompt_block(data_dir: &Path, cwd: &Path) -> Option<String> {
     let mut body = String::new();
-    for note in list(data_dir).into_iter().filter(|note| note.enabled) {
-        if body.len() >= MEMORY_CAP {
+    let mut truncated = false;
+    for note in list_for(data_dir, cwd)
+        .into_iter()
+        .filter(|note| note.enabled)
+    {
+        let used = body.chars().count();
+        if used >= MEMORY_CAP {
+            truncated = true;
             break;
         }
         let chunk = if note.body.is_empty() {
@@ -81,23 +105,31 @@ pub fn prompt_block(data_dir: &Path) -> Option<String> {
         } else {
             format!("### {}\n{}\n", note.title, note.body)
         };
-        let room = MEMORY_CAP - body.len();
-        if chunk.len() <= room {
+        let room = MEMORY_CAP - used;
+        if chunk.chars().count() <= room {
             body.push_str(&chunk);
         } else {
-            let mut end = room.min(chunk.len());
-            while end > 0 && !chunk.is_char_boundary(end) {
-                end -= 1;
-            }
-            body.push_str(&chunk[..end]);
+            body.extend(chunk.chars().take(room));
+            truncated = true;
             break;
         }
+    }
+    if truncated {
+        body.push_str("\n…(truncated)");
     }
     if body.is_empty() {
         None
     } else {
         Some(format!("## Long-term memory\n{body}"))
     }
+}
+
+fn workspace_key(cwd: &Path) -> String {
+    std::fs::canonicalize(cwd)
+        .unwrap_or_else(|_| cwd.to_path_buf())
+        .display()
+        .to_string()
+        .replace(['\r', '\n'], "")
 }
 
 fn unique_id(dir: &Path, title: &str) -> String {
@@ -118,10 +150,7 @@ fn note_id(title: &str) -> String {
         .flat_map(|c| c.to_lowercase())
         .take(40)
         .collect();
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+    let millis = envoy_core::now_ms();
     if slug.is_empty() {
         format!("note-{millis}")
     } else {
@@ -129,24 +158,23 @@ fn note_id(title: &str) -> String {
     }
 }
 
-fn write_note(path: &Path, title: &str, enabled: bool, body: &str) -> Result<(), String> {
+fn write_note(
+    path: &Path,
+    title: &str,
+    enabled: bool,
+    workspace: Option<&str>,
+    body: &str,
+) -> Result<(), String> {
+    let workspace_line = match workspace {
+        Some(workspace) if !workspace.is_empty() => format!("workspace: {workspace}\n"),
+        _ => String::new(),
+    };
     let text = format!(
-        "---\ntitle: {title}\nenabled: {}\n---\n{body}",
+        "---\ntitle: {title}\nenabled: {}\n{workspace_line}---\n{body}",
         if enabled { "true" } else { "false" }
     );
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| format!("cannot create: {err}"))?;
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|err| format!("cannot create: {err}"))?;
-    file.write_all(text.as_bytes())
-        .map_err(|err| format!("cannot create: {err}"))?;
-    Ok(())
+    envoy_core::fs::write_atomic_sync(path, text.as_bytes(), 0o600)
+        .map_err(|err| format!("cannot create: {err:#}"))
 }
 
 fn parse_note(path: &Path, raw: &str) -> MemoryNote {
@@ -155,45 +183,57 @@ fn parse_note(path: &Path, raw: &str) -> MemoryNote {
         .and_then(|s| s.to_str())
         .unwrap_or("note")
         .to_string();
-    let (title, enabled, body) = split_note(raw, &id);
+    let (title, enabled, workspace, body) = split_note(raw, &id);
     MemoryNote {
         id,
         title,
         enabled,
         body,
+        workspace,
         path: path.to_path_buf(),
     }
 }
 
-fn split_note(raw: &str, fallback_title: &str) -> (String, bool, String) {
-    let rest = raw
-        .strip_prefix("---\n")
-        .or_else(|| raw.strip_prefix("---\r\n"));
-    let Some(rest) = rest else {
-        return (fallback_title.to_string(), true, raw.trim().to_string());
-    };
-    let (fm, body) = if let Some(i) = rest.find("\n---\n") {
-        (&rest[..i], &rest[i + 5..])
-    } else if let Some(i) = rest.find("\n---\r\n") {
-        (&rest[..i], &rest[i + 6..])
-    } else if let Some(i) = rest.find("\r\n---\r\n") {
-        (&rest[..i], &rest[i + 7..])
-    } else {
-        return (fallback_title.to_string(), true, raw.trim().to_string());
+fn split_note(raw: &str, fallback_title: &str) -> (String, bool, Option<String>, String) {
+    let (Some(fm), body) = crate::frontmatter::split_frontmatter(raw) else {
+        return (
+            fallback_title.to_string(),
+            true,
+            None,
+            raw.trim().to_string(),
+        );
     };
     let mut title = fallback_title.to_string();
     let mut enabled = true;
+    let mut workspace = None;
     for line in fm.lines() {
-        if let Some(value) = line.strip_prefix("title:") {
-            let value = value.trim();
-            if !value.is_empty() {
-                title = value.to_string();
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, val)) = trimmed.split_once(':') else {
+            continue;
+        };
+        match key.trim() {
+            "title" => {
+                let value = crate::frontmatter::unquote(val);
+                if !value.is_empty() {
+                    title = value;
+                }
             }
-        } else if let Some(value) = line.strip_prefix("enabled:") {
-            enabled = !value.trim().eq_ignore_ascii_case("false");
+            "enabled" => {
+                enabled = !crate::frontmatter::unquote(val).eq_ignore_ascii_case("false");
+            }
+            "workspace" => {
+                let value = crate::frontmatter::unquote(val);
+                if !value.is_empty() {
+                    workspace = Some(value);
+                }
+            }
+            _ => {}
         }
     }
-    (title, enabled, body.trim().to_string())
+    (title, enabled, workspace, body.trim().to_string())
 }
 
 #[cfg(test)]
@@ -214,7 +254,7 @@ mod tests {
     #[test]
     fn chinese_title_keeps_its_text_and_a_unique_id() {
         let dir = tmpdir();
-        let note = create(&dir, "记事").unwrap();
+        let note = create(&dir, &dir, "记事").unwrap();
         assert!(note.id.starts_with("note-"), "{}", note.id);
         assert_ne!(note.id, "custom");
         let raw = std::fs::read_to_string(&note.path).unwrap();
@@ -230,8 +270,8 @@ mod tests {
     #[test]
     fn ascii_title_slugs_and_empty_title_is_refused() {
         let dir = tmpdir();
-        assert!(create(&dir, "  ").unwrap_err().contains("empty"));
-        let note = create(&dir, "Ship Notes!").unwrap();
+        assert!(create(&dir, &dir, "  ").unwrap_err().contains("empty"));
+        let note = create(&dir, &dir, "Ship Notes!").unwrap();
         assert!(note.id.starts_with("shipnotes-"), "{}", note.id);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -239,7 +279,7 @@ mod tests {
     #[test]
     fn toggle_and_delete_round_trip() {
         let dir = tmpdir();
-        let note = create(&dir, "alpha").unwrap();
+        let note = create(&dir, &dir, "alpha").unwrap();
         set_enabled(&note, false).unwrap();
         let listed = list(&dir);
         assert!(!listed[0].enabled);
@@ -251,21 +291,23 @@ mod tests {
     #[test]
     fn prompt_block_skips_disabled_notes_and_stops_on_a_char_boundary() {
         let dir = tmpdir();
-        let big = create(&dir, "big").unwrap();
+        let big = create(&dir, &dir, "big").unwrap();
         let huge = "字".repeat(3000);
+        let ws = workspace_key(&dir);
         std::fs::write(
             &big.path,
-            format!("---\ntitle: big\nenabled: true\n---\n{huge}"),
+            format!("---\ntitle: big\nenabled: true\nworkspace: {ws}\n---\n{huge}"),
         )
         .unwrap();
-        let hidden = create(&dir, "hidden").unwrap();
+        let hidden = create(&dir, &dir, "hidden").unwrap();
         set_enabled(&hidden, false).unwrap();
-        let block = prompt_block(&dir).unwrap();
+        let block = prompt_block(&dir, &dir).unwrap();
         assert!(block.starts_with("## Long-term memory\n"));
         assert!(!block.contains("hidden"));
         assert!(block.contains("big"));
         let notes = block.find("### big").unwrap();
-        assert!(block[notes..].len() <= MEMORY_CAP + 16);
+        assert!(block[notes..].chars().count() <= MEMORY_CAP);
+        assert!(!block.contains("(truncated)"));
         assert!(std::str::from_utf8(block.as_bytes()).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -273,7 +315,7 @@ mod tests {
     #[test]
     fn memory_is_injected_only_at_depth_zero() {
         let dir = tmpdir();
-        create(&dir, "envoy-depth-marker").unwrap();
+        create(&dir, &dir, "envoy-depth-marker").unwrap();
         let top = crate::agent::prompt::environment_note_for_depth(&dir, &dir, "sess", 0);
         let top = top.expect("depth 0 note");
         assert!(top.contains("## Long-term memory"));
@@ -292,6 +334,50 @@ mod tests {
             assert!(!text.contains("Long-term memory"));
             assert!(!text.contains("envoy-depth-marker"));
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn split_note_parses_eof_delimiter_and_inline_comment() {
+        let (title, enabled, workspace, body) =
+            split_note("---\ntitle: \"Alpha # 1\" # keep\nenabled: false # off\n---", "fb");
+        assert_eq!(title, "Alpha # 1");
+        assert!(!enabled);
+        assert!(workspace.is_none());
+        assert_eq!(body, "");
+    }
+
+    #[test]
+    fn prompt_block_ignores_notes_from_another_workspace() {
+        let dir = tmpdir();
+        let other = tmpdir();
+        create(&dir, &other, "elsewhere").unwrap();
+        create(&dir, &dir, "here").unwrap();
+        let block = prompt_block(&dir, &dir).unwrap();
+        assert!(block.contains("here"));
+        assert!(!block.contains("elsewhere"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other);
+    }
+
+    #[test]
+    fn chinese_memory_truncates_on_a_char_boundary_with_a_marker() {
+        let dir = tmpdir();
+        let note = create(&dir, &dir, "long").unwrap();
+        let huge = "字".repeat(5000);
+        let ws = workspace_key(&dir);
+        std::fs::write(
+            &note.path,
+            format!("---\ntitle: long\nenabled: true\nworkspace: {ws}\n---\n{huge}"),
+        )
+        .unwrap();
+        let block = prompt_block(&dir, &dir).unwrap();
+        assert!(block.contains("\n…(truncated)"));
+        assert!(std::str::from_utf8(block.as_bytes()).is_ok());
+        let notes = block.find("### long").unwrap();
+        let body = block[notes..].strip_suffix("\n…(truncated)").unwrap();
+        assert_eq!(body.chars().count(), MEMORY_CAP);
+        assert!(body.chars().all(|ch| ch != '\u{FFFD}'));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

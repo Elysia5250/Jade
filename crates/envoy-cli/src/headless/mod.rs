@@ -5,7 +5,6 @@ use crate::Ctx;
 use anyhow::{bail, Context, Result};
 use clap::{Args, ValueEnum};
 use envoy_agent::agent::AskBroker;
-use envoy_agent::daemon;
 use envoy_agent::permissions::{PermissionMode, SandboxOverride};
 use envoy_agent::runtime::{Runtime, SendMode};
 use envoy_agent::session::{latest_session_for_cwd, load_session, save_session, ChatRole, Session};
@@ -13,7 +12,6 @@ use envoy_service::AgentServer;
 use serde::Serialize;
 use std::io::{Read, Write};
 use std::time::Instant;
-use tokio::sync::oneshot;
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OutputFormat {
@@ -81,79 +79,36 @@ struct JsonReport {
     duration_ms: u64,
 }
 
-struct EphemeralServer {
-    dir: std::path::PathBuf,
-    socket: std::path::PathBuf,
-    stop_tx: Option<oneshot::Sender<()>>,
-    task: Option<tokio::task::JoinHandle<()>>,
+/// Isolated in-process job store for `envoy -p` runs; avoids temporary sockets.
+struct LocalHeadlessServer {
+    jobs_dir: std::path::PathBuf,
+    server: AgentServer,
 }
 
-impl Drop for EphemeralServer {
+impl Drop for LocalHeadlessServer {
     fn drop(&mut self) {
-        if let Some(tx) = self.stop_tx.take() {
-            let _ = tx.send(());
-        }
-        let _ = std::fs::remove_dir_all(&self.dir);
+        self.server.jobs().shutdown();
+        let _ = std::fs::remove_dir_all(&self.jobs_dir);
     }
 }
 
-impl EphemeralServer {
-    async fn start(data_dir: &std::path::Path) -> Result<Option<Self>> {
-        if daemon::is_running(data_dir).await {
-            return Ok(None);
-        }
+impl LocalHeadlessServer {
+    fn start(data_dir: &std::path::Path) -> Result<Self> {
         envoy_core::fs::ensure_private_dir(data_dir)?;
-
         let mut b = [0u8; 4];
         let _ = getrandom::fill(&mut b);
-        let base = std::env::temp_dir();
-        let base = if base.to_string_lossy().len() > 60 && std::path::Path::new("/tmp").is_dir() {
-            std::path::PathBuf::from("/tmp")
-        } else {
-            base
-        };
-        let dir = base.join(format!(
-            "envoy-eph-{}-{:02x}{:02x}{:02x}{:02x}",
+        let jobs_dir = std::env::temp_dir().join(format!(
+            "envoy-hl-jobs-{}-{:02x}{:02x}{:02x}{:02x}",
             std::process::id(),
             b[0],
             b[1],
             b[2],
             b[3]
         ));
-        envoy_core::fs::ensure_private_dir(&dir)?;
-
-        let socket = dir.join("envoy.sock");
-        let listener = tokio::net::UnixListener::bind(&socket)
-            .with_context(|| format!("binding {}", socket.display()))?;
-        envoy_core::fs::set_mode_strict(&socket, 0o600)?;
-
+        envoy_core::fs::ensure_private_dir(&jobs_dir)?;
         let host = std::sync::Arc::new(envoy_service::StoreHost::open(data_dir.to_path_buf())?);
-        let server = AgentServer::new(dir.clone(), host);
-        let (stop_tx, stop_rx) = oneshot::channel::<()>();
-        let sock_for_srv = socket.clone();
-        let task = tokio::spawn(async move {
-            daemon::run_server(server, listener, sock_for_srv, None, async move {
-                let _ = stop_rx.await;
-            })
-            .await;
-        });
-
-        Ok(Some(Self {
-            dir,
-            socket,
-            stop_tx: Some(stop_tx),
-            task: Some(task),
-        }))
-    }
-
-    async fn shutdown(mut self) {
-        if let Some(tx) = self.stop_tx.take() {
-            let _ = tx.send(());
-        }
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
-        }
-        let _ = std::fs::remove_dir_all(&self.dir);
+        let server = AgentServer::new(jobs_dir.clone(), host);
+        Ok(Self { jobs_dir, server })
     }
 }
 
@@ -234,14 +189,18 @@ pub(crate) async fn run_with_writers<WOut: Write, WErr: Write>(
     session.maybe_set_title_from(&prompt);
 
     let local_target = ctx.on == "local" || ctx.on.is_empty();
-    let ephemeral = if local_target {
-        EphemeralServer::start(&ctx.data_dir).await?
+    let local_headless = if local_target {
+        Some(LocalHeadlessServer::start(&ctx.data_dir)?)
     } else {
         None
     };
 
     let started = Instant::now();
-    let runtime = Runtime::with_conduit(ctx.data_dir.clone(), ctx.conduit.clone());
+    let runtime = Runtime::with_local_server(
+        ctx.data_dir.clone(),
+        ctx.conduit.clone(),
+        local_headless.as_ref().map(|s| s.server.clone()),
+    );
     let live = runtime
         .ensure_with_hooks(
             session.id.clone(),
@@ -251,11 +210,8 @@ pub(crate) async fn run_with_writers<WOut: Write, WErr: Write>(
         )
         .await;
 
-    let local_socket = ephemeral.as_ref().map(|s| s.socket.clone());
     let mut rx = {
         let mut state = live.lock().unwrap();
-        state.local_socket = local_socket.clone();
-        state.monitors.set_local_socket(local_socket);
         state.asks = AskBroker::new_headless();
         state.permissions.set_mode(perm_mode);
         state
@@ -310,9 +266,11 @@ pub(crate) async fn run_with_writers<WOut: Write, WErr: Write>(
             if !messages.is_empty() {
                 session.messages = messages;
             }
-            session.input_tokens = session.input_tokens.max(usage.input_tokens);
-            session.output_tokens = session.output_tokens.max(usage.output_tokens);
-            session.prompt_tokens = session.prompt_tokens.max(usage.context_tokens);
+            session.input_tokens += usage.input_tokens;
+            session.output_tokens += usage.output_tokens;
+            if usage.context_tokens > 0 {
+                session.prompt_tokens = usage.context_tokens;
+            }
             session.touch();
             let _ = save_session(&ctx.data_dir, &session);
 
@@ -337,9 +295,7 @@ pub(crate) async fn run_with_writers<WOut: Write, WErr: Write>(
     };
 
     runtime.shutdown_all().await;
-    if let Some(srv) = ephemeral {
-        srv.shutdown().await;
-    }
+    drop(local_headless);
     result
 }
 
@@ -410,6 +366,7 @@ mod tests {
                 key: "sk-mock".into(),
             },
             custom_models: vec!["gpt-test".into()],
+            fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
             updated_ms: now_ms(),
         };
@@ -468,8 +425,8 @@ mod tests {
         assert_eq!(json_out["result"], "ALL DONE");
         assert_eq!(json_out["tool_calls"], 1);
         assert!(
-            !daemon::socket_path(&data).exists(),
-            "ephemeral socket cleaned up"
+            !envoy_agent::daemon::socket_path(&data).exists(),
+            "headless run creates no daemon socket in data_dir"
         );
 
         // Verify `-c` continues the saved session cleanly in text mode.

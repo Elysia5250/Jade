@@ -330,7 +330,7 @@ envoy-proto -> envoy-core -> envoy-service -> envoy-agent -> envoy-cli
 >
 > **执行顺序**以 [hardening-and-modernization.md](./hardening-and-modernization.md) 的 `P6-1a`–`P6-3c` 为准。一次只做一项，做完停。下面三段是原范围，子任务是它的切分，不新增目标。
 >
-> **进度（2026-11-20）**：P6-1a–P6-1e 已落地。`view/` 只读 `inputs` 里的目录与预览快照；`drive::console_loop` 在输入、daemon 事件和动画计时上重绘；工作区索引在 `links` 限深并用 `(dev, ino)` 去重。下一项是 **P6-2a**。
+> **进度（2026-11-20）**：P6-1a–P6-1e 已落地。`view/` 只读 `inputs` 里的目录与预览快照；`drive::console_loop` 在输入、daemon 事件和动画计时上重绘；工作区索引在 `links` 限深并用 `(dev, ino)` 去重。Phase 6 其余项、Phase 7 与 Phase 8 已在工作区完成，进度以台账勾选框为准。计划到 Phase 8 结束。
 
 #### P6-1：清零 `tui/view/` 同步 I/O，改为事件驱动渲染与后台任务
 - **文件**：`crates/envoy-cli/src/tui/{mod.rs,links.rs,diff.rs,mouse.rs}`、`crates/envoy-cli/src/tui/view/**`、`crates/envoy-cli/src/tui/state/{jobs.rs,agent_events.rs}`

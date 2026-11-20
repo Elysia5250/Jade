@@ -311,6 +311,22 @@ impl ToolFilter {
         }
         true
     }
+
+    /// Tighten the allow-list to `names`. An empty list adds no restriction.
+    /// `skill` stays available when this agent could already call it.
+    pub(crate) fn restrict_to(&mut self, names: &[String]) {
+        if names.is_empty() {
+            return;
+        }
+        let mut next = names.to_vec();
+        if self.allows("skill") && !next.iter().any(|name| name == "skill") {
+            next.push("skill".to_string());
+        }
+        if let Some(existing) = &self.allowed {
+            next.retain(|name| existing.iter().any(|kept| kept == name));
+        }
+        self.allowed = Some(next);
+    }
 }
 
 pub(crate) fn openai_tools_json_filtered(
@@ -333,14 +349,6 @@ pub(crate) fn openai_tools_json_filtered(
         .collect()
 }
 
-#[allow(dead_code)]
-pub(crate) fn openai_tools_json_for(
-    permissions: Option<&crate::permissions::PermissionEngine>,
-    extra: &[Value],
-) -> Vec<Value> {
-    openai_tools_json_filtered(permissions, &ToolFilter::default(), extra)
-}
-
 pub(crate) fn responses_tools_json_filtered(
     permissions: Option<&crate::permissions::PermissionEngine>,
     filter: &ToolFilter,
@@ -360,14 +368,6 @@ pub(crate) fn responses_tools_json_filtered(
         .collect()
 }
 
-#[allow(dead_code)]
-pub(crate) fn responses_tools_json_for(
-    permissions: Option<&crate::permissions::PermissionEngine>,
-    extra: &[Value],
-) -> Vec<Value> {
-    responses_tools_json_filtered(permissions, &ToolFilter::default(), extra)
-}
-
 pub(crate) fn anthropic_tools_json_filtered(
     permissions: Option<&crate::permissions::PermissionEngine>,
     filter: &ToolFilter,
@@ -384,24 +384,6 @@ pub(crate) fn anthropic_tools_json_filtered(
             })
         })
         .collect()
-}
-
-#[allow(dead_code)]
-pub(crate) fn anthropic_tools_json_for(
-    permissions: Option<&crate::permissions::PermissionEngine>,
-    extra: &[Value],
-) -> Vec<Value> {
-    anthropic_tools_json_filtered(permissions, &ToolFilter::default(), extra)
-}
-
-#[allow(dead_code)]
-pub(crate) fn responses_tools_json() -> Vec<Value> {
-    responses_tools_json_for(None, &[])
-}
-
-#[allow(dead_code)]
-pub(crate) fn anthropic_tools_json() -> Vec<Value> {
-    anthropic_tools_json_for(None, &[])
 }
 
 #[cfg(test)]
@@ -425,5 +407,29 @@ mod tests {
             .filter_map(|t| t["function"]["name"].as_str())
             .collect();
         assert_eq!(names, vec!["read", "grep"]);
+    }
+
+    #[test]
+    fn restrict_to_keeps_skill_and_intersects_the_existing_list() {
+        let mut open = ToolFilter::default();
+        open.restrict_to(&[]);
+        assert!(open.allowed.is_none());
+        open.restrict_to(&["read".into(), "grep".into()]);
+        assert!(open.allows("read"));
+        assert!(open.allows("skill"));
+        assert!(!open.allows("exec"));
+        open.restrict_to(&["exec".into(), "read".into()]);
+        assert!(open.allows("read"));
+        assert!(open.allows("skill"));
+        assert!(!open.allows("exec"));
+
+        let mut narrow = ToolFilter {
+            depth: 0,
+            allowed: Some(vec!["read".into()]),
+        };
+        narrow.restrict_to(&["grep".into()]);
+        assert!(!narrow.allows("read"));
+        assert!(!narrow.allows("grep"));
+        assert!(!narrow.allows("skill"));
     }
 }

@@ -62,6 +62,7 @@ pub(super) async fn run_single_subagent(
         data_dir: host.data_dir.clone(),
         conduit: host.conduit.clone(),
         local_socket: host.local_socket.clone(),
+        local_server: host.local_server.clone(),
         target: host.target.clone(),
         cwd: host.cwd.clone(),
         provider,

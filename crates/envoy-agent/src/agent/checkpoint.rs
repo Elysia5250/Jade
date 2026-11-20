@@ -7,7 +7,6 @@ use envoy_service::{AgentDialer, Remote};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_CHECKPOINTS_PER_SESSION: usize = 30;
 
@@ -397,10 +396,7 @@ fn shell_single_quote(s: &str) -> String {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    envoy_core::now_ms()
 }
 
 #[cfg(test)]

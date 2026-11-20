@@ -429,13 +429,14 @@ impl TurnHookSession {
         asks: &Arc<AskBroker>,
         permissions: &Arc<PermissionEngine>,
         mcp: Option<&McpManager>,
-        tool_filter: &ToolFilter,
+        tool_filter: &mut ToolFilter,
         subagent_host: Option<&SubagentHost>,
         monitors: Option<&Arc<dyn MonitorBroker>>,
     ) -> (u64, u64) {
         let all_readonly_batch = batch_is_parallel_readonly(tool_calls);
 
         let prepared = self.prepare_tool_batch(step, tool_calls, asks, tx).await;
+        let shared_filter = &*tool_filter;
 
         let outcomes: Vec<ToolExecOutcome> = if all_readonly_batch {
             let limit = Arc::new(tokio::sync::Semaphore::new(READONLY_BATCH_LIMIT));
@@ -453,7 +454,7 @@ impl TurnHookSession {
                         asks,
                         permissions,
                         mcp,
-                        tool_filter,
+                        shared_filter,
                         subagent_host,
                         monitors,
                     )
@@ -479,7 +480,7 @@ impl TurnHookSession {
                     asks,
                     permissions,
                     mcp,
-                    tool_filter,
+                    shared_filter,
                     subagent_host,
                     monitors,
                 )
@@ -491,6 +492,12 @@ impl TurnHookSession {
             }
             seq_outcomes
         };
+
+        for outcome in &outcomes {
+            if let Some(names) = &outcome.skill_allow {
+                tool_filter.restrict_to(names);
+            }
+        }
 
         let mut child_in = 0u64;
         let mut child_out = 0u64;

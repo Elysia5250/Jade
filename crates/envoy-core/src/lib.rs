@@ -23,6 +23,6 @@ pub use job::{now_ms, Jobs, KEEP_JOBS};
 pub use log::{read_from, JobLogs, LogWriter, MAX_LOG_BYTES};
 pub use sandbox::{
     backend_label, capabilities, is_dangerous_env_var, prepare_command, prepare_command_with_env,
-    probe_backend, SandboxBackend, SandboxCapabilities,
+    probe_backend, SandboxBackend, SandboxCapabilities, ScratchGuard,
 };
 pub use search::{glob_files, grep_files};

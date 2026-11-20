@@ -46,14 +46,14 @@ fn click_at(app: &mut App, col: u16, row: u16) {
 fn inspector_opens_by_default_and_remembers_dragged_width() {
     let dir = tmpdir();
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    app.connected = true;
+    app.jobs.connected = true;
 
     let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
     render_text(&mut terminal, &mut app);
 
-    assert!(app.show_sidebar);
-    let div_x = app.inspector.divider_x.expect("divider should render");
-    let default_overview_w = app.inspector.last_area.width;
+    assert!(app.ui.show_sidebar);
+    let div_x = app.ui.inspector.divider_x.expect("divider should render");
+    let default_overview_w = app.ui.inspector.last_area.width;
     assert!(default_overview_w >= 36);
 
     // Drag divider left to column 54 to widen Inspector.
@@ -62,14 +62,14 @@ fn inspector_opens_by_default_and_remembers_dragged_width() {
         div_x,
         5,
     ));
-    assert!(app.inspector.dragging_divider);
+    assert!(app.ui.inspector.dragging_divider);
     app.handle_mouse(mouse_event(MouseEventKind::Drag(MouseButton::Left), 54, 5));
     app.handle_mouse(mouse_event(MouseEventKind::Up(MouseButton::Left), 54, 5));
-    assert!(!app.inspector.dragging_divider);
-    assert!(app.inspector.dragged_ratio.is_some());
+    assert!(!app.ui.inspector.dragging_divider);
+    assert!(app.ui.inspector.dragged_ratio.is_some());
 
     render_text(&mut terminal, &mut app);
-    let dragged_w = app.inspector.last_area.width;
+    let dragged_w = app.ui.inspector.last_area.width;
     assert!(
         dragged_w > default_overview_w + 10,
         "dragged_w={dragged_w}, default={default_overview_w}"
@@ -78,23 +78,23 @@ fn inspector_opens_by_default_and_remembers_dragged_width() {
     // Switching tabs and toggling Ctrl+B off & on preserves dragged width.
     app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT));
     render_text(&mut terminal, &mut app);
-    assert_eq!(app.inspector.tab, InspectorTab::Diff);
-    assert_eq!(app.inspector.last_area.width, dragged_w);
+    assert_eq!(app.ui.inspector.tab, InspectorTab::Diff);
+    assert_eq!(app.ui.inspector.last_area.width, dragged_w);
 
     app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
     render_text(&mut terminal, &mut app);
-    assert!(!app.show_sidebar);
-    assert!(app.inspector.divider_x.is_none());
+    assert!(!app.ui.show_sidebar);
+    assert!(app.ui.inspector.divider_x.is_none());
 
     app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
     render_text(&mut terminal, &mut app);
-    assert!(app.show_sidebar);
-    assert_eq!(app.inspector.last_area.width, dragged_w);
+    assert!(app.ui.show_sidebar);
+    assert_eq!(app.ui.inspector.last_area.width, dragged_w);
 
     // /sidebar reset forgets dragged ratio and restores auto-width.
     app.run_slash("/sidebar reset");
     render_text(&mut terminal, &mut app);
-    assert!(app.inspector.dragged_ratio.is_none());
+    assert!(app.ui.inspector.dragged_ratio.is_none());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -112,7 +112,7 @@ fn clicking_underlined_file_link_opens_diff_or_file_preview() {
     std::fs::write(&readme, "# Title\nline two here\nline three\n").unwrap();
 
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    app.connected = true;
+    app.jobs.connected = true;
     app.apply_event(
         1,
         AgentEvent::FileChanged {
@@ -125,8 +125,8 @@ fn clicking_underlined_file_link_opens_diff_or_file_preview() {
             restorable_before: true,
         },
     );
-    let aid = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::Assistant {
+    let aid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Assistant {
         id: aid,
         text: "Updated src/lib.rs and documented in README.md:2.".into(),
         reasoning: String::new(),
@@ -141,22 +141,22 @@ fn clicking_underlined_file_link_opens_diff_or_file_preview() {
 
     // Click src/lib.rs link -> opens Diff tab showing Unified diff.
     let lib_hit = app
-        .hit_regions
+        .ui.hit_regions
         .iter()
         .find(|hr| matches!(&hr.target, HitTarget::OpenFile { path, .. } if path.ends_with("src/lib.rs")))
         .expect("underlined src/lib.rs hit region should exist")
         .rect;
     click_at(&mut app, lib_hit.x, lib_hit.y);
-    assert_eq!(app.inspector.tab, InspectorTab::Diff);
+    assert_eq!(app.ui.inspector.tab, InspectorTab::Diff);
 
     let out = render_text(&mut terminal, &mut app);
     assert!(out.contains("src/lib.rs"), "diff header missing:\n{out}");
     assert!(out.contains("new"), "diff content missing:\n{out}");
 
     // Toggle Unified <-> Split via 'v' key in Sidebar focus.
-    app.focus = Focus::Sidebar;
+    app.ui.focus = Focus::Sidebar;
     app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
-    assert_eq!(app.inspector.diff_layout, diff::DiffLayout::Split);
+    assert_eq!(app.ui.inspector.diff_layout, diff::DiffLayout::Split);
     let split_out = render_text(&mut terminal, &mut app);
     assert!(
         split_out.contains("|"),
@@ -165,14 +165,14 @@ fn clicking_underlined_file_link_opens_diff_or_file_preview() {
 
     // Click unmodified README.md:2 link -> opens File tab with line preview.
     let readme_hit = app
-        .hit_regions
+        .ui.hit_regions
         .iter()
         .find(|hr| matches!(&hr.target, HitTarget::OpenFile { path, line: Some(2) } if path.ends_with("README.md")))
         .expect("README.md:2 hit region should exist")
         .rect;
     click_at(&mut app, readme_hit.x, readme_hit.y);
-    assert_eq!(app.inspector.tab, InspectorTab::File);
-    assert_eq!(app.inspector.file_line, Some(2));
+    assert_eq!(app.ui.inspector.tab, InspectorTab::File);
+    assert_eq!(app.ui.inspector.file_line, Some(2));
     let file_out = render_text(&mut terminal, &mut app);
     assert!(
         file_out.contains("line two here"),
@@ -190,10 +190,10 @@ fn clicking_underlined_file_link_opens_diff_or_file_preview() {
 fn cursor_style_collapsed_explore_group_and_reasoning_expand_on_click() {
     let dir = tmpdir();
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    app.connected = true;
+    app.jobs.connected = true;
 
-    let aid = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::Assistant {
+    let aid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Assistant {
         id: aid,
         text: "Done inspecting.".into(),
         reasoning: "First inspect Cargo.toml\nThen check main.rs".into(),
@@ -208,8 +208,8 @@ fn cursor_style_collapsed_explore_group_and_reasoning_expand_on_click() {
         ("c2", "read", "read src/main.rs"),
         ("c3", "grep", "grep pattern"),
     ] {
-        let tid = app.session.alloc_id();
-        app.session.items.push(TranscriptItem::Tool {
+        let tid = app.session.current.alloc_id();
+        app.session.current.items.push(TranscriptItem::Tool {
             id: tid,
             call_id: cid.into(),
             name: name.into(),
@@ -246,7 +246,7 @@ fn cursor_style_collapsed_explore_group_and_reasoning_expand_on_click() {
 
     // Click the grouped explore summary line -> expands individual read/grep rows.
     let group_hit = app
-        .hit_regions
+        .ui.hit_regions
         .iter()
         .find(|hr| matches!(hr.target, HitTarget::ToggleToolGroup(_)))
         .expect("explore group hit region")
@@ -265,8 +265,8 @@ fn cursor_style_collapsed_explore_group_and_reasoning_expand_on_click() {
 async fn inline_ask_keeps_inspector_visible_and_accepts_click() {
     let dir = tmpdir();
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    app.connected = true;
-    app.pending_ask = Some(PendingAsk {
+    app.jobs.connected = true;
+    app.agent.pending_ask = Some(PendingAsk {
         id: 7,
         question: "Approve network?".into(),
         options: vec![
@@ -295,13 +295,13 @@ async fn inline_ask_keeps_inspector_visible_and_accepts_click() {
     );
 
     let opt_hit = app
-        .hit_regions
+        .ui.hit_regions
         .iter()
         .find(|hr| matches!(hr.target, HitTarget::SelectAskOption(0)))
         .expect("ask option 0 hit region")
         .rect;
     click_at(&mut app, opt_hit.x, opt_hit.y);
-    assert!(app.pending_ask.is_none());
+    assert!(app.agent.pending_ask.is_none());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -317,7 +317,7 @@ fn monitors_and_checkpoint_rewind_update_overview_status_and_transcript() {
     std::fs::write(&b_rs, "fn b() { 2 }\n").unwrap();
 
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    app.connected = true;
+    app.jobs.connected = true;
 
     // Simulate Turn 0 + Turn 1 transcript and FileChanged events
     app.apply_event(
@@ -395,7 +395,7 @@ fn monitors_and_checkpoint_rewind_update_overview_status_and_transcript() {
     assert!(rendered.contains("cargo watch"));
     assert!(rendered.contains("[stop]"));
     assert!(
-        app.hit_regions
+        app.ui.hit_regions
             .iter()
             .any(|hr| matches!(hr.target, HitTarget::StopMonitor(1))),
         "expected clickable StopMonitor(1) hit region"
@@ -416,10 +416,10 @@ fn monitors_and_checkpoint_rewind_update_overview_status_and_transcript() {
         },
     );
 
-    assert_eq!(app.session.changed_files.len(), 1);
-    assert!(app.session.changed_files[0].path.ends_with("a.rs"));
+    assert_eq!(app.session.current.changed_files.len(), 1);
+    assert!(app.session.current.changed_files[0].path.ends_with("a.rs"));
     let user_msgs: Vec<&str> = app
-        .session
+        .session.current
         .items
         .iter()
         .filter_map(|it| match it {
@@ -428,7 +428,7 @@ fn monitors_and_checkpoint_rewind_update_overview_status_and_transcript() {
         })
         .collect();
     assert_eq!(user_msgs, vec!["turn zero"]);
-    assert!(app.session.items.iter().any(|it| matches!(
+    assert!(app.session.current.items.iter().any(|it| matches!(
         it,
         TranscriptItem::Notice { text, .. } if text.contains("rewound to #2")
     )));

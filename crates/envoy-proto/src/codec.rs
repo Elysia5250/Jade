@@ -99,15 +99,16 @@ fn decode_body<T: DeserializeOwned>(body: &[u8]) -> Result<T> {
     Ok(msg)
 }
 
-/// Fill `len` bytes after the header has been accepted. The buffer is sized
-/// only once `len` is known to be at most [`MAX_FRAME_BYTES`].
+/// Fill `len` bytes incrementally up to the verified [`MAX_FRAME_BYTES`] ceiling.
 async fn read_counted<R: AsyncRead + Unpin>(r: &mut R, len: usize) -> Result<Vec<u8>> {
-    let mut out = vec![0u8; len];
-    let mut off = 0;
-    while off < len {
-        let n = (len - off).min(READ_CHUNK);
-        r.read_exact(&mut out[off..off + n]).await?;
-        off += n;
+    let mut out = Vec::with_capacity(len.min(READ_CHUNK));
+    let mut chunk = vec![0u8; READ_CHUNK];
+    let mut remaining = len;
+    while remaining > 0 {
+        let want = remaining.min(chunk.len());
+        r.read_exact(&mut chunk[..want]).await?;
+        out.extend_from_slice(&chunk[..want]);
+        remaining -= want;
     }
     Ok(out)
 }

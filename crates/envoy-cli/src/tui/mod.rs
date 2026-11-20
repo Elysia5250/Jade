@@ -12,6 +12,7 @@
 //!   Plus/Pro PKCE & Device Flow, Anthropic Claude OAuth, GitHub Copilot
 //!   Device Flow), and custom OpenAI/Anthropic-compatible endpoints.
 
+mod app_state;
 mod commands;
 mod decrypt;
 mod diff;
@@ -29,9 +30,11 @@ mod terminal;
 mod text;
 mod theme;
 mod types;
+mod ui_prefs;
 mod view;
 
-pub(crate) use commands::{SlashCommand, SLASH_COMMANDS};
+pub(crate) use app_state::{AgentState, JobState, LoginState, SessionState, UiState};
+pub(crate) use commands::{lookup_slash, SlashCmdKind, SlashCommand, SLASH_COMMANDS};
 pub(crate) use decrypt::*;
 pub(crate) use markdown::*;
 pub(crate) use modals::*;
@@ -47,13 +50,13 @@ pub(crate) use envoy_agent::agent::{AgentEvent, AskOption};
 #[allow(unused_imports)] // re-exported for the state and view modules
 pub(crate) use envoy_agent::auth::{
     anthropic_authorize_url, available_models, bind_openai_callback_listener, effective_providers,
-    exchange_anthropic_code, exchange_openai_code, extract_query_param, generate_pkce,
-    is_retired_model, load_prefs, open_browser, poll_github_copilot_device,
-    poll_openai_device_auth, random_state, record_provider_login, remove_provider,
-    resolve_active_provider, save_prefs, set_active_model, slugify_provider_id,
-    start_github_copilot_device, start_openai_device_auth, wait_openai_browser_callback,
-    AuthMethodKind, AvailableModel, Credential, ModelRef, ProviderProtocol, StoredProvider,
-    BUILTIN_PROVIDERS,
+    exchange_anthropic_code_default, exchange_openai_code_default, extract_query_param,
+    generate_pkce, is_retired_model, open_browser, poll_github_copilot_device_default,
+    poll_openai_device_auth_default, random_state, record_provider_login, remove_provider,
+    resolve_active_provider, set_active_model, slugify_provider_id,
+    start_github_copilot_device_default, start_openai_device_auth_default,
+    wait_openai_browser_callback, AuthMethodKind, AvailableModel, Credential, ModelRef,
+    ProviderProtocol, StoredProvider, BUILTIN_PROVIDERS,
 };
 pub(crate) use envoy_agent::daemon;
 pub(crate) use envoy_agent::permissions::{
@@ -65,7 +68,7 @@ pub(crate) use envoy_agent::session::{
     recent_workspaces, save_session, CardStatus, ChatMessage, ChatRole, Session, TranscriptItem,
 };
 pub(crate) use envoy_proto::{
-    Job, JobId, JobState, LogRecord, SubmitRequest, TaskSpec, DEFAULT_GROUP,
+    Job, JobId, JobState as ProtoJobState, LogRecord, SubmitRequest, TaskSpec, DEFAULT_GROUP,
 };
 pub(crate) use envoy_service::{
     default_control_socket, dialer_for, AgentDialer, ConduitClient, Remote, Status,
@@ -110,12 +113,10 @@ fn model_list_needs_fetch(data_dir: &std::path::Path) -> bool {
     let Some((prov, model)) = resolve_active_provider(data_dir) else {
         return false;
     };
+    let all = prov.all_models();
     model.model_id.is_empty()
-        || prov.custom_models.is_empty()
-        || prov
-            .custom_models
-            .iter()
-            .any(|id| is_retired_model(&prov.id, id))
+        || all.is_empty()
+        || all.iter().any(|id| is_retired_model(&prov.id, id))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -163,8 +164,8 @@ pub async fn run(
 
     // Enter alternate screen immediately before daemon/conduit startup so frame 1 is instant.
     let mut tui = Tui::enter()?;
-    app.agent_retry_at = Instant::now() + Duration::from_millis(800);
-    app.last_refresh = Instant::now();
+    app.agent.retry_at = Instant::now() + Duration::from_millis(800);
+    app.jobs.last_refresh = Instant::now();
     {
         let app_ref = &mut app;
         let _ = execute!(stdout(), BeginSynchronizedUpdate);
@@ -183,7 +184,11 @@ pub async fn run(
                     let _ = boot_tx.send(UiNotice::DaemonReady);
                 }
                 Err(e) => {
-                    let _ = boot_tx.send(UiNotice::Toast(format!("daemon: {e:#}"), true));
+                    let _ = boot_tx.send(UiNotice::Toast {
+                        session_id: None,
+                        msg: format!("daemon: {e:#}"),
+                        err: true,
+                    });
                 }
             }
         } else {
@@ -302,15 +307,40 @@ pub(crate) enum UiNotice {
     ConduitWatch(watch::Receiver<Option<Status>>),
     /// A send failed because the daemon went away; put the items back in the
     /// outbox so the next attach can deliver them.
-    Requeue(Vec<(String, SendMode)>),
+    Requeue {
+        session_id: String,
+        items: Vec<(String, SendMode)>,
+    },
     /// The daemon returned a recalled follow-up (or had none).
-    Recalled(Option<String>),
+    Recalled {
+        session_id: String,
+        text: Option<String>,
+    },
     /// Checkpoints fetched from the daemon for `/rewind` selection.
-    Checkpoints(Vec<CheckpointSummary>),
+    Checkpoints {
+        session_id: String,
+        list: Vec<CheckpointSummary>,
+    },
     /// Status toast emitted from an async daemon RPC.
-    Toast(String, bool),
+    Toast {
+        session_id: Option<String>,
+        msg: String,
+        err: bool,
+    },
     /// Transcript notice emitted from an async command.
-    Notice(String, bool),
+    Notice {
+        session_id: String,
+        msg: String,
+        err: bool,
+    },
+}
+
+pub(crate) enum DaemonCmd {
+    Send {
+        session_id: String,
+        items: Vec<(String, SendMode)>,
+    },
+    Tell(AgentReq),
 }
 
 pub(crate) struct PendingAsk {
@@ -333,89 +363,14 @@ pub(crate) struct SnapshotAccum {
 pub(crate) struct App {
     data_dir: PathBuf,
     conduit: Option<PathBuf>,
-    target: String,
-    status: Option<Status>,
-    watch: Option<watch::Receiver<Option<Status>>>,
-    jobs: Vec<Job>,
-    job_selected: usize,
-
-    session: Session,
-    focus: Focus,
-    mode: InputMode,
-    perm_mode: PermissionMode,
-    show_sidebar: bool,
-    follow: bool,
-    transcript_scroll: u16,
-    transcript_height: u16,
-    transcript_max_scroll: u16,
-    selected_card: Option<usize>,
-
-    input: String,
-    input_cursor: usize,
-    history: Vec<String>,
-    history_pos: Option<usize>,
-    menu_selected: usize,
-    at_dismissed_at: Option<usize>,
-
-    modal: Option<Modal>,
-    theme: usize,
-    leader_at: Option<Instant>,
-    toast: Option<(String, bool, Instant)>,
-    connected: bool,
-    interval: Duration,
-    last_refresh: Instant,
-
-    // Active agent turn
-    agent_running: bool,
-    agent_stream: Option<mpsc::UnboundedReceiver<AgentResp>>,
-    agent_retry_at: Instant,
-    agent_offline: bool,
-    /// True after the daemon has sent the attach snapshot. Until then sends
-    /// are held in the outbox so they cannot race the session creation.
-    agent_ready: bool,
-    /// Last daemon incarnation observed on `SnapshotStart`. `0` means none.
-    daemon_incarnation: u64,
-    snapshot: Option<SnapshotAccum>,
-    /// Set while applying a replay that included `SessionReset`, so token
-    /// totals already stored on the session are not added a second time.
-    skip_replay_tokens: bool,
-    pending_ask: Option<PendingAsk>,
-    queued: VecDeque<String>,
-    outbox: VecDeque<(String, SendMode)>,
     notice_tx: mpsc::UnboundedSender<UiNotice>,
     notice_rx: mpsc::UnboundedReceiver<UiNotice>,
-    active_assistant_id: Option<u64>,
-    active_tool_items: HashMap<String, u64>,
-    active_monitors: Vec<MonitorInfo>,
-
-    // Active shell cards being tailed
-    shell_watches: Vec<ShellWatch>,
-
-    // Active /login background flow
-    login_rx: Option<mpsc::UnboundedReceiver<LoginEvent>>,
-    login_task: Option<JoinHandle<()>>,
-    login_cancel: Option<oneshot::Sender<()>>,
-
-    // Remote /models fetch
-    models_rx: Option<oneshot::Receiver<(String, Vec<envoy_agent::agent::context::ListedModel>)>>,
-    welcome: Option<Welcome>,
-
-    // Universal right inspector, clickable links, and mouse selection
-    inspector: InspectorState,
-    workspace_index: links::WorkspaceIndex,
-    hit_regions: Vec<HitRegion>,
-    transcript_area: Rect,
-    expanded_explore_groups: HashSet<u64>,
-    mouse_capture: bool,
-    selection: Option<MouseSelection>,
-    drag_start: Option<GridPos>,
-    screen_lines: Vec<Vec<String>>,
-    transcript_cache: HashMap<(u64, usize, usize), (usize, Vec<LinkedLine>)>,
     inputs: inputs::Inputs,
-    /// While set, [`App::persist_session`] records one pending write.
-    persist_hold: std::cell::Cell<bool>,
-    persist_due: std::cell::Cell<bool>,
-    last_shell_poll: Instant,
+    agent: AgentState,
+    session: SessionState,
+    jobs: JobState,
+    login: LoginState,
+    ui: UiState,
 }
 
 #[cfg(test)]
@@ -426,6 +381,8 @@ mod tests_delegate;
 mod tests_effort;
 #[cfg(test)]
 mod tests_inspector;
+#[cfg(test)]
+mod tests_phase6;
 #[cfg(test)]
 mod tests_ux;
 #[cfg(test)]

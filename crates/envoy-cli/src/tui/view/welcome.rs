@@ -2,25 +2,19 @@
 use crate::tui::*;
 
 pub(super) fn draw_workspace_picker(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
-    let (naming, path_mode, folder_mode, skills_mode, memory_mode) = {
-        let Some(welcome) = app.welcome.as_ref() else {
-            return;
-        };
-        (
-            welcome.naming,
-            welcome.path_mode,
-            welcome.folder_mode,
-            welcome.skills_mode,
-            welcome.memory_mode,
-        )
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let Some(mode) = app.ui.welcome.as_ref().map(|w| w.mode) else {
+        return;
     };
-    if naming {
+    if mode.is_naming() {
         super::welcome_panels::draw_naming(frame, app, theme, area);
-    } else if path_mode || folder_mode {
+    } else if mode.is_path_input() {
         super::welcome_panels::draw_path(frame, app, theme, area);
-    } else if skills_mode {
+    } else if mode == WelcomeMode::Skills {
         super::welcome_panels::draw_skills(frame, app, theme, area);
-    } else if memory_mode {
+    } else if mode == WelcomeMode::Memory {
         super::welcome_panels::draw_memory(frame, app, theme, area);
     } else {
         draw_home(frame, app, theme, area);
@@ -78,7 +72,7 @@ pub(super) fn push_dim(lines: &mut Vec<Line<'static>>, theme: &Theme, text: &str
 }
 
 fn draw_home(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let Some(welcome) = app.welcome.as_ref() else {
+    let Some(welcome) = app.ui.welcome.as_ref() else {
         return;
     };
     let height = (welcome.rows.len() as u16).saturating_add(14);
@@ -220,7 +214,7 @@ pub(super) fn draw_welcome(frame: &mut Frame, app: &App, theme: &Theme, area: Re
                 "{} mcp - {} skills - perm:{}",
                 app.inputs.catalog.mcp.len(),
                 app.inputs.catalog.skills.len(),
-                app.perm_mode.label()
+                app.session.perm_mode.label()
             ),
             Style::default().fg(theme.text),
         ),

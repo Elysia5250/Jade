@@ -7,6 +7,7 @@
 
 pub mod client;
 pub mod conduit;
+mod local_direct;
 mod policy;
 pub mod remote;
 pub mod server;

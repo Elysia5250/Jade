@@ -114,6 +114,8 @@ impl Live {
         let monitors = MonitorHub::new(
             id.to_string(),
             data_dir.to_path_buf(),
+            runtime.conduit.clone(),
+            runtime.local_server.clone(),
             Arc::downgrade(runtime),
         );
         let hooks = new_hook_engine(data_dir, &cwd);
@@ -259,7 +261,7 @@ impl Live {
     }
 }
 
-fn slim_event(event: &AgentEvent) -> AgentEvent {
+pub(crate) fn slim_event(event: &AgentEvent) -> AgentEvent {
     match event {
         AgentEvent::TurnDone {
             input_tokens,

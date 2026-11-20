@@ -429,7 +429,7 @@ async fn set_cwd_target_and_clear_drive_the_next_turn() {
 
 #[test]
 fn agent_protocol_version_matches_the_job_socket() {
-    assert_eq!(AGENT_PROTOCOL_VERSION, 4);
+    assert_eq!(AGENT_PROTOCOL_VERSION, 5);
     assert_eq!(
         AGENT_PROTOCOL_VERSION,
         u32::from(envoy_proto::AGENT_VERSION)

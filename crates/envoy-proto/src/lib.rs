@@ -23,9 +23,9 @@ pub const AGENT_SERVICE_ID: u16 = 16;
 
 /// Protocol generation. Bumped only for incompatible changes.
 /// The framed header uses the same number as [`WIRE_VERSION`].
-pub const AGENT_VERSION: u8 = 4;
+pub const AGENT_VERSION: u8 = 5;
 /// Fixed header version. Checked before the postcard body is decoded.
-pub const WIRE_VERSION: u16 = 4;
+pub const WIRE_VERSION: u16 = 5;
 /// Magic that opens every framed payload (`ENVY`).
 pub const WIRE_MAGIC: [u8; 4] = *b"ENVY";
 /// `WIRE_MAGIC` plus a little-endian [`WIRE_VERSION`].

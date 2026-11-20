@@ -174,6 +174,7 @@ impl HookEngine {
 
 fn record_hook_audit(data_dir: &Path, ctx: &HookContext, duration_ms: u64) {
     let path = data_dir.join("agent").join("hook_audit.jsonl");
+    envoy_core::audit::rotate_if_oversized(&path, envoy_core::audit::LOG_ROTATE_BYTES);
     if let Some(parent) = path.parent() {
         let _ = envoy_core::fs::ensure_private_dir(parent);
     }

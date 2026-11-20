@@ -145,6 +145,7 @@ async fn session_start_and_user_prompt_submit_thread_hook_context_and_block() {
             key: "sk-test".into(),
         },
         custom_models: vec!["m1".into()],
+        fetched_models: Vec::new(),
         model_routes: BTreeMap::new(),
         updated_ms: 0,
     };
@@ -156,6 +157,7 @@ async fn session_start_and_user_prompt_submit_thread_hook_context_and_block() {
             data_dir: data.clone(),
             conduit: None,
             local_socket: None,
+            local_server: None,
             target: "local".into(),
             cwd: ws.clone(),
             provider: provider.clone(),

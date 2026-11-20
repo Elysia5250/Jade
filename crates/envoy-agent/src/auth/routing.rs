@@ -88,7 +88,10 @@ pub fn resolve_model_target(
             model_id,
         } => {
             if !is_retired_model(&parent_provider.id, &model_id)
-                && parent_provider.custom_models.iter().any(|m| m == &model_id)
+                && parent_provider
+                    .all_models()
+                    .iter()
+                    .any(|m| m == &model_id)
             {
                 return (
                     parent_provider.clone(),
@@ -100,7 +103,7 @@ pub fn resolve_model_target(
             }
             for prov in providers.values() {
                 if !is_retired_model(&prov.id, &model_id)
-                    && prov.custom_models.iter().any(|m| m == &model_id)
+                    && prov.all_models().iter().any(|m| m == &model_id)
                 {
                     return (
                         prov.clone(),
@@ -113,7 +116,7 @@ pub fn resolve_model_target(
             }
             let looks_like_provider_prefix = model_id.contains('/')
                 && parent_provider.id != "openrouter"
-                && !parent_provider.custom_models.is_empty();
+                && !parent_provider.all_models().is_empty();
             if !looks_like_provider_prefix
                 && !model_id.is_empty()
                 && !is_retired_model(&parent_provider.id, &model_id)
@@ -160,11 +163,11 @@ fn pick_by_tier(
     let mut best: Option<(i32, StoredProvider, String)> = None;
 
     let mut consider = |prov: &StoredProvider, same_provider: bool| {
-        for model_id in &prov.custom_models {
-            if is_retired_model(&prov.id, model_id) {
+        for model_id in prov.all_models() {
+            if is_retired_model(&prov.id, &model_id) {
                 continue;
             }
-            let base = tier_score(model_id, tier);
+            let base = tier_score(&model_id, tier);
             if base <= 0 {
                 continue;
             }
@@ -176,7 +179,7 @@ fn pick_by_tier(
             let score = base + if same_provider { 25 } else { 0 } + active_bonus;
             let replace = best.as_ref().map(|(s, _, _)| score > *s).unwrap_or(true);
             if replace {
-                best = Some((score, prov.clone(), model_id.clone()));
+                best = Some((score, prov.clone(), model_id));
             }
         }
     };
@@ -198,85 +201,19 @@ fn pick_by_tier(
 }
 
 fn tier_score(model_id: &str, tier: Tier) -> i32 {
-    let id = model_id.to_ascii_lowercase();
-    match tier {
-        Tier::Fast => {
-            if id.contains("haiku") {
-                100
-            } else if id.contains("flash") {
-                95
-            } else if id.contains("nano") {
-                90
-            } else if id.contains("mini") {
-                88
-            } else if id.contains("lite") || id.contains("fast") || id.contains("small") {
-                80
-            } else {
-                0
-            }
-        }
-        Tier::Flagship => {
-            if id.contains("mythos") || id.contains("fable") || id.contains("opus") {
-                100
-            } else if id.contains("gpt-6") || id.contains("gpt-5.6") || id.contains("gpt-5.5") {
-                96
-            } else if id.contains("gpt-5") && !id.contains("mini") && !id.contains("nano") {
-                90
-            } else if id.contains("gemini-4") || id.contains("pro") {
-                88
-            } else if id.contains("sonnet") {
-                82
-            } else {
-                0
-            }
-        }
-    }
+    let rt = match tier {
+        Tier::Fast => crate::model_registry::RoutingTier::Fast,
+        Tier::Flagship => crate::model_registry::RoutingTier::Flagship,
+    };
+    crate::model_registry::tier_score(model_id, rt)
 }
 
 pub(crate) fn env_base_url_var(provider_id: &str) -> Option<&'static str> {
-    match provider_id {
-        "openai" => Some("OPENAI_BASE_URL"),
-        "anthropic" => Some("ANTHROPIC_BASE_URL"),
-        "deepseek" => Some("DEEPSEEK_BASE_URL"),
-        "google" => Some("GEMINI_BASE_URL"),
-        "xai" => Some("XAI_BASE_URL"),
-        "qwen" => Some("DASHSCOPE_BASE_URL"),
-        "zhipu" => Some("ZHIPU_BASE_URL"),
-        "moonshot" => Some("MOONSHOT_BASE_URL"),
-        "minimax" => Some("MINIMAX_BASE_URL"),
-        "volcengine" => Some("ARK_BASE_URL"),
-        "mistral" => Some("MISTRAL_BASE_URL"),
-        "groq" => Some("GROQ_BASE_URL"),
-        "openrouter" => Some("OPENROUTER_BASE_URL"),
-        "siliconflow" => Some("SILICONFLOW_BASE_URL"),
-        "aihubmix" => Some("AIHUBMIX_BASE_URL"),
-        "ai302" => Some("AI302_BASE_URL"),
-        "opencode-zen" => Some("OPENCODE_BASE_URL"),
-        "opencode-go" => Some("OPENCODE_GO_BASE_URL"),
-        _ => None,
-    }
+    crate::model_registry::env_base_url_var(provider_id)
 }
 
 pub fn default_env_model(provider_id: &str) -> &'static str {
-    match provider_id {
-        "openai" => "gpt-5.4",
-        "anthropic" => "claude-sonnet-4-5",
-        "deepseek" => "deepseek-v3.2",
-        "google" => "gemini-2.5-pro",
-        "xai" => "grok-4",
-        "qwen" => "qwen-plus",
-        "zhipu" => "glm-4-plus",
-        "moonshot" => "moonshot-v1-auto",
-        "minimax" => "MiniMax-Text-01",
-        "volcengine" => "doubao-seed-1-6",
-        "mistral" => "mistral-large-latest",
-        "groq" => "llama-3.3-70b-versatile",
-        "openrouter" => "anthropic/claude-sonnet-4.5",
-        "siliconflow" => "deepseek-ai/DeepSeek-V3",
-        "aihubmix" | "ai302" => "gpt-4o",
-        "opencode-zen" | "opencode-go" => "claude-sonnet-4-5",
-        _ => "",
-    }
+    crate::model_registry::default_env_model(provider_id)
 }
 
 fn non_empty_env(env: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String> {
@@ -322,6 +259,7 @@ pub(crate) fn merge_env_providers(
                 base_url,
                 credential: Credential::ApiKey { key: val },
                 custom_models: Vec::new(),
+                fetched_models: Vec::new(),
                 model_routes: BTreeMap::new(),
                 updated_ms: 0,
             },
@@ -343,6 +281,7 @@ pub(crate) fn merge_env_providers(
                     base_url,
                     credential: Credential::ApiKey { key },
                     custom_models: Vec::new(),
+                    fetched_models: Vec::new(),
                     model_routes: BTreeMap::new(),
                     updated_ms: 0,
                 },
@@ -355,42 +294,7 @@ fn infer_provider_id_from_model<'a>(
     model_id: &str,
     providers: &'a BTreeMap<String, StoredProvider>,
 ) -> Option<&'a str> {
-    let lower = model_id.to_ascii_lowercase();
-    if lower.starts_with("claude") {
-        if providers.contains_key("anthropic") {
-            Some("anthropic")
-        } else if providers.contains_key("openrouter") {
-            Some("openrouter")
-        } else {
-            None
-        }
-    } else if lower.starts_with("gpt-")
-        || lower.starts_with("o1")
-        || lower.starts_with("o3")
-        || lower.starts_with("o4")
-    {
-        providers.contains_key("openai").then_some("openai")
-    } else if lower.starts_with("gemini") {
-        providers.contains_key("google").then_some("google")
-    } else if lower.starts_with("grok") {
-        providers.contains_key("xai").then_some("xai")
-    } else if lower.starts_with("qwen") {
-        providers.contains_key("qwen").then_some("qwen")
-    } else if lower.starts_with("glm") {
-        providers.contains_key("zhipu").then_some("zhipu")
-    } else if lower.starts_with("kimi") || lower.starts_with("moonshot") {
-        providers.contains_key("moonshot").then_some("moonshot")
-    } else if lower.starts_with("minimax") {
-        providers.contains_key("minimax").then_some("minimax")
-    } else if lower.starts_with("doubao") {
-        providers.contains_key("volcengine").then_some("volcengine")
-    } else if lower.starts_with("mistral") {
-        providers.contains_key("mistral").then_some("mistral")
-    } else if lower.starts_with("deepseek") {
-        providers.contains_key("deepseek").then_some("deepseek")
-    } else {
-        None
-    }
+    crate::model_registry::infer_provider_id_from_model(model_id, providers)
 }
 
 /// Resolve the active provider and model, honoring CLI `--model`, `ENVOY_MODEL`,
@@ -484,7 +388,7 @@ pub(crate) fn resolve_provider_with_env(
                 }
             } else if let Some(p) = providers
                 .values()
-                .find(|p| p.custom_models.iter().any(|m| m == &raw))
+                .find(|p| p.all_models().iter().any(|m| m == &raw))
             {
                 (
                     p.clone(),
@@ -556,6 +460,7 @@ mod tests {
                 key: "sk-test".into(),
             },
             custom_models: models.into_iter().map(String::from).collect(),
+            fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
             updated_ms: now_ms(),
         }

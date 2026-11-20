@@ -15,7 +15,7 @@ pub use budget::{resolve_budget, set_budget_tier, BudgetPlan, CompactionTier};
 pub use catalog::{
     record_model_cap, refresh_models_dev_if_stale, store_listed_models, ListedModel,
 };
-pub use fetch::fetch_provider_models;
+pub use fetch::{fetch_provider_models, refresh_active_provider_models};
 pub use prune::bound_tool_output;
 #[cfg(test)]
 pub(crate) use mask::mask_old_observations;
@@ -23,6 +23,7 @@ pub use summary::{assemble_compacted_messages, split_head_tail, summarize_messag
 pub use tokens::{
     context_used, estimate_turn_raw_tokens, estimate_turn_tokens, tools_overhead, TokenCalibration,
 };
+pub(crate) use tokens::tools_overhead_for;
 
 use crate::agent::events::AgentEvent;
 use crate::auth::StoredProvider;
@@ -44,6 +45,10 @@ pub struct CompactionOutcome {
     pub after_tokens: u64,
     pub summary: String,
     pub pruned_only: bool,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_create_tokens: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -258,7 +263,7 @@ async fn prepare_context_body(
         });
     }
 
-    let summary_text = summarize_messages(
+    let (summary_text, usage) = summary::summarize_messages_with_usage(
         http,
         data_dir,
         provider,
@@ -281,6 +286,10 @@ async fn prepare_context_body(
         after_tokens,
         summary: summary_text,
         pruned_only: false,
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_read_tokens: usage.cache_read_tokens,
+        cache_create_tokens: usage.cache_create_tokens,
     }))
 }
 
@@ -298,11 +307,16 @@ fn mask_outcome(
             "Masked {pruned} older tool outputs (~{before_tokens} -> ~{after_tokens} tokens)."
         ),
         pruned_only: true,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_create_tokens: 0,
     }
 }
 
 /// While a turn sits between the prune and compact thresholds, mask once.
 /// Later steps in that band must not rewrite the cached prefix.
+#[cfg(test)]
 pub(crate) fn skip_inplace_mask(latched: bool, before_tokens: u64, plan: &BudgetPlan) -> bool {
     latched && before_tokens > plan.prune_at && before_tokens <= plan.compact_at
 }

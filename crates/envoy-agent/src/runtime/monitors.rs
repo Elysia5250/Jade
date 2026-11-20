@@ -5,7 +5,7 @@ use crate::agent::{MonitorBroker, MonitorInfo, MonitorStartSpec};
 use crate::session::strip_ansi;
 use anyhow::{bail, Result};
 use envoy_proto::LogRecord;
-use envoy_service::{dialer_for, AgentDialer, Remote, UnixDialer};
+use envoy_service::AgentServer;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
@@ -25,7 +25,9 @@ struct MonitorEntry {
     info: MonitorInfo,
     target: String,
     data_dir: PathBuf,
+    conduit: Option<PathBuf>,
     local_socket: Option<PathBuf>,
+    local_server: Option<AgentServer>,
     cancel_tx: watch::Sender<bool>,
     task: Option<JoinHandle<()>>,
 }
@@ -42,17 +44,14 @@ impl Drop for MonitorEntry {
         let target = self.target.clone();
         let job_id = self.info.job_id;
         let data_dir = self.data_dir.clone();
+        let conduit = self.conduit.clone();
         let local_socket = self.local_socket.clone();
+        let local_server = self.local_server.clone();
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
         handle.spawn(async move {
-            let dialer: Box<dyn AgentDialer> =
-                match (local_socket, target == "local" || target.is_empty()) {
-                    (Some(sock), true) => Box::new(UnixDialer::new(sock)),
-                    _ => dialer_for(&data_dir, &target, None),
-                };
-            let remote: Remote<Box<dyn AgentDialer>> = Remote::new(dialer);
+            let remote = super::remote_for(&data_dir, &target, conduit, local_socket, local_server);
             let _ = remote.cancel(&target, job_id).await;
         });
     }
@@ -68,17 +67,27 @@ struct HubInner {
 pub struct MonitorHub {
     session_id: String,
     data_dir: PathBuf,
+    conduit: Option<PathBuf>,
     local_socket: Mutex<Option<PathBuf>>,
+    local_server: Option<AgentServer>,
     runtime: Weak<Runtime>,
     inner: Mutex<HubInner>,
 }
 
 impl MonitorHub {
-    pub(crate) fn new(session_id: String, data_dir: PathBuf, runtime: Weak<Runtime>) -> Arc<Self> {
+    pub(crate) fn new(
+        session_id: String,
+        data_dir: PathBuf,
+        conduit: Option<PathBuf>,
+        local_server: Option<AgentServer>,
+        runtime: Weak<Runtime>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             session_id,
             data_dir,
+            conduit,
             local_socket: Mutex::new(None),
+            local_server,
             runtime,
             inner: Mutex::new(HubInner {
                 next_id: 1,
@@ -106,7 +115,9 @@ impl MonitorHub {
                 info,
                 target: "local".into(),
                 data_dir: self.data_dir.clone(),
+                conduit: None,
                 local_socket: None,
+                local_server: None,
                 cancel_tx,
                 task: None,
             },
@@ -189,7 +200,9 @@ impl MonitorBroker for MonitorHub {
                     info: info.clone(),
                     target: spec.target.clone(),
                     data_dir: self.data_dir.clone(),
+                    conduit: self.conduit.clone(),
                     local_socket: self.local_socket.lock().unwrap().clone(),
+                    local_server: self.local_server.clone(),
                     cancel_tx,
                     task: None,
                 },
@@ -212,16 +225,19 @@ impl MonitorBroker for MonitorHub {
 
         let weak_rt = self.runtime.clone();
         let session_id = self.session_id.clone();
-        let data_dir = self.data_dir.clone();
-        let local_socket = self.local_socket.lock().unwrap().clone();
+        let poll_target = MonitorPollTarget {
+            data_dir: self.data_dir.clone(),
+            conduit: self.conduit.clone(),
+            local_socket: self.local_socket.lock().unwrap().clone(),
+            local_server: self.local_server.clone(),
+        };
         let monitor_id = info.id;
         let info_for_task = info.clone();
         let handle = tokio::spawn(async move {
             poll_monitor_loop(
                 weak_rt,
                 session_id,
-                data_dir,
-                local_socket,
+                poll_target,
                 spec,
                 info_for_task,
                 cancel_rx,
@@ -281,12 +297,13 @@ impl MonitorBroker for MonitorHub {
             }
             if stopped_info.owns_job {
                 let local_socket = self.local_socket.lock().unwrap().clone();
-                let dialer: Box<dyn AgentDialer> =
-                    match (local_socket, target == "local" || target.is_empty()) {
-                        (Some(sock), true) => Box::new(UnixDialer::new(sock)),
-                        _ => dialer_for(&self.data_dir, &target, None),
-                    };
-                let remote: Remote<Box<dyn AgentDialer>> = Remote::new(dialer);
+                let remote = super::remote_for(
+                    &self.data_dir,
+                    &target,
+                    self.conduit.clone(),
+                    local_socket,
+                    self.local_server.clone(),
+                );
                 let _ = remote.cancel(&target, stopped_info.job_id).await;
             }
             if let Some(rt) = self.runtime.upgrade() {
@@ -297,23 +314,28 @@ impl MonitorBroker for MonitorHub {
     }
 }
 
+struct MonitorPollTarget {
+    data_dir: PathBuf,
+    conduit: Option<PathBuf>,
+    local_socket: Option<PathBuf>,
+    local_server: Option<AgentServer>,
+}
+
 async fn poll_monitor_loop(
     weak_rt: Weak<Runtime>,
     session_id: String,
-    data_dir: PathBuf,
-    local_socket: Option<PathBuf>,
+    poll_target: MonitorPollTarget,
     spec: MonitorStartSpec,
     initial_info: MonitorInfo,
     mut cancel_rx: watch::Receiver<bool>,
 ) {
-    let dialer: Box<dyn AgentDialer> = match (
-        local_socket,
-        spec.target == "local" || spec.target.is_empty(),
-    ) {
-        (Some(sock), true) => Box::new(UnixDialer::new(sock)),
-        _ => dialer_for(&data_dir, &spec.target, None),
-    };
-    let remote: Remote<Box<dyn AgentDialer>> = Remote::new(dialer);
+    let remote = super::remote_for(
+        &poll_target.data_dir,
+        &spec.target,
+        poll_target.conduit,
+        poll_target.local_socket,
+        poll_target.local_server,
+    );
     let debounce = Duration::from_millis(spec.debounce_ms.clamp(100, 30_000));
     let mut cursor = 0u64;
     let mut decoder = LineAccumulator::default();

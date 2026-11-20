@@ -101,3 +101,18 @@ fn ask_subcommand_and_new_flag_parse() {
         other => panic!("expected Ask, got {other:?}"),
     }
 }
+
+#[test]
+fn env_model_does_not_block_tui_while_cli_model_flag_does() {
+    let matches = Cli::command()
+        .try_get_matches_from(["envoy", "--model", "gpt-5"])
+        .expect("parse");
+    let cli = Cli::from_arg_matches(&matches).expect("from matches");
+    assert_eq!(tui_unsupported_flag(&cli.headless, &matches), Some("--model"));
+
+    let env_only = headless::HeadlessArgs {
+        model: Some("gpt-5".into()),
+        ..Default::default()
+    };
+    assert_eq!(tui_unsupported_flag_with(&env_only, false), None);
+}

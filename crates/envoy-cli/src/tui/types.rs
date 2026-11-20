@@ -74,8 +74,8 @@ pub(crate) struct InspectorState {
     /// User-dragged right pane width ratio (`right_w / total_w`), remembered across the session.
     pub(crate) dragged_ratio: Option<f32>,
     pub(crate) force_open: bool,
-    pub(crate) scroll: u16,
-    pub(crate) max_scroll: u16,
+    pub(crate) scroll: usize,
+    pub(crate) max_scroll: usize,
     pub(crate) height: u16,
     pub(crate) diff_layout: DiffLayout,
     pub(crate) selected_diff: usize,
@@ -157,18 +157,40 @@ impl LinkedLine {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum WelcomeMode {
+    #[default]
+    Home,
+    OpenPath,
+    NewFolderPickParent,
+    NewFolderName,
+    Skills,
+    SkillsNew,
+    Memory,
+    MemoryNew,
+}
+
+impl WelcomeMode {
+    pub(crate) fn is_naming(self) -> bool {
+        matches!(
+            self,
+            Self::NewFolderName | Self::SkillsNew | Self::MemoryNew
+        )
+    }
+
+    pub(crate) fn is_path_input(self) -> bool {
+        matches!(self, Self::OpenPath | Self::NewFolderPickParent)
+    }
+}
+
 /// Startup workspace picker. Shown before the console attaches to a directory.
 pub(crate) struct Welcome {
     pub(crate) rows: Vec<WelcomeRow>,
     pub(crate) selected: usize,
-    pub(crate) path_mode: bool,
+    pub(crate) mode: WelcomeMode,
     pub(crate) path: String,
     pub(crate) path_selected: usize,
     pub(crate) error: Option<String>,
-    pub(crate) folder_mode: bool,
-    pub(crate) skills_mode: bool,
-    pub(crate) memory_mode: bool,
-    pub(crate) naming: bool,
     pub(crate) folder_parent: Option<PathBuf>,
     pub(crate) draft: String,
     pub(crate) list_selected: usize,

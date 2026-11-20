@@ -1,24 +1,21 @@
 //! Interactive `envoy login`, `envoy auth list`, and `envoy auth logout`.
+
 use anyhow::{bail, Result};
+use envoy_agent::auth::{
+    anthropic_authorize_url, auth_path, bind_openai_callback_listener, effective_providers,
+    exchange_anthropic_code_default, exchange_openai_code_default, generate_pkce, load_auth,
+    load_prefs, now_ms, openai_authorize_url, open_browser, poll_github_copilot_device_default,
+    poll_openai_device_auth_default, random_state, record_provider_login, remove_provider,
+    slugify_provider_id, start_github_copilot_device_default, start_openai_device_auth_default,
+    wait_openai_browser_callback, AuthMethodKind, Credential, ProviderProtocol, StoredProvider,
+    BUILTIN_PROVIDERS,
+};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 use tokio::sync::oneshot;
 
-use super::github::{poll_github_copilot_device, start_github_copilot_device};
-use super::oauth_anthropic::{anthropic_authorize_url, exchange_anthropic_code};
-use super::oauth_openai::{
-    bind_openai_callback_listener, exchange_openai_code, openai_authorize_url,
-    poll_openai_device_auth, start_openai_device_auth, wait_openai_browser_callback,
-};
-use super::pkce::{generate_pkce, open_browser, random_state};
-use super::{
-    auth_path, effective_providers, load_auth, load_prefs, now_ms, record_provider_login,
-    remove_provider, slugify_provider_id, AuthMethodKind, Credential, ProviderProtocol,
-    StoredProvider, BUILTIN_PROVIDERS,
-};
-
-pub async fn cmd_auth_list(data_dir: &Path) -> Result<()> {
+pub(crate) async fn cmd_auth_list(data_dir: &Path) -> Result<()> {
     let providers = effective_providers(data_dir);
     let prefs = load_prefs(data_dir);
     if providers.is_empty() {
@@ -50,7 +47,7 @@ pub async fn cmd_auth_list(data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub async fn cmd_auth_logout(data_dir: &Path, provider: Option<String>) -> Result<()> {
+pub(crate) async fn cmd_auth_logout(data_dir: &Path, provider: Option<String>) -> Result<()> {
     let target = match provider {
         Some(p) => p,
         None => {
@@ -75,7 +72,7 @@ pub async fn cmd_auth_logout(data_dir: &Path, provider: Option<String>) -> Resul
     Ok(())
 }
 
-pub async fn cmd_auth_login(data_dir: &Path) -> Result<()> {
+pub(crate) async fn cmd_auth_login(data_dir: &Path) -> Result<()> {
     println!(
         "Connect a provider (credentials saved to {})\n",
         auth_path(data_dir).display()
@@ -97,7 +94,6 @@ pub async fn cmd_auth_login(data_dir: &Path) -> Result<()> {
         prov.methods[m_idx]
     };
 
-    let http = reqwest::Client::new();
     let (stored, chosen_model) = match method.kind {
         AuthMethodKind::OpenAiBrowserOAuth => {
             let pkce = generate_pkce()?;
@@ -110,8 +106,7 @@ pub async fn cmd_auth_login(data_dir: &Path) -> Result<()> {
             println!("Waiting for callback on {redirect_uri}...");
             let (_tx, rx) = oneshot::channel();
             let code = wait_openai_browser_callback(listener, state, rx).await?;
-            let sp = exchange_openai_code(
-                &http,
+            let sp = exchange_openai_code_default(
                 &code,
                 &redirect_uri,
                 &pkce.verifier,
@@ -121,14 +116,14 @@ pub async fn cmd_auth_login(data_dir: &Path) -> Result<()> {
             (sp, None)
         }
         AuthMethodKind::OpenAiDeviceOAuth => {
-            let start = start_openai_device_auth(&http).await?;
+            let start = start_openai_device_auth_default().await?;
             println!(
                 "\nOpen: {}\nCode: {}\n",
                 start.verification_url, start.user_code
             );
             open_browser(&start.verification_url);
             println!("Waiting for authorization...");
-            let sp = poll_openai_device_auth(&http, &start).await?;
+            let sp = poll_openai_device_auth_default(&start).await?;
             (sp, None)
         }
         AuthMethodKind::AnthropicClaudeOAuth | AuthMethodKind::AnthropicConsoleOAuth => {
@@ -140,18 +135,18 @@ pub async fn cmd_auth_login(data_dir: &Path) -> Result<()> {
             open_browser(&url);
             let pasted = prompt_line("Paste the code#state (or redirect URL)")?;
             let sp =
-                exchange_anthropic_code(&http, &pasted, &pkce.verifier, &state, console).await?;
+                exchange_anthropic_code_default(&pasted, &pkce.verifier, &state, console).await?;
             (sp, None)
         }
         AuthMethodKind::GitHubCopilotDeviceOAuth => {
-            let start = start_github_copilot_device(&http).await?;
+            let start = start_github_copilot_device_default().await?;
             println!(
                 "\nOpen: {}\nCode: {}\n",
                 start.verification_uri, start.user_code
             );
             open_browser(&start.verification_uri);
             println!("Waiting for authorization...");
-            let sp = poll_github_copilot_device(&http, &start).await?;
+            let sp = poll_github_copilot_device_default(&start).await?;
             (sp, None)
         }
         AuthMethodKind::OpenAiApiKey
@@ -171,6 +166,7 @@ pub async fn cmd_auth_login(data_dir: &Path) -> Result<()> {
                     key: key.trim().to_string(),
                 },
                 custom_models: Vec::new(),
+                fetched_models: Vec::new(),
                 model_routes: BTreeMap::new(),
                 updated_ms: now_ms(),
             };
@@ -207,6 +203,7 @@ pub async fn cmd_auth_login(data_dir: &Path) -> Result<()> {
                     key: key.trim().to_string(),
                 },
                 custom_models,
+                fetched_models: Vec::new(),
                 model_routes: BTreeMap::new(),
                 updated_ms: now_ms(),
             };

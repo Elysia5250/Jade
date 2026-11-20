@@ -1,7 +1,7 @@
-//! Remote/local fast search tools (`glob` and `grep`) backed by `envoy_service::Remote`.
+//! Remote/local fast search tools (`glob` and `grep`) backed by `crate::tools_core`.
 
-use super::resolve_path;
-use anyhow::{Context, Result};
+use crate::tools_core;
+use anyhow::Result;
 use envoy_service::{AgentDialer, Remote};
 use serde_json::Value;
 use std::path::Path;
@@ -12,15 +12,7 @@ pub(crate) async fn glob_tool(
     cwd: &Path,
     args: &Value,
 ) -> Result<String> {
-    let pattern = args["pattern"]
-        .as_str()
-        .filter(|s| !s.trim().is_empty())
-        .context("missing `pattern`")?;
-    let raw_root = args["path"].as_str().unwrap_or(".");
-    let root = resolve_path(cwd, raw_root);
-    let max_results = args["max_results"].as_u64().unwrap_or(200).clamp(1, 2000) as u32;
-
-    let paths = remote.glob(target, &root, pattern, max_results).await?;
+    let (paths, max_results) = tools_core::glob_raw(remote, target, Some(cwd), args).await?;
     if paths.is_empty() {
         return Ok("(no matching files)".into());
     }
@@ -37,18 +29,7 @@ pub(crate) async fn grep_tool(
     cwd: &Path,
     args: &Value,
 ) -> Result<String> {
-    let pattern = args["pattern"]
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .context("missing `pattern`")?;
-    let raw_root = args["path"].as_str().unwrap_or(".");
-    let root = resolve_path(cwd, raw_root);
-    let include = args["include"].as_str().filter(|s| !s.trim().is_empty());
-    let max_results = args["max_results"].as_u64().unwrap_or(100).clamp(1, 1000) as u32;
-
-    let hits = remote
-        .grep(target, &root, pattern, include, max_results)
-        .await?;
+    let (hits, max_results) = tools_core::grep_raw(remote, target, Some(cwd), args).await?;
     if hits.is_empty() {
         return Ok("(no matches)".into());
     }

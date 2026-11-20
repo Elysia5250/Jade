@@ -24,7 +24,7 @@ fn slash_effort_persists_a_level_and_rejects_unknown() {
     app.run_slash("/effort Nope!");
     assert_eq!(effort::load(&dir), "off");
     assert_eq!(
-        app.toast.as_ref().map(|item| item.0.as_str()),
+        app.ui.toast.as_ref().map(|item| item.0.as_str()),
         Some("usage: /effort [level]")
     );
     let _ = std::fs::remove_dir_all(&dir);

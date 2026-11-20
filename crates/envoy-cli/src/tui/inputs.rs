@@ -42,6 +42,7 @@ pub(crate) struct SkillFlag {
 #[derive(Default)]
 pub(crate) struct Catalog {
     pub(crate) signed_in: bool,
+    pub(crate) connected_providers: HashMap<String, &'static str>,
     pub(crate) provider_id: String,
     pub(crate) model_id: String,
     pub(crate) compact_at: u64,
@@ -66,6 +67,7 @@ pub(crate) enum PreviewBody {
 }
 
 struct RemoteFill {
+    target: String,
     path: String,
     bytes: Vec<u8>,
     total: u64,
@@ -74,6 +76,8 @@ struct RemoteFill {
 
 pub(crate) struct Inputs {
     pub(crate) catalog: Catalog,
+    pub(crate) cd_comps: Vec<(String, String)>,
+    pub(crate) welcome_path_comps: Vec<(String, String)>,
     pub(crate) preview: PreviewBody,
     pub(crate) truncated: bool,
     pub(crate) has_diff: bool,
@@ -81,6 +85,8 @@ pub(crate) struct Inputs {
     pub(crate) diff_git: Option<(String, String)>,
     catalog_key: String,
     catalog_at: Option<Instant>,
+    cd_key: Option<(PathBuf, String)>,
+    welcome_path_key: Option<(PathBuf, String)>,
     preview_key: String,
     remote_want: Option<String>,
     remote_fill: Option<RemoteFill>,
@@ -90,6 +96,8 @@ impl Default for Inputs {
     fn default() -> Self {
         Self {
             catalog: Catalog::default(),
+            cd_comps: Vec::new(),
+            welcome_path_comps: Vec::new(),
             preview: PreviewBody::Absent,
             truncated: false,
             has_diff: false,
@@ -97,6 +105,8 @@ impl Default for Inputs {
             diff_git: None,
             catalog_key: String::new(),
             catalog_at: None,
+            cd_key: None,
+            welcome_path_key: None,
             preview_key: String::new(),
             remote_want: None,
             remote_fill: None,
@@ -113,25 +123,55 @@ impl Inputs {
     pub(crate) fn preview_key_clear(&mut self) {
         self.preview_key.clear();
     }
+
+    pub(crate) fn clear_for_target_switch(&mut self) {
+        self.remote_want = None;
+        self.remote_fill = None;
+        self.preview_key.clear();
+        self.cd_key = None;
+        self.welcome_path_key = None;
+        self.invalidate_catalog();
+    }
 }
 
 pub(crate) fn sync(app: &mut App) {
-    let cwd = app.session.cwd.clone();
-    app.workspace_index.ensure_fresh(&cwd);
+    let cwd = app.session.current.cwd.clone();
+    app.session.workspace_index.ensure_fresh(&cwd);
+    sync_completions(app, &cwd);
     if catalog_due(app) {
         fill_catalog(app);
     }
     refresh_media(app);
 }
 
+fn sync_completions(app: &mut App, cwd: &Path) {
+    if let Some(raw) = app.cd_query().map(str::to_string) {
+        let want = (cwd.to_path_buf(), raw.clone());
+        if app.inputs.cd_key.as_ref() != Some(&want) {
+            app.inputs.cd_comps = complete_directories(cwd, &raw);
+            app.inputs.cd_key = Some(want);
+        }
+    } else if app.inputs.cd_key.take().is_some() {
+        app.inputs.cd_comps.clear();
+    }
+    if let Some(welcome) = app.ui.welcome.as_ref().filter(|w| w.mode.is_path_input()) {
+        let want = (cwd.to_path_buf(), welcome.path.clone());
+        if app.inputs.welcome_path_key.as_ref() != Some(&want) {
+            app.inputs.welcome_path_comps = complete_directories(cwd, &welcome.path);
+            app.inputs.welcome_path_key = Some(want);
+        }
+    } else if app.inputs.welcome_path_key.take().is_some() {
+        app.inputs.welcome_path_comps.clear();
+    }
+}
+
 pub(crate) fn remote_pending(app: &App) -> bool {
     match &app.inputs.remote_want {
-        Some(path) => app
+        Some(path) => !app
             .inputs
             .remote_fill
             .as_ref()
-            .map(|fill| &fill.path)
-            != Some(path),
+            .is_some_and(|fill| fill.target == app.jobs.target && fill.path == *path),
         None => false,
     }
 }
@@ -144,25 +184,31 @@ pub(crate) async fn pull_remote(app: &mut App, remote: &Remote<AnyDialer>) -> bo
         .inputs
         .remote_fill
         .as_ref()
-        .is_some_and(|fill| fill.path == path)
+        .is_some_and(|fill| fill.target == app.jobs.target && fill.path == path)
     {
         return false;
     }
+    let target = app.jobs.target.clone();
     let limit = FILE_PREVIEW_LIMIT as u64;
-    let filled = match remote.read(&app.target, &path, 0, limit).await {
+    let filled = match remote.read(&target, &path, 0, limit).await {
         Ok((total, _, bytes)) => RemoteFill {
+            target: target.clone(),
             path,
             bytes,
             total,
             missing: false,
         },
         Err(_) => RemoteFill {
+            target: target.clone(),
             path,
             bytes: Vec::new(),
             total: 0,
             missing: true,
         },
     };
+    if app.jobs.target != target {
+        return false;
+    }
     app.inputs.remote_fill = Some(filled);
     app.inputs.preview_key.clear();
     true
@@ -183,9 +229,9 @@ fn catalog_key(app: &App) -> String {
     format!(
         "{}|{}|{}|{}",
         app.data_dir.display(),
-        app.session.cwd.display(),
-        app.session.id,
-        app.target
+        app.session.current.cwd.display(),
+        app.session.current.id,
+        app.jobs.target
     )
 }
 
@@ -193,9 +239,13 @@ fn fill_catalog(app: &mut App) {
     let key = catalog_key(app);
     let backend = envoy_core::sandbox::probe_backend();
     let mut catalog = Catalog {
+        connected_providers: effective_providers(&app.data_dir)
+            .into_iter()
+            .map(|(id, sp)| (id, sp.credential.kind_label()))
+            .collect(),
         sandbox_label: envoy_core::sandbox::backend_label().to_string(),
         bwrap_present: matches!(backend, envoy_core::sandbox::SandboxBackend::Bwrap(_)),
-        trusted: is_workspace_trusted(&app.data_dir, &app.session.cwd),
+        trusted: is_workspace_trusted(&app.data_dir, &app.session.current.cwd),
         daemon_online: daemon::socket_path(&app.data_dir).exists(),
         ..Catalog::default()
     };
@@ -212,7 +262,7 @@ fn fill_catalog(app: &mut App) {
         catalog.hard_window = budget.hard_window;
         catalog.tier = budget.tier.to_string();
     }
-    let mcp = envoy_agent::mcp::config::load_mcp_configs(&app.data_dir, &app.session.cwd);
+    let mcp = envoy_agent::mcp::config::load_mcp_configs(&app.data_dir, &app.session.current.cwd);
     catalog.mcp = mcp
         .servers
         .iter()
@@ -222,7 +272,7 @@ fn fill_catalog(app: &mut App) {
             disabled: srv.disabled,
         })
         .collect();
-    let skills = envoy_agent::skills::discover_skills(&app.data_dir, &app.session.cwd);
+    let skills = envoy_agent::skills::discover_skills(&app.data_dir, &app.session.current.cwd);
     catalog.skills = skills
         .iter()
         .map(|skill| SkillSnap {
@@ -231,7 +281,7 @@ fn fill_catalog(app: &mut App) {
             scope: skill.scope.label().to_string(),
         })
         .collect();
-    catalog.todos = envoy_agent::agent::tools::todo::load_todos(&app.data_dir, &app.session.id)
+    catalog.todos = envoy_agent::agent::tools::todo::load_todos(&app.data_dir, &app.session.current.id)
         .into_iter()
         .map(|item| TodoSnap {
             content: item.content,
@@ -242,7 +292,7 @@ fn fill_catalog(app: &mut App) {
             },
         })
         .collect();
-    if let Some(welcome) = &app.welcome {
+    if let Some(welcome) = &app.ui.welcome {
         catalog.welcome_flags = welcome
             .skills
             .iter()
@@ -250,7 +300,7 @@ fn fill_catalog(app: &mut App) {
                 kind: envoy_agent::skills::skill_root_kind(&app.data_dir, skill),
                 injected: envoy_agent::skills::skill_is_injected(
                     &app.data_dir,
-                    &app.session.cwd,
+                    &app.session.current.cwd,
                     skill,
                 ),
             })
@@ -273,40 +323,40 @@ fn refresh_media(app: &mut App) {
 }
 
 fn active_raw(app: &App) -> Option<String> {
-    if !matches!(app.inspector.tab, InspectorTab::File | InspectorTab::Diff) {
+    if !matches!(app.ui.inspector.tab, InspectorTab::File | InspectorTab::Diff) {
         return None;
     }
-    if let Some(path) = &app.inspector.file_path {
+    if let Some(path) = &app.ui.inspector.file_path {
         return Some(path.clone());
     }
-    app.session
+    app.session.current
         .changed_files
-        .get(app.inspector.selected_diff)
-        .or_else(|| app.session.changed_files.last())
+        .get(app.ui.inspector.selected_diff)
+        .or_else(|| app.session.current.changed_files.last())
         .map(|fc| fc.path.clone())
 }
 
 fn media_key(app: &App, raw: &str) -> String {
     let stamp = app
         .find_changed_file_index(raw)
-        .and_then(|idx| app.session.changed_files.get(idx))
+        .and_then(|idx| app.session.current.changed_files.get(idx))
         .map(|fc| fc.before.len() + fc.after.len() + fc.added + fc.removed)
         .unwrap_or(0);
-    format!("{}|{}|{}", app.target, raw, stamp)
+    format!("{}|{}|{}", app.jobs.target, raw, stamp)
 }
 
 fn load_media(app: &mut App, raw: &str, key: String) {
-    let local = target_is_local(&app.target);
-    let abs = absolute_path(&app.session.cwd, raw);
+    let local = target_is_local(&app.jobs.target);
+    let abs = absolute_path(&app.session.current.cwd, raw);
     let rel = if local {
-        links::normalize_display_path(&app.session.cwd, &abs)
+        links::normalize_display_path(&app.session.current.cwd, &abs)
     } else {
-        links::display_rel(&app.session.cwd, Path::new(raw))
+        links::display_rel(&app.session.current.cwd, Path::new(raw))
     };
     let session_diff = app.find_changed_file_index(&rel).is_some()
         || app.find_changed_file_index(raw).is_some();
-    let git = if local {
-        diff::load_git_pair(&app.session.cwd, &rel)
+    let git = if local && !session_diff {
+        diff::load_git_pair(&app.session.current.cwd, &rel)
     } else {
         None
     };
@@ -318,7 +368,7 @@ fn load_media(app: &mut App, raw: &str, key: String) {
     } else {
         let want = abs.to_string_lossy();
         app.inputs.remote_fill.as_ref().is_some_and(|fill| {
-            fill.path == want && fill.total > FILE_PREVIEW_LIMIT as u64
+            fill.target == app.jobs.target && fill.path == want && fill.total > FILE_PREVIEW_LIMIT as u64
         })
     };
     let preview = if local {
@@ -351,7 +401,7 @@ fn remote_preview(app: &App, abs: &Path, rel: String) -> PreviewBody {
     let Some(fill) = &app.inputs.remote_fill else {
         return PreviewBody::Loading { rel };
     };
-    if fill.path != want {
+    if fill.target != app.jobs.target || fill.path != want {
         return PreviewBody::Loading { rel };
     }
     body_from_bytes(rel, &fill.bytes, fill.total, fill.missing)
@@ -424,10 +474,10 @@ mod tests {
         std::fs::write(&path, &data).unwrap();
 
         let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-        app.show_sidebar = true;
-        app.inspector.force_open = true;
-        app.inspector.tab = InspectorTab::File;
-        app.inspector.file_path = Some(path.display().to_string());
+        app.ui.show_sidebar = true;
+        app.ui.inspector.force_open = true;
+        app.ui.inspector.tab = InspectorTab::File;
+        app.ui.inspector.file_path = Some(path.display().to_string());
         sync(&mut app);
 
         let PreviewBody::Text { body, .. } = &app.inputs.preview else {
@@ -456,21 +506,21 @@ mod tests {
         let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
         let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
         terminal.draw(|frame| paint(frame, &mut app)).unwrap();
-        assert!(app.screen_lines.is_empty());
+        assert!(app.ui.screen_lines.is_empty());
 
-        app.selection = Some(MouseSelection {
+        app.ui.selection = Some(MouseSelection {
             start: GridPos { col: 0, row: 0 },
             end: GridPos { col: 3, row: 0 },
             active: true,
         });
         terminal.draw(|frame| paint(frame, &mut app)).unwrap();
-        assert!(!app.screen_lines.is_empty());
+        assert!(!app.ui.screen_lines.is_empty());
 
-        if let Some(sel) = app.selection.as_mut() {
+        if let Some(sel) = app.ui.selection.as_mut() {
             sel.active = false;
         }
         terminal.draw(|frame| paint(frame, &mut app)).unwrap();
-        assert!(app.screen_lines.is_empty());
+        assert!(app.ui.screen_lines.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

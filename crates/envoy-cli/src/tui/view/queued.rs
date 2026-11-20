@@ -2,10 +2,10 @@
 use crate::tui::*;
 
 pub(super) fn draw_queued(frame: &mut Frame, app: &App, theme: &Theme, editor: Rect) {
-    if app.queued.is_empty() {
+    if app.agent.queued.is_empty() {
         return;
     }
-    let take = app.queued.len().min(2);
+    let take = app.agent.queued.len().min(2);
     let height = take as u16;
     let area = Rect {
         x: editor.x + 2,
@@ -18,7 +18,7 @@ pub(super) fn draw_queued(frame: &mut Frame, app: &App, theme: &Theme, editor: R
     }
     frame.render_widget(Clear, area);
     let mut lines = Vec::new();
-    for text in app.queued.iter().take(take) {
+    for text in app.agent.queued.iter().take(take) {
         lines.push(Line::from(vec![
             Span::styled("queued  ", Style::default().fg(theme.warn)),
             Span::styled(

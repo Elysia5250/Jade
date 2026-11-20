@@ -73,6 +73,7 @@ fn push_task(tasks: &Mutex<Vec<JoinHandle<()>>>, stop: &AtomicBool, handle: Join
         handle.abort();
         return;
     }
+    guard.retain(|h| !h.is_finished());
     guard.push(handle);
 }
 

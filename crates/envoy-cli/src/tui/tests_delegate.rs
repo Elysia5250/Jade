@@ -22,7 +22,7 @@ fn slash_delegate_persists_a_level_and_rejects_unknown() {
     app.run_slash("/delegate nope");
     assert_eq!(delegate_pref::load(&dir), DelegateLevel::High);
     assert_eq!(
-        app.toast.as_ref().map(|item| item.0.as_str()),
+        app.ui.toast.as_ref().map(|item| item.0.as_str()),
         Some("usage: /delegate [off|low|normal|high]")
     );
     let _ = std::fs::remove_dir_all(&dir);

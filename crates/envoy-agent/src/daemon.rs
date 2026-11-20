@@ -347,10 +347,12 @@ pub fn spawn(data_dir: &Path) -> Result<()> {
     std::fs::create_dir_all(data_dir)
         .with_context(|| format!("creating {}", data_dir.display()))?;
     let exe = std::env::current_exe().context("locating the envoy binary")?;
+    let log = log_path(data_dir);
+    envoy_core::audit::rotate_if_oversized(&log, envoy_core::audit::LOG_ROTATE_BYTES);
     let out = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(log_path(data_dir))?;
+        .open(&log)?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("--data-dir")
         .arg(data_dir)

@@ -13,8 +13,8 @@
 use super::server_tools::{self, machine_arg, tool_defs, Sink, ToolReply};
 use crate::agent::AskBroker;
 use crate::daemon;
-use crate::permissions::paths::is_path_under_workspace;
 use crate::permissions::{PermissionEngine, PermissionMode};
+use crate::tools_core;
 use anyhow::{bail, Result};
 use envoy_proto::SandboxPolicy;
 use envoy_service::{dialer_for, AgentDialer, Remote};
@@ -43,7 +43,7 @@ impl Mcp {
     }
 }
 
-pub(crate) async fn serve(
+pub async fn serve(
     data_dir: PathBuf,
     conduit: Option<PathBuf>,
     mode: PermissionMode,
@@ -174,17 +174,6 @@ fn initialize(params: &Value) -> Value {
     })
 }
 
-fn resolve_from_cwd(cwd: &Path, raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed == "." {
-        return cwd.display().to_string();
-    }
-    if trimmed.starts_with('/') || trimmed.starts_with("~/") || trimmed == "~" {
-        return trimmed.to_string();
-    }
-    cwd.join(trimmed).display().to_string()
-}
-
 fn normalize_local_args(name: &str, cwd: &Path, args: &Value) -> Value {
     if machine_arg(args) != "local" {
         return args.clone();
@@ -197,7 +186,7 @@ fn normalize_local_args(name: &str, cwd: &Path, args: &Value) -> Value {
     match name {
         "read" | "write" | "edit" | "ls" => {
             if let Some(raw) = out.get("path").and_then(Value::as_str).map(str::to_string) {
-                out["path"] = Value::String(resolve_from_cwd(cwd, &raw));
+                out["path"] = Value::String(tools_core::resolve_path(cwd, &raw));
             } else if name == "ls" {
                 out["path"] = Value::String(cwd.display().to_string());
             }
@@ -208,11 +197,11 @@ fn normalize_local_args(name: &str, cwd: &Path, args: &Value) -> Value {
                 .or_else(|| out.get("root"))
                 .and_then(Value::as_str)
                 .unwrap_or(".");
-            out["path"] = Value::String(resolve_from_cwd(cwd, raw));
+            out["path"] = Value::String(tools_core::resolve_path(cwd, raw));
         }
         "exec" => {
             let raw_cwd = out.get("cwd").and_then(Value::as_str).unwrap_or(".");
-            out["cwd"] = Value::String(resolve_from_cwd(cwd, raw_cwd));
+            out["cwd"] = Value::String(tools_core::resolve_path(cwd, raw_cwd));
         }
         _ => {}
     }
@@ -294,7 +283,7 @@ pub(super) async fn call_tool(mcp: &Mcp, params: &Value) -> Result<ToolReply> {
 
     let norm_args = normalize_local_args(name, &mcp.cwd, args);
     if name == "exec" {
-        if let Err(e) = server_tools::validate_env_arg(&norm_args) {
+        if let Err(e) = tools_core::validate_env_arg(&norm_args) {
             return Ok((format!("{e:#}"), None, true));
         }
     }
@@ -323,18 +312,16 @@ async fn list_resources(mcp: &Mcp) -> Result<Value> {
         bail!("{msg}");
     }
     let remote = mcp.remote("local").await?;
-    let jobs = remote.jobs("local").await.unwrap_or_default();
+    let jobs = tools_core::job_list_scoped(&remote, "local", &mcp.cwd)
+        .await
+        .unwrap_or_default();
     let mut resources = vec![json!({
         "uri": "envoy://jobs",
         "name": "Local Jobs",
         "description": "List of detached jobs managed by the local envoy daemon.",
         "mimeType": "application/json",
     })];
-    for j in jobs
-        .into_iter()
-        .filter(|j| !j.cwd.is_empty() && is_path_under_workspace(&mcp.cwd, Path::new(&j.cwd)))
-        .take(50)
-    {
+    for j in jobs.into_iter().take(50) {
         resources.push(json!({
             "uri": format!("envoy://jobs/{}/log", j.id),
             "name": format!("Job #{} Log", j.id),
@@ -357,10 +344,9 @@ async fn read_resource(mcp: &Mcp, params: &Value) -> Result<Value> {
     }
     let remote = mcp.remote("local").await?;
     if uri == "envoy://jobs" {
-        let jobs = remote.jobs("local").await?;
+        let jobs = tools_core::job_list_scoped(&remote, "local", &mcp.cwd).await?;
         let json_list: Vec<Value> = jobs
             .into_iter()
-            .filter(|j| !j.cwd.is_empty() && is_path_under_workspace(&mcp.cwd, Path::new(&j.cwd)))
             .map(|j| {
                 json!({
                     "id": j.id,
@@ -382,10 +368,7 @@ async fn read_resource(mcp: &Mcp, params: &Value) -> Result<Value> {
     if let Some(rest) = uri.strip_prefix("envoy://jobs/") {
         if let Some(id_str) = rest.strip_suffix("/log") {
             let id: u64 = id_str.parse()?;
-            let job = remote.status("local", id).await?;
-            if job.cwd.is_empty() || !is_path_under_workspace(&mcp.cwd, Path::new(&job.cwd)) {
-                bail!("job #{id} belongs to another workspace ({})", job.cwd);
-            }
+            let _ = tools_core::job_status_scoped(&remote, "local", &mcp.cwd, id).await?;
             let mut sink = Sink::new(0);
             let _ = remote
                 .logs("local", id, 0, false, |recs| sink.push_records(recs))

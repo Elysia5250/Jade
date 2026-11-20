@@ -111,6 +111,20 @@ pub fn tools_overhead(extra_tools: &[serde_json::Value]) -> u64 {
             .sum::<u64>()
 }
 
+/// Active filtered tool schemas for the current permissions and tool filter.
+pub(crate) fn tools_overhead_for(
+    permissions: Option<&crate::permissions::PermissionEngine>,
+    tool_filter: &crate::agent::tools::ToolFilter,
+    extra_tools: &[serde_json::Value],
+) -> u64 {
+    if permissions.is_none() && tool_filter.depth == 0 && tool_filter.allowed.is_none() {
+        return tools_overhead(extra_tools);
+    }
+    let tools =
+        crate::agent::tools::openai_tools_json_filtered(permissions, tool_filter, extra_tools);
+    estimate_text_tokens(&serde_json::to_string(&tools).unwrap_or_default())
+}
+
 fn builtin_tools_tokens() -> u64 {
     static CACHED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {

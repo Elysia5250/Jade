@@ -262,6 +262,16 @@ where
             Ok(()) => ack(wr).await?,
             Err(err) => fail(wr, format!("{err:#}")).await?,
         },
+        AgentReq::ProbeMcp { cwd } => {
+            let lines = runtime.probe_mcp(cwd).await;
+            write_framed(wr, &AgentResp::McpProbe(lines)).await?;
+        }
+        AgentReq::RefreshModels => match runtime.refresh_models().await {
+            Ok((provider_id, models)) => {
+                write_framed(wr, &AgentResp::ModelsRefreshed { provider_id, models }).await?;
+            }
+            Err(err) => fail(wr, format!("{err:#}")).await?,
+        },
         other => bail!("unhandled edit request: {other:?}"),
     }
     Ok(())

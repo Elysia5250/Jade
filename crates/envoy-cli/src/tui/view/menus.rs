@@ -32,7 +32,7 @@ pub(super) fn draw_slash_menu(frame: &mut Frame, app: &App, theme: &Theme, edito
         })
         .collect();
     let mut state = ListState::default();
-    state.select(Some(app.menu_selected.min(items.len() - 1)));
+    state.select(Some(app.ui.menu_selected.min(items.len() - 1)));
     let list = List::new(rows)
         .block(
             Block::default()
@@ -49,7 +49,7 @@ pub(super) fn draw_slash_menu(frame: &mut Frame, app: &App, theme: &Theme, edito
 }
 
 pub(super) fn draw_cd_menu(frame: &mut Frame, app: &App, theme: &Theme, editor: Rect) {
-    let items = app.cd_completions();
+    let items = &app.inputs.cd_comps;
     if items.is_empty() {
         return;
     }
@@ -72,7 +72,7 @@ pub(super) fn draw_cd_menu(frame: &mut Frame, app: &App, theme: &Theme, editor: 
         .map(|(display, _)| ListItem::new(Line::raw(format!(" {display}"))))
         .collect();
     let mut state = ListState::default();
-    state.select(Some(app.menu_selected.min(items.len() - 1)));
+    state.select(Some(app.ui.menu_selected.min(items.len() - 1)));
     let list = List::new(rows)
         .block(
             Block::default()
@@ -112,7 +112,7 @@ pub(super) fn draw_at_menu(frame: &mut Frame, app: &App, theme: &Theme, editor: 
         .map(|path| ListItem::new(Line::raw(format!(" @{path}"))))
         .collect();
     let mut state = ListState::default();
-    state.select(Some(app.menu_selected.min(items.len() - 1)));
+    state.select(Some(app.ui.menu_selected.min(items.len() - 1)));
     let list = List::new(rows)
         .block(
             Block::default()

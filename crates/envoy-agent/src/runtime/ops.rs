@@ -4,9 +4,10 @@ use super::monitors::MonitorHub;
 use super::server::{Live, LivePhase, PhaseGuard, Runtime};
 use crate::agent::checkpoint::{apply_file_baselines, CheckpointStore};
 use crate::agent::{AgentEvent, MonitorBroker, MonitorInfo};
+use crate::auth::resolve_provider_with_overrides;
 use crate::session::{ChatMessage, ChatRole};
 use anyhow::{bail, Result};
-use envoy_service::{dialer_for, AgentDialer, Remote, UnixDialer};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 impl Runtime {
@@ -117,12 +118,13 @@ impl Runtime {
         };
 
         let (idx, net) = net_baselines;
-        let dialer: Box<dyn AgentDialer> =
-            match (local_socket, target == "local" || target.is_empty()) {
-                (Some(sock), true) => Box::new(UnixDialer::new(sock)),
-                _ => dialer_for(&self.data_dir, &target, None),
-            };
-        let remote: Remote<Box<dyn AgentDialer>> = Remote::new(dialer);
+        let remote = super::remote_for(
+            &self.data_dir,
+            &target,
+            self.conduit.clone(),
+            local_socket,
+            self.local_server.clone(),
+        );
         let (restored_files, deleted_files, skipped_files) =
             apply_file_baselines(&remote, &target, &net).await;
 
@@ -156,6 +158,48 @@ impl Runtime {
         }
         self.run_post_rewind_hook(id, &live, cp_id).await;
         Ok(())
+    }
+
+    pub async fn probe_mcp(&self, cwd: PathBuf) -> Vec<String> {
+        let mgr = crate::mcp::client::McpManager::connect_configured(&self.data_dir, &cwd).await;
+        let mut lines = Vec::new();
+        for p in mgr.skipped_untrusted() {
+            lines.push(format!(
+                "skipped untrusted project MCP config: {}",
+                p.display()
+            ));
+        }
+        for s in mgr.statuses() {
+            if let Some(err) = &s.error {
+                lines.push(format!("{} [{}] error: {}", s.name, s.transport_label, err));
+            } else {
+                lines.push(format!(
+                    "{} [{}] connected ({} tools)",
+                    s.name, s.transport_label, s.tool_count
+                ));
+            }
+        }
+        if lines.is_empty() {
+            lines.push("no MCP servers configured".into());
+        }
+        lines
+    }
+
+    pub async fn refresh_models(
+        &self,
+    ) -> Result<(String, Vec<crate::agent::context::ListedModel>)> {
+        let Some((prov, _)) = resolve_provider_with_overrides(&self.data_dir, None) else {
+            bail!("no active provider configured");
+        };
+        let http = crate::agent::shared_http_client()?;
+        let bg_http = http.clone();
+        let bg_dir = self.data_dir.clone();
+        tokio::spawn(async move {
+            crate::agent::context::refresh_models_dev_if_stale(&bg_http, &bg_dir).await;
+        });
+        let list =
+            crate::agent::context::fetch_provider_models(&http, Some(&self.data_dir), &prov).await;
+        Ok((prov.id, list))
     }
 }
 

@@ -16,6 +16,10 @@ pub(crate) struct Picker {
 pub(crate) enum LoginEvent {
     Success(StoredProvider, Option<String>),
     Error(String),
+    OpenAiBrowserBound {
+        url: String,
+        redirect_uri: String,
+    },
     OpenAiDeviceStarted {
         verification_url: String,
         user_code: String,

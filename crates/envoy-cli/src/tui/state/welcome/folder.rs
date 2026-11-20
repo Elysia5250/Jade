@@ -5,16 +5,15 @@ use std::path::{Path, PathBuf};
 impl App {
     pub(super) fn handle_path_keys(&mut self, key: KeyEvent) -> Action {
         let choose_parent = self
-            .welcome
+            .ui.welcome
             .as_ref()
-            .is_some_and(|w| w.folder_mode && !w.path_mode);
+            .is_some_and(|w| w.mode == WelcomeMode::NewFolderPickParent);
         let mut submit: Option<String> = None;
-        let cwd = self.session.cwd.clone();
-        if let Some(welcome) = self.welcome.as_mut() {
+        let cwd = self.session.current.cwd.clone();
+        if let Some(welcome) = self.ui.welcome.as_mut() {
             match key.code {
                 KeyCode::Esc => {
-                    welcome.path_mode = false;
-                    welcome.folder_mode = false;
+                    welcome.mode = WelcomeMode::Home;
                     welcome.path_selected = 0;
                     welcome.error = None;
                 }
@@ -76,24 +75,23 @@ impl App {
     }
 
     fn begin_folder_name(&mut self, raw: &str) -> Action {
-        let candidate = resolve_cd_path(&self.session.cwd, raw.trim());
+        let candidate = resolve_cd_path(&self.session.current.cwd, raw.trim());
         let path = std::fs::canonicalize(&candidate).unwrap_or(candidate);
         if !path.is_dir() {
-            if let Some(welcome) = self.welcome.as_mut() {
+            if let Some(welcome) = self.ui.welcome.as_mut() {
                 welcome.error = Some(format!("not a directory: {}", path.display()));
             }
             return Action::None;
         }
         if envoy_agent::permissions::paths::path_has_protected_component(&path) {
-            if let Some(welcome) = self.welcome.as_mut() {
+            if let Some(welcome) = self.ui.welcome.as_mut() {
                 welcome.error = Some("refusing to create a folder inside a protected path".into());
             }
             return Action::None;
         }
-        if let Some(welcome) = self.welcome.as_mut() {
+        if let Some(welcome) = self.ui.welcome.as_mut() {
             welcome.folder_parent = Some(path);
-            welcome.folder_mode = true;
-            welcome.naming = true;
+            welcome.mode = WelcomeMode::NewFolderName;
             welcome.draft.clear();
             welcome.error = None;
         }

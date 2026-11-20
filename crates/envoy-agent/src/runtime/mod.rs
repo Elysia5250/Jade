@@ -35,6 +35,26 @@ pub fn socket_path(data_dir: &Path) -> PathBuf {
     data_dir.join("agent.sock")
 }
 
+pub(crate) fn remote_for(
+    data_dir: &Path,
+    target: &str,
+    conduit: Option<PathBuf>,
+    local_socket: Option<PathBuf>,
+    local_server: Option<envoy_service::AgentServer>,
+) -> envoy_service::Remote<Box<dyn envoy_service::AgentDialer>> {
+    let is_local = target.is_empty() || target == "local";
+    if is_local {
+        if local_server.is_some() {
+            let dialer = envoy_service::dialer_for(data_dir, target, conduit);
+            return envoy_service::Remote::with_local(dialer, local_server);
+        }
+        if let Some(sock) = local_socket {
+            return envoy_service::Remote::new(Box::new(envoy_service::UnixDialer::new(sock)));
+        }
+    }
+    envoy_service::Remote::new(envoy_service::dialer_for(data_dir, target, conduit))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,6 +103,7 @@ mod tests {
                 key: "sk-test".into(),
             },
             custom_models: vec![],
+            fetched_models: vec![],
             model_routes: std::collections::BTreeMap::new(),
             updated_ms: 0,
         };

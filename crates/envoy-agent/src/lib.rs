@@ -9,11 +9,14 @@ compile_error!("envoy-agent currently targets Unix: the daemon speaks over a Uni
 pub mod agent;
 pub mod auth;
 pub mod daemon;
+pub(crate) mod frontmatter;
 pub mod hooks;
 pub mod mcp;
 pub mod memory;
+pub mod model_registry;
 pub mod permissions;
 pub mod runtime;
 pub mod session;
 pub mod skills;
+pub(crate) mod tools_core;
 pub mod worktree;

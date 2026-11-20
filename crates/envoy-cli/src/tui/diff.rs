@@ -4,6 +4,7 @@ use super::theme::Theme;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use similar::{ChangeTag, TextDiff};
+use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 
@@ -333,7 +334,14 @@ pub(crate) fn load_git_pair(cwd: &Path, rel_path: &str) -> Option<(String, Strin
     } else {
         cwd.join(rel_path)
     };
-    let after = std::fs::read_to_string(&abs).ok()?;
+    let file = std::fs::File::open(&abs).ok()?;
+    let mut limited = file.take(crate::tui::inputs::FILE_PREVIEW_LIMIT as u64);
+    let mut buf = Vec::new();
+    limited.read_to_end(&mut buf).ok()?;
+    if buf.iter().take(4096).any(|&byte| byte == 0) {
+        return None;
+    }
+    let after = String::from_utf8_lossy(&buf).into_owned();
     let rel = abs
         .strip_prefix(cwd)
         .map(|p| p.to_string_lossy().replace('\\', "/"))

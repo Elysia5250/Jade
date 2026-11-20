@@ -2,7 +2,7 @@
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::pkce::form_encode;
 use super::{now_ms, Credential, ProviderProtocol, StoredProvider, GITHUB_COPILOT_CLIENT_ID};
@@ -52,13 +52,22 @@ pub async fn start_github_copilot_device(http: &reqwest::Client) -> Result<GitHu
     })
 }
 
+const DEVICE_POLL_LIMIT: Duration = Duration::from_secs(15 * 60);
+
 pub async fn poll_github_copilot_device(
     http: &reqwest::Client,
     start: &GitHubDeviceStart,
 ) -> Result<StoredProvider> {
     let mut interval = start.interval_s;
+    let deadline = Instant::now() + DEVICE_POLL_LIMIT;
     loop {
+        if Instant::now() >= deadline {
+            bail!("GitHub device authorization timed out");
+        }
         tokio::time::sleep(Duration::from_secs(interval)).await;
+        if Instant::now() >= deadline {
+            bail!("GitHub device authorization timed out");
+        }
         let body = form_encode(&[
             ("client_id", GITHUB_COPILOT_CLIENT_ID),
             ("device_code", &start.device_code),
@@ -88,6 +97,7 @@ pub async fn poll_github_copilot_device(
                     account_id: None,
                 },
                 custom_models: Vec::new(),
+                fetched_models: Vec::new(),
                 model_routes: BTreeMap::new(),
                 updated_ms: now_ms(),
             });
@@ -196,6 +206,16 @@ pub async fn copilot_session_token(
         copilot_expires_at_ms(&val, now),
     );
     Ok((token, base))
+}
+
+pub async fn start_github_copilot_device_default() -> Result<GitHubDeviceStart> {
+    let http = crate::agent::shared_http_client()?;
+    start_github_copilot_device(&http).await
+}
+
+pub async fn poll_github_copilot_device_default(start: &GitHubDeviceStart) -> Result<StoredProvider> {
+    let http = crate::agent::shared_http_client()?;
+    poll_github_copilot_device(&http, start).await
 }
 
 #[cfg(test)]

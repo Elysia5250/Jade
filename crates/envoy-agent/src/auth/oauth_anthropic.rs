@@ -37,8 +37,7 @@ pub fn parse_code_and_state(input: &str, fallback_state: &str) -> Result<(String
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
         let code = extract_query_param(trimmed, "code")
             .context("redirect URL does not contain `code=`")?;
-        let state =
-            extract_query_param(trimmed, "state").unwrap_or_else(|| fallback_state.to_string());
+        let state = extract_query_param(trimmed, "state").unwrap_or_default();
         return Ok((code, state));
     }
     if let Some((code, state)) = trimmed.split_once('#') {
@@ -55,6 +54,9 @@ pub async fn exchange_anthropic_code(
     create_api_key: bool,
 ) -> Result<StoredProvider> {
     let (code, state) = parse_code_and_state(raw_input, expected_state)?;
+    if state != expected_state {
+        bail!("OAuth state does not match the expected state");
+    }
     let resp = http
         .post(ANTHROPIC_TOKEN_URL)
         .json(&serde_json::json!({
@@ -106,6 +108,7 @@ pub async fn exchange_anthropic_code(
             base_url: "https://api.anthropic.com/v1".to_string(),
             credential: Credential::ApiKey { key: raw_key },
             custom_models: Vec::new(),
+            fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
             updated_ms: now_ms(),
         });
@@ -124,7 +127,38 @@ pub async fn exchange_anthropic_code(
             account_id: None,
         },
         custom_models: Vec::new(),
+        fetched_models: Vec::new(),
         model_routes: BTreeMap::new(),
         updated_ms: now_ms(),
     })
+}
+
+pub async fn exchange_anthropic_code_default(
+    raw_input: &str,
+    verifier: &str,
+    expected_state: &str,
+    create_api_key: bool,
+) -> Result<StoredProvider> {
+    let http = crate::agent::shared_http_client()?;
+    exchange_anthropic_code(&http, raw_input, verifier, expected_state, create_api_key).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mismatched_oauth_state_is_rejected() {
+        let http = reqwest::Client::new();
+        let err = exchange_anthropic_code(
+            &http,
+            "https://platform.claude.com/oauth/code/callback?code=abc&state=evil",
+            "verifier",
+            "expected",
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("state"), "{err}");
+    }
 }

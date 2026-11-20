@@ -10,42 +10,42 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::Moved => {
-                self.inspector.hover_divider = self
-                    .inspector
+                self.ui.inspector.hover_divider = self
+                    .ui.inspector
                     .divider_x
                     .map(|dx| col.abs_diff(dx) <= 1)
                     .unwrap_or(false);
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if self.modal.is_some() {
+                if self.ui.modal.is_some() {
                     return None;
                 }
-                if let Some(dx) = self.inspector.divider_x {
+                if let Some(dx) = self.ui.inspector.divider_x {
                     if col.abs_diff(dx) <= 1 {
-                        self.inspector.dragging_divider = true;
-                        self.inspector.hover_divider = true;
-                        self.selection = None;
-                        self.drag_start = None;
+                        self.ui.inspector.dragging_divider = true;
+                        self.ui.inspector.hover_divider = true;
+                        self.ui.selection = None;
+                        self.ui.drag_start = None;
                         return None;
                     }
                 }
-                self.selection = None;
-                self.drag_start = Some(GridPos { col, row });
+                self.ui.selection = None;
+                self.ui.drag_start = Some(GridPos { col, row });
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if self.inspector.dragging_divider {
-                    let total_w = self.inspector.last_area.x + self.inspector.last_area.width;
+                if self.ui.inspector.dragging_divider {
+                    let total_w = self.ui.inspector.last_area.x + self.ui.inspector.last_area.width;
                     if total_w > 40 {
                         let right_w = total_w.saturating_sub(col).max(24);
                         let ratio = (right_w as f32 / total_w as f32).clamp(0.22, 0.72);
-                        self.inspector.dragged_ratio = Some(ratio);
+                        self.ui.inspector.dragged_ratio = Some(ratio);
                     }
                     return None;
                 }
-                if let Some(start) = self.drag_start {
+                if let Some(start) = self.ui.drag_start {
                     let end = GridPos { col, row };
                     if start != end {
-                        self.selection = Some(MouseSelection {
+                        self.ui.selection = Some(MouseSelection {
                             start,
                             end,
                             active: true,
@@ -54,12 +54,12 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if self.inspector.dragging_divider {
-                    self.inspector.dragging_divider = false;
+                if self.ui.inspector.dragging_divider {
+                    self.ui.inspector.dragging_divider = false;
                     return None;
                 }
-                let drag_start = self.drag_start.take();
-                let finished_sel = if let Some(sel) = self.selection.as_mut() {
+                let drag_start = self.ui.drag_start.take();
+                let finished_sel = if let Some(sel) = self.ui.selection.as_mut() {
                     if sel.active && sel.start != sel.end {
                         sel.active = false;
                         Some((sel.start, sel.end))
@@ -76,42 +76,42 @@ impl App {
                         let chars = copied.chars().count();
                         self.set_toast(format!("copied {chars} chars"), false);
                     }
-                    self.screen_lines.clear();
+                    self.ui.screen_lines.clear();
                     return None;
                 }
-                self.selection = None;
-                if drag_start.is_some() && self.modal.is_none() {
+                self.ui.selection = None;
+                if drag_start.is_some() && self.ui.modal.is_none() {
                     return self.dispatch_click(col, row);
                 }
             }
             MouseEventKind::ScrollUp => {
-                if self.modal.is_some() {
+                if self.ui.modal.is_some() {
                     return None;
                 }
                 if self.is_over_inspector(col, row) {
-                    self.inspector.scroll = self.inspector.scroll.saturating_sub(3);
+                    self.ui.inspector.scroll = self.ui.inspector.scroll.saturating_sub(3);
                 } else {
-                    self.follow = false;
-                    self.transcript_scroll = self.transcript_scroll.saturating_sub(3);
+                    self.ui.follow = false;
+                    self.ui.transcript_scroll = self.ui.transcript_scroll.saturating_sub(3);
                 }
             }
             MouseEventKind::ScrollDown => {
-                if self.modal.is_some() {
+                if self.ui.modal.is_some() {
                     return None;
                 }
                 if self.is_over_inspector(col, row) {
-                    self.inspector.scroll = self
-                        .inspector
+                    self.ui.inspector.scroll = self
+                        .ui.inspector
                         .scroll
                         .saturating_add(3)
-                        .min(self.inspector.max_scroll);
+                        .min(self.ui.inspector.max_scroll);
                 } else {
-                    self.transcript_scroll = self
-                        .transcript_scroll
+                    self.ui.transcript_scroll = self
+                        .ui.transcript_scroll
                         .saturating_add(3)
-                        .min(self.transcript_max_scroll);
-                    if self.transcript_scroll >= self.transcript_max_scroll {
-                        self.follow = true;
+                        .min(self.ui.transcript_max_scroll);
+                    if self.ui.transcript_scroll >= self.ui.transcript_max_scroll {
+                        self.ui.follow = true;
                     }
                 }
             }
@@ -121,7 +121,7 @@ impl App {
     }
 
     fn is_over_inspector(&self, col: u16, row: u16) -> bool {
-        let r = self.inspector.last_area;
+        let r = self.ui.inspector.last_area;
         r.width > 0
             && r.height > 0
             && col >= r.x
@@ -132,7 +132,7 @@ impl App {
 
     pub(in crate::tui) fn dispatch_click(&mut self, col: u16, row: u16) -> Option<Action> {
         let hit = self
-            .hit_regions
+            .ui.hit_regions
             .iter()
             .rev()
             .find(|hr| {
@@ -159,20 +159,20 @@ impl App {
                 }
                 HitTarget::ToggleToolCard(id) => {
                     if let Some(TranscriptItem::Tool { collapsed, .. }) =
-                        self.session.items.iter_mut().find(|i| i.id() == id)
+                        self.session.current.items.iter_mut().find(|i| i.id() == id)
                     {
                         *collapsed = !*collapsed;
                     }
                 }
                 HitTarget::ToggleToolGroup(ids) => {
                     if let Some(&first) = ids.first() {
-                        if !self.expanded_explore_groups.remove(&first) {
-                            self.expanded_explore_groups.insert(first);
+                        if !self.session.expanded_explore_groups.remove(&first) {
+                            self.session.expanded_explore_groups.insert(first);
                         }
                     }
                 }
                 HitTarget::ToggleReasoning(ids) => {
-                    let any_collapsed = self.session.items.iter().any(|item| {
+                    let any_collapsed = self.session.current.items.iter().any(|item| {
                         matches!(
                             item,
                             TranscriptItem::Assistant {
@@ -183,7 +183,7 @@ impl App {
                         )
                     });
                     let next_collapsed = !any_collapsed;
-                    for item in &mut self.session.items {
+                    for item in &mut self.session.current.items {
                         if let TranscriptItem::Assistant {
                             id,
                             reasoning_collapsed,
@@ -203,13 +203,13 @@ impl App {
                     self.open_tool_inspect(id);
                 }
                 HitTarget::OpenJobOutput(job_id) => {
-                    if let Some(job) = self.jobs.iter().find(|j| j.id == job_id).cloned() {
+                    if let Some(job) = self.jobs.list.iter().find(|j| j.id == job_id).cloned() {
                         return Some(Action::AttachJob(job));
                     }
                     self.open_job_output(job_id);
                 }
                 HitTarget::ToggleDiffLayout => {
-                    self.inspector.diff_layout = match self.inspector.diff_layout {
+                    self.ui.inspector.diff_layout = match self.ui.inspector.diff_layout {
                         diff::DiffLayout::Unified => diff::DiffLayout::Split,
                         diff::DiffLayout::Split => diff::DiffLayout::Unified,
                     };
@@ -224,17 +224,17 @@ impl App {
                     return Some(self.run_command(Command::ToggleMode));
                 }
                 HitTarget::CyclePermission => {
-                    self.set_permission_mode(self.perm_mode.cycle());
+                    self.set_permission_mode(self.session.perm_mode.cycle());
                 }
                 HitTarget::SelectAskOption(idx) => {
-                    if let Some(mut ask) = self.pending_ask.take() {
+                    if let Some(mut ask) = self.agent.pending_ask.take() {
                         if let Some(opt) = ask.options.get(idx) {
                             let label = opt.label.clone();
                             self.answer_ask(ask.id, label.clone());
                             self.set_toast(format!("chose: {label}"), false);
                         } else {
                             ask.selected = idx.min(ask.options.len().saturating_sub(1));
-                            self.pending_ask = Some(ask);
+                            self.agent.pending_ask = Some(ask);
                         }
                     }
                 }
@@ -249,11 +249,11 @@ impl App {
         }
 
         if self.is_over_inspector(col, row) {
-            self.focus = Focus::Sidebar;
-        } else if row < self.transcript_area.y + self.transcript_area.height {
-            self.focus = Focus::Transcript;
+            self.ui.focus = Focus::Sidebar;
+        } else if row < self.ui.transcript_area.y + self.ui.transcript_area.height {
+            self.ui.focus = Focus::Transcript;
         } else {
-            self.focus = Focus::Input;
+            self.ui.focus = Focus::Input;
         }
         None
     }
@@ -266,7 +266,7 @@ impl App {
         };
         let mut out = Vec::new();
         for row in start.row..=end.row {
-            let Some(cells) = self.screen_lines.get(row as usize) else {
+            let Some(cells) = self.ui.screen_lines.get(row as usize) else {
                 continue;
             };
             let lo = if row == start.row {
@@ -329,14 +329,15 @@ fn clipboard_process(text: &str) {
         let started = Instant::now();
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => return,
+                Ok(Some(status)) if status.success() => return,
+                Ok(Some(_)) => break,
                 Ok(None) if started.elapsed() >= Duration::from_secs(2) => {
                     let _ = child.kill();
                     let _ = child.wait();
                     return;
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-                Err(_) => return,
+                Err(_) => break,
             }
         }
     }

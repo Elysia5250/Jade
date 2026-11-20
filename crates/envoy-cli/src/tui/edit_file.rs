@@ -4,15 +4,24 @@ use std::path::Path;
 
 pub(super) fn run(tui: &mut Tui, path: &Path) -> Result<(), String> {
     suspend(tui);
+    let editor = editor_program();
     let result = {
         let _guard = Resume(tui);
-        let editor = editor_program();
         // The variable is a program name. Do not split it through a shell.
         std::process::Command::new(&editor).arg(path).status()
     };
-    result
-        .map(|_| ())
-        .map_err(|err| format!("editor failed: {err}"))
+    finish_status(&editor, result)
+}
+
+pub(super) fn finish_status(
+    editor: &str,
+    result: std::io::Result<std::process::ExitStatus>,
+) -> Result<(), String> {
+    match result {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("editor `{editor}` exited with {status}")),
+        Err(err) => Err(format!("editor failed: {err}")),
+    }
 }
 
 fn editor_program() -> String {
@@ -28,6 +37,12 @@ fn editor_program() -> String {
 }
 
 fn suspend(tui: &mut Tui) {
+    if tui.enhanced_keys {
+        let _ = execute!(
+            tui.terminal.backend_mut(),
+            ratatui::crossterm::event::PopKeyboardEnhancementFlags
+        );
+    }
     let _ = disable_raw_mode();
     let _ = execute!(
         tui.terminal.backend_mut(),
@@ -36,6 +51,7 @@ fn suspend(tui: &mut Tui) {
         LeaveAlternateScreen
     );
     let _ = tui.terminal.show_cursor();
+    super::terminal::clear_mode_mask();
 }
 
 fn resume(tui: &mut Tui) {
@@ -48,6 +64,15 @@ fn resume(tui: &mut Tui) {
     if tui.mouse_capture {
         let _ = execute!(tui.terminal.backend_mut(), EnableMouseCapture);
     }
+    if tui.enhanced_keys {
+        let _ = execute!(
+            tui.terminal.backend_mut(),
+            ratatui::crossterm::event::PushKeyboardEnhancementFlags(
+                ratatui::crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            )
+        );
+    }
+    super::terminal::set_mode_mask(tui.mouse_capture, tui.enhanced_keys);
     let _ = tui.terminal.clear();
 }
 

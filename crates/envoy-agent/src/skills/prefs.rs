@@ -5,8 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -28,23 +26,8 @@ fn load(data_dir: &Path) -> SkillPrefs {
 
 fn save(data_dir: &Path, prefs: &SkillPrefs) -> Result<(), String> {
     let text = serde_json::to_string_pretty(prefs).map_err(|err| err.to_string())?;
-    write_private(&prefs_path(data_dir), &text)
-}
-
-fn write_private(path: &Path, text: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| format!("cannot create: {err}"))?;
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|err| format!("cannot create: {err}"))?;
-    file.write_all(text.as_bytes())
-        .map_err(|err| format!("cannot create: {err}"))?;
-    Ok(())
+    envoy_core::fs::write_atomic_sync(&prefs_path(data_dir), text.as_bytes(), 0o600)
+        .map_err(|err| format!("cannot create: {err:#}"))
 }
 
 pub fn injected(data_dir: &Path, name: &str, default_on: bool) -> bool {
@@ -94,7 +77,6 @@ pub fn create_user_skill(data_dir: &Path, name: &str) -> Result<PathBuf, String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     fn tmpdir() -> PathBuf {
         let mut b = [0u8; 4];
@@ -116,12 +98,16 @@ mod tests {
         set_inject(&dir, "from-claude", true).unwrap();
         assert!(!injected(&dir, "from-data", true));
         assert!(injected(&dir, "from-claude", false));
-        let mode = std::fs::metadata(prefs_path(&dir))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(prefs_path(&dir))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

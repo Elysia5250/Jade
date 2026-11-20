@@ -15,6 +15,7 @@ pub struct TurnConfig {
     pub data_dir: PathBuf,
     pub conduit: Option<PathBuf>,
     pub local_socket: Option<PathBuf>,
+    pub local_server: Option<envoy_service::AgentServer>,
     pub target: String,
     pub cwd: PathBuf,
     pub provider: StoredProvider,

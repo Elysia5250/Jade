@@ -9,7 +9,7 @@ use crate::auth::resolve_provider_with_overrides;
 use crate::permissions::PermissionMode;
 use crate::session::ChatMessage;
 use anyhow::{bail, Result};
-use envoy_service::{dialer_for, AgentDialer, Remote, UnixDialer};
+use envoy_service::AgentServer;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -22,20 +22,30 @@ pub(crate) use super::live::{Live, LivePhase, PhaseGuard};
 
 pub struct Runtime {
     pub(crate) data_dir: PathBuf,
-    conduit: Option<PathBuf>,
+    pub(crate) conduit: Option<PathBuf>,
+    pub(crate) local_server: Option<AgentServer>,
     sessions: Mutex<HashMap<String, Arc<Mutex<Live>>>>,
     incarnation_id: u64,
 }
 
 impl Runtime {
     pub fn new(data_dir: PathBuf) -> Arc<Self> {
-        Self::with_conduit(data_dir, None)
+        Self::with_local_server(data_dir, None, None)
     }
 
     pub fn with_conduit(data_dir: PathBuf, conduit: Option<PathBuf>) -> Arc<Self> {
+        Self::with_local_server(data_dir, conduit, None)
+    }
+
+    pub fn with_local_server(
+        data_dir: PathBuf,
+        conduit: Option<PathBuf>,
+        local_server: Option<AgentServer>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             data_dir,
             conduit,
+            local_server,
             sessions: Mutex::new(HashMap::new()),
             incarnation_id: new_incarnation(),
         })
@@ -87,6 +97,7 @@ impl Runtime {
                 state.permissions = state
                     .permissions
                     .rebind_workspace(cwd.clone(), target.clone());
+                state.hooks = super::hooks::new_hook_engine(&self.data_dir, &cwd);
                 state.cwd = cwd;
                 state.target = target;
             }
@@ -121,7 +132,15 @@ impl Runtime {
         live.seq += 1;
         let seq = live.seq;
         live.record_logged(seq, &event);
-        let item = SeqEvent { seq, event };
+        let live_event = if envoy_proto::codec::payload_len(&event) <= 1024 * 1024 {
+            event
+        } else {
+            super::live::slim_event(&event)
+        };
+        let item = SeqEvent {
+            seq,
+            event: live_event,
+        };
         let mut dropped_slow = false;
         live.subs.retain(|tx| match tx.try_send(item.clone()) {
             Ok(()) => true,
@@ -226,6 +245,7 @@ impl Runtime {
             data_dir: self.data_dir.clone(),
             conduit: self.conduit.clone(),
             local_socket,
+            local_server: self.local_server.clone(),
             target,
             cwd,
             provider,
@@ -511,9 +531,11 @@ impl Runtime {
         if let Some((job_id, target, local_socket)) = job {
             let data_dir = self.data_dir.clone();
             let conduit = self.conduit.clone();
+            let local_server = self.local_server.clone();
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
-                    cancel_active_job(&data_dir, &target, local_socket, conduit, job_id).await;
+                    cancel_active_job(&data_dir, &target, local_socket, conduit, local_server, job_id)
+                        .await;
                 });
             }
         }
@@ -582,9 +604,11 @@ fn persist_daemon_session(data_dir: &Path, id: &str, snap: SessionSnapshot) {
     session.cwd = snap.cwd;
     session.target = snap.target;
     session.messages = snap.messages;
-    session.input_tokens = session.input_tokens.max(snap.usage.input_tokens);
-    session.output_tokens = session.output_tokens.max(snap.usage.output_tokens);
-    session.prompt_tokens = session.prompt_tokens.max(snap.usage.context_tokens);
+    session.input_tokens += snap.usage.input_tokens;
+    session.output_tokens += snap.usage.output_tokens;
+    if snap.usage.context_tokens > 0 {
+        session.prompt_tokens = snap.usage.context_tokens;
+    }
     session.cache_read_tokens += snap.usage.cache_read_tokens;
     session.cache_create_tokens += snap.usage.cache_create_tokens;
     if (0.65..=1.65).contains(&snap.usage.calibration_factor) {
@@ -599,13 +623,9 @@ async fn cancel_active_job(
     target: &str,
     local_socket: Option<PathBuf>,
     conduit: Option<PathBuf>,
+    local_server: Option<AgentServer>,
     job_id: u64,
 ) {
-    let dialer: Box<dyn AgentDialer> = match (local_socket, target == "local" || target.is_empty())
-    {
-        (Some(sock), true) => Box::new(UnixDialer::new(sock)),
-        _ => dialer_for(data_dir, target, conduit),
-    };
-    let remote = Remote::new(dialer);
+    let remote = super::remote_for(data_dir, target, conduit, local_socket, local_server);
     let _ = remote.cancel(target, job_id).await;
 }

@@ -214,16 +214,58 @@ impl AnthropicAcc {
         for data in self.redacted {
             reasoning_blocks.push(ReasoningBlock::Redacted { data });
         }
+        let total_input_tokens = self
+            .input_tokens
+            .saturating_add(self.cache_read_tokens)
+            .saturating_add(self.cache_create_tokens);
         StreamReply {
             text: self.text,
             reasoning: self.reasoning,
             tool_calls,
-            input_tokens: self.input_tokens,
+            input_tokens: total_input_tokens,
             output_tokens: self.output_tokens,
             cache_read_tokens: self.cache_read_tokens,
             cache_create_tokens: self.cache_create_tokens,
             reasoning_blocks,
             calibrate: true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn total_input_tokens_includes_cache_read_and_create() {
+        let mut acc = AnthropicAcc::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        acc.on_event(
+            &json!({
+                "type": "message_start",
+                "message": {
+                    "usage": {
+                        "input_tokens": 50,
+                        "cache_read_input_tokens": 80_000,
+                        "cache_creation_input_tokens": 1_200
+                    }
+                }
+            }),
+            &tx,
+        )
+        .unwrap();
+        acc.on_event(
+            &json!({
+                "type": "message_delta",
+                "usage": { "output_tokens": 300 }
+            }),
+            &tx,
+        )
+        .unwrap();
+        let reply = acc.into_reply();
+        assert_eq!(reply.input_tokens, 81_250);
+        assert_eq!(reply.cache_read_tokens, 80_000);
+        assert_eq!(reply.cache_create_tokens, 1_200);
+        assert_eq!(reply.output_tokens, 300);
     }
 }

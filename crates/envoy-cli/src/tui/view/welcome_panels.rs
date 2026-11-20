@@ -9,11 +9,11 @@ fn panel_height(count: usize, area_h: u16) -> u16 {
 }
 
 pub(super) fn draw_path(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let Some(welcome) = app.welcome.as_ref() else {
+    let Some(welcome) = app.ui.welcome.as_ref() else {
         return;
     };
     let inner = popup_inner(frame, theme, area, 16);
-    let choosing_parent = welcome.folder_mode && !welcome.path_mode;
+    let choosing_parent = welcome.mode == WelcomeMode::NewFolderPickParent;
     let mut lines = vec![Line::styled(
         if choosing_parent {
             "  Pick a parent"
@@ -26,7 +26,7 @@ pub(super) fn draw_path(frame: &mut Frame, app: &App, theme: &Theme, area: Rect)
         Span::styled("  > ", Style::default().fg(theme.accent)),
         Span::raw(welcome.path.clone()),
     ]));
-    let comps = complete_directories(&app.session.cwd, &welcome.path);
+    let comps = &app.inputs.welcome_path_comps;
     let sel = welcome.path_selected.min(comps.len().saturating_sub(1));
     let window = 6usize;
     let start = if sel >= window { sel + 1 - window } else { 0 };
@@ -61,16 +61,14 @@ pub(super) fn draw_path(frame: &mut Frame, app: &App, theme: &Theme, area: Rect)
 }
 
 pub(super) fn draw_naming(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let Some(welcome) = app.welcome.as_ref() else {
+    let Some(welcome) = app.ui.welcome.as_ref() else {
         return;
     };
     let inner = popup_inner(frame, theme, area, 12);
-    let (heading, label) = if welcome.folder_mode {
-        ("  New folder", "folder name")
-    } else if welcome.skills_mode {
-        ("  New skill", "skill name")
-    } else {
-        ("  New memory", "title")
+    let (heading, label) = match welcome.mode {
+        WelcomeMode::NewFolderName => ("  New folder", "folder name"),
+        WelcomeMode::SkillsNew => ("  New skill", "skill name"),
+        _ => ("  New memory", "title"),
     };
     let mut lines = vec![Line::styled(
         heading,
@@ -95,7 +93,7 @@ pub(super) fn draw_naming(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
 }
 
 pub(super) fn draw_skills(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let Some(welcome) = app.welcome.as_ref() else {
+    let Some(welcome) = app.ui.welcome.as_ref() else {
         return;
     };
     let height = panel_height(welcome.skills.len(), area.height);
@@ -151,7 +149,7 @@ pub(super) fn draw_skills(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
 }
 
 pub(super) fn draw_memory(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let Some(welcome) = app.welcome.as_ref() else {
+    let Some(welcome) = app.ui.welcome.as_ref() else {
         return;
     };
     let height = panel_height(welcome.notes.len(), area.height);

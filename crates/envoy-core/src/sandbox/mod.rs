@@ -367,3 +367,15 @@ pub(crate) fn is_executable(path: &Path) -> bool {
         true
     }
 }
+
+/// Removes a sandbox scratch directory when dropped.
+#[derive(Debug)]
+pub struct ScratchGuard(pub Option<std::path::PathBuf>);
+
+impl Drop for ScratchGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}

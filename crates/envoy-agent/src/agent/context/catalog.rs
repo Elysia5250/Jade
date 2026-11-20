@@ -9,9 +9,10 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{OnceLock, RwLock};
+use std::time::{Duration, SystemTime};
 
 const UNKNOWN_FALLBACK_WINDOW: u64 = 65_536;
 const MODELS_DEV_TTL_MS: u64 = 24 * 60 * 60 * 1000;
@@ -49,28 +50,54 @@ pub fn caps_path(data_dir: &Path) -> PathBuf {
     data_dir.join("model_caps.json")
 }
 
+type CapsMemEntry = (Option<SystemTime>, u64, CapsCache);
+
+fn caps_mem() -> &'static RwLock<HashMap<PathBuf, CapsMemEntry>> {
+    static CAPS_MEM: OnceLock<RwLock<HashMap<PathBuf, CapsMemEntry>>> = OnceLock::new();
+    CAPS_MEM.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
 pub fn load_caps(data_dir: &Path) -> CapsCache {
-    let Ok(raw) = std::fs::read_to_string(caps_path(data_dir)) else {
+    let path = caps_path(data_dir);
+    let Ok(meta) = std::fs::metadata(&path) else {
+        if let Ok(mut guard) = caps_mem().write() {
+            guard.remove(&path);
+        }
         return CapsCache::default();
     };
-    serde_json::from_str(&raw).unwrap_or_default()
+    let stamp = (meta.modified().ok(), meta.len());
+    if let Ok(guard) = caps_mem().read() {
+        if let Some((m, l, cached)) = guard.get(&path) {
+            if *m == stamp.0 && *l == stamp.1 {
+                return cached.clone();
+            }
+        }
+    }
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return CapsCache::default();
+    };
+    let parsed: CapsCache = serde_json::from_str(&raw).unwrap_or_default();
+    if let Ok(mut guard) = caps_mem().write() {
+        guard.insert(path, (stamp.0, stamp.1, parsed.clone()));
+    }
+    parsed
 }
 
 pub fn save_caps(data_dir: &Path, cache: &CapsCache) -> anyhow::Result<()> {
-    std::fs::create_dir_all(data_dir)?;
-    let tmp_dir = data_dir.join("tmp");
-    std::fs::create_dir_all(&tmp_dir)?;
-    let tmp = tmp_dir.join("model_caps.json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(cache)?)?;
-    std::fs::rename(&tmp, caps_path(data_dir))?;
+    envoy_core::fs::ensure_private_dir(data_dir)?;
+    let path = caps_path(data_dir);
+    let data = serde_json::to_string_pretty(cache)?;
+    envoy_core::fs::write_atomic_sync(&path, data.as_bytes(), 0o600)?;
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if let Ok(mut guard) = caps_mem().write() {
+            guard.insert(path, (meta.modified().ok(), meta.len(), cache.clone()));
+        }
+    }
     Ok(())
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    envoy_core::now_ms()
 }
 
 pub fn cap_key(provider_id: &str, model_id: &str) -> String {
@@ -131,7 +158,7 @@ pub fn parse_size_suffix(model_id: &str) -> Option<u64> {
             continue;
         }
         let (num_str, mult) = if let Some(n) = token.strip_suffix('k') {
-            (n, 1_024u64)
+            (n, 1_000u64)
         } else if let Some(n) = token.strip_suffix('m') {
             (n, 1_000_000u64)
         } else {
@@ -176,7 +203,7 @@ pub fn record_model_cap(
 }
 
 /// One model advertised by a provider's `/models` document.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListedModel {
     pub id: String,
     pub route: Option<crate::auth::ModelRoute>,
@@ -309,7 +336,8 @@ pub fn store_listed_models(
             prov.model_routes.insert(model.id.clone(), route);
         }
     }
-    prov.custom_models = ids.clone();
+    prov.fetched_models = ids.clone();
+    let all_models = prov.all_models();
     save_auth(data_dir, &auth)?;
 
     let mut prefs = load_prefs(data_dir);
@@ -323,7 +351,7 @@ pub fn store_listed_models(
     let keep = prefs.active.as_ref().is_some_and(|active| {
         !active.model_id.is_empty()
             && !crate::auth::is_retired_model(&active.provider_id, &active.model_id)
-            && ids.iter().any(|id| id == &active.model_id)
+            && all_models.iter().any(|id| id == &active.model_id)
     });
     let chosen = if keep {
         prefs.active.clone()
@@ -376,13 +404,13 @@ pub async fn fetch_listed_models(
 }
 
 pub(crate) fn remember_caps_from_models(data_dir: Option<&Path>, provider_id: &str, val: &Value) {
-    let Some(arr) = val["data"].as_array() else {
+    let Some(arr) = val["data"].as_array().or_else(|| val["models"].as_array()) else {
         return;
     };
     let mut discovered = Vec::new();
     let mut reasoning = Vec::new();
     for item in arr {
-        let Some(id) = item["id"].as_str() else {
+        let Some(id) = item["id"].as_str().or_else(|| item["slug"].as_str()) else {
             continue;
         };
         if let Some(ctx) = extract_context_from_model_json(item) {
@@ -540,7 +568,7 @@ mod tests {
         assert_eq!(context_window("qwen4-max"), 1_000_000);
         assert_eq!(context_window("kimi-k3.1-pro"), 1_048_576);
         assert_eq!(context_window("glm-5.3"), 1_048_576);
-        assert_eq!(context_window("my-local-model-32k"), 32_768);
+        assert_eq!(context_window("my-local-model-32k"), 32_000);
         assert_eq!(context_window("unknown-relay-model"), 65_536);
     }
 
@@ -549,15 +577,24 @@ mod tests {
         let raw = serde_json::json!({
             "data": [
                 {"id": "deepseek-chat"},
-                {"id": "deepseek-flash"},
+                {"id": "deepseek-v4.1-flash"},
                 {"id": "deepseek-reasoner"},
+                {"id": "deepseek-flash"},
                 {"id": "deepseek-v4-pro"},
                 {"id": "deepseek-chat"}
             ]
         });
         let usable = usable_listed_models("deepseek", parse_listed_models(&raw));
         let ids: Vec<&str> = usable.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, vec!["deepseek-flash", "deepseek-v4-pro"]);
+        assert_eq!(
+            ids,
+            vec![
+                "deepseek-chat",
+                "deepseek-flash",
+                "deepseek-reasoner",
+                "deepseek-v4-pro",
+            ]
+        );
     }
 
     #[test]
@@ -594,17 +631,17 @@ mod tests {
             protocol: crate::auth::ProviderProtocol::OpenAiChat,
             base_url: "https://api.deepseek.com/v1".into(),
             credential: crate::auth::Credential::ApiKey { key: "sk".into() },
-            custom_models: vec!["deepseek-chat".into()],
+            custom_models: vec!["deepseek-v4.1-flash".into()],
+            fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
             updated_ms: 0,
         };
-        crate::auth::record_provider_login(&dir, sp, Some("deepseek-chat".into())).unwrap();
+        crate::auth::record_provider_login(&dir, sp, Some("deepseek-v4.1-flash".into())).unwrap();
         let listed = usable_listed_models(
             "deepseek",
             parse_listed_models(&serde_json::json!({
                 "data": [
-                    {"id": "deepseek-chat"},
-                    {"id": "deepseek-reasoner"},
+                    {"id": "deepseek-v4.1-flash"},
                     {"id": "deepseek-v4-pro"},
                     {"id": "deepseek-flash"}
                 ]
@@ -614,14 +651,49 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(active.model_id, "deepseek-flash");
+
+        // Live custom_models stay intact and keep active pin on subsequent refresh.
+        let mut auth = crate::auth::load_auth(&dir);
+        auth.credentials
+            .get_mut("deepseek")
+            .unwrap()
+            .custom_models
+            .push("my-custom-pinned".into());
+        crate::auth::save_auth(&dir, &auth).unwrap();
+        crate::auth::set_active_model(
+            &dir,
+            crate::auth::ModelRef {
+                provider_id: "deepseek".into(),
+                model_id: "my-custom-pinned".into(),
+            },
+        )
+        .unwrap();
+        let kept = store_listed_models(&dir, "deepseek", &listed)
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.model_id, "my-custom-pinned");
         let ids: Vec<_> = crate::auth::available_models(&dir)
             .into_iter()
             .map(|m| m.model_id)
             .collect();
-        assert_eq!(
-            ids,
-            vec!["deepseek-flash".to_string(), "deepseek-v4-pro".to_string()]
-        );
+        assert!(ids.contains(&"my-custom-pinned".to_string()));
+        assert!(ids.contains(&"deepseek-flash".to_string()));
+        assert!(ids.contains(&"deepseek-v4-pro".to_string()));
+        assert!(!ids.contains(&"deepseek-v4.1-flash".to_string()));
+
+        // Codex {"models":[{"slug":...}]} also writes caps into model_caps.json
+        let codex_doc = serde_json::json!({
+            "models": [{
+                "slug": "gpt-codex-slug",
+                "context_window": 320_000,
+                "max_output_tokens": 64_000
+            }]
+        });
+        remember_caps_from_models(Some(&dir), "openai", &codex_doc);
+        let cap = resolve_model_cap(&dir, "openai", "gpt-codex-slug");
+        assert_eq!(cap.context_window, 320_000);
+        assert_eq!(cap.source, "api");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

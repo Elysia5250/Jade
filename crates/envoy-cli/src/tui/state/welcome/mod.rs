@@ -8,7 +8,7 @@ mod skills;
 impl App {
     pub(in crate::tui) fn open_welcome(&mut self) {
         let here =
-            std::fs::canonicalize(&self.session.cwd).unwrap_or_else(|_| self.session.cwd.clone());
+            std::fs::canonicalize(&self.session.current.cwd).unwrap_or_else(|_| self.session.current.cwd.clone());
         let here_resumes = exact_session_for_cwd(&self.data_dir, &here).is_some();
         let mut rows = vec![WelcomeRow::Here(here.clone(), here_resumes)];
         for hit in recent_workspaces(&self.data_dir) {
@@ -27,17 +27,13 @@ impl App {
         rows.push(WelcomeRow::Account);
         rows.push(WelcomeRow::Skills);
         rows.push(WelcomeRow::Memory);
-        self.welcome = Some(Welcome {
+        self.ui.welcome = Some(Welcome {
             rows,
             selected: 0,
-            path_mode: false,
+            mode: WelcomeMode::Home,
             path: String::new(),
             path_selected: 0,
             error: None,
-            folder_mode: false,
-            skills_mode: false,
-            memory_mode: false,
-            naming: false,
             folder_parent: None,
             draft: String::new(),
             list_selected: 0,
@@ -54,11 +50,11 @@ impl App {
         if clean.is_empty() {
             return;
         }
-        if let Some(welcome) = self.welcome.as_mut() {
-            if welcome.naming {
+        if let Some(welcome) = self.ui.welcome.as_mut() {
+            if welcome.mode.is_naming() {
                 welcome.draft.push_str(&clean);
                 welcome.error = None;
-            } else if welcome.path_mode || welcome.folder_mode {
+            } else if welcome.mode.is_path_input() {
                 welcome.path.push_str(&clean);
                 welcome.path_selected = 0;
                 welcome.error = None;
@@ -70,39 +66,29 @@ impl App {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return Action::Quit;
         }
-        let (naming, path_mode, folder_mode, skills_mode, memory_mode) = self
-            .welcome
+        let mode = self
+            .ui.welcome
             .as_ref()
-            .map(|w| {
-                (
-                    w.naming,
-                    w.path_mode,
-                    w.folder_mode,
-                    w.skills_mode,
-                    w.memory_mode,
-                )
-            })
-            .unwrap_or((false, false, false, false, false));
-        if naming {
+            .map(|w| w.mode)
+            .unwrap_or(WelcomeMode::Home);
+        if mode.is_naming() {
             return self.handle_welcome_naming(key);
         }
-        if path_mode || folder_mode {
+        if mode.is_path_input() {
             return self.handle_path_keys(key);
         }
-        if skills_mode {
-            return self.handle_welcome_skills(key);
+        match mode {
+            WelcomeMode::Skills => self.handle_welcome_skills(key),
+            WelcomeMode::Memory => self.handle_welcome_memory(key),
+            _ => self.handle_welcome_home(key),
         }
-        if memory_mode {
-            return self.handle_welcome_memory(key);
-        }
-        self.handle_welcome_home(key)
     }
 
     pub(super) fn enter_workspace_path(&mut self, raw: &str) -> Action {
-        let candidate = resolve_cd_path(&self.session.cwd, raw.trim());
+        let candidate = resolve_cd_path(&self.session.current.cwd, raw.trim());
         let path = std::fs::canonicalize(&candidate).unwrap_or(candidate);
         if !path.is_dir() {
-            if let Some(welcome) = self.welcome.as_mut() {
+            if let Some(welcome) = self.ui.welcome.as_mut() {
                 welcome.error = Some(format!("not a directory: {}", path.display()));
             }
             return Action::None;
@@ -114,15 +100,20 @@ impl App {
     fn handle_welcome_naming(&mut self, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Esc => {
-                if let Some(welcome) = self.welcome.as_mut() {
-                    welcome.naming = false;
+                if let Some(welcome) = self.ui.welcome.as_mut() {
+                    welcome.mode = match welcome.mode {
+                        WelcomeMode::NewFolderName => WelcomeMode::NewFolderPickParent,
+                        WelcomeMode::SkillsNew => WelcomeMode::Skills,
+                        WelcomeMode::MemoryNew => WelcomeMode::Memory,
+                        _ => WelcomeMode::Home,
+                    };
                     welcome.draft.clear();
                     welcome.error = None;
                 }
                 Action::None
             }
             KeyCode::Backspace => {
-                if let Some(welcome) = self.welcome.as_mut() {
+                if let Some(welcome) = self.ui.welcome.as_mut() {
                     welcome.draft.pop();
                     welcome.error = None;
                 }
@@ -130,7 +121,7 @@ impl App {
             }
             KeyCode::Enter => self.submit_welcome_name(),
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(welcome) = self.welcome.as_mut() {
+                if let Some(welcome) = self.ui.welcome.as_mut() {
                     welcome.draft.push(c);
                     welcome.error = None;
                 }
@@ -141,73 +132,75 @@ impl App {
     }
 
     fn submit_welcome_name(&mut self) -> Action {
-        let Some(welcome) = self.welcome.as_ref() else {
+        let Some(welcome) = self.ui.welcome.as_ref() else {
             return Action::None;
         };
-        let folder = welcome.folder_mode;
-        let skills = welcome.skills_mode;
-        let memory = welcome.memory_mode;
+        let mode = welcome.mode;
         let draft = welcome.draft.clone();
         let parent = welcome.folder_parent.clone();
-        if folder {
-            let Some(parent) = parent else {
-                if let Some(welcome) = self.welcome.as_mut() {
-                    welcome.error = Some("not a directory".into());
-                }
-                return Action::None;
-            };
-            return match folder::create_workspace_dir(&parent, &draft) {
-                Ok(path) => {
-                    self.activate_workspace_with_mode(path, false);
-                    Action::None
-                }
-                Err(err) => {
-                    if let Some(welcome) = self.welcome.as_mut() {
-                        welcome.error = Some(err);
+        match mode {
+            WelcomeMode::NewFolderName => {
+                let Some(parent) = parent else {
+                    if let Some(welcome) = self.ui.welcome.as_mut() {
+                        welcome.error = Some("not a directory".into());
                     }
-                    Action::None
-                }
-            };
-        }
-        if skills {
-            return match envoy_agent::skills::prefs::create_user_skill(&self.data_dir, &draft) {
-                Ok(path) => {
-                    let name = draft.trim().to_string();
-                    if let Some(welcome) = self.welcome.as_mut() {
-                        welcome.naming = false;
-                        welcome.draft.clear();
-                        welcome.error = None;
+                    return Action::None;
+                };
+                match folder::create_workspace_dir(&parent, &draft) {
+                    Ok(path) => {
+                        self.activate_workspace_with_mode(path, false);
+                        Action::None
                     }
-                    self.reload_welcome_skills();
-                    if let Some(welcome) = self.welcome.as_mut() {
-                        if let Some(idx) =
-                            welcome.skills.iter().position(|skill| skill.name == name)
-                        {
-                            welcome.list_selected = idx;
+                    Err(err) => {
+                        if let Some(welcome) = self.ui.welcome.as_mut() {
+                            welcome.error = Some(err);
                         }
+                        Action::None
                     }
-                    Action::EditFile(path)
                 }
-                Err(err) => {
-                    if let Some(welcome) = self.welcome.as_mut() {
-                        welcome.error = Some(err);
+            }
+            WelcomeMode::SkillsNew => {
+                match envoy_agent::skills::prefs::create_user_skill(&self.data_dir, &draft) {
+                    Ok(path) => {
+                        let name = draft.trim().to_string();
+                        if let Some(welcome) = self.ui.welcome.as_mut() {
+                            welcome.mode = WelcomeMode::Skills;
+                            welcome.draft.clear();
+                            welcome.error = None;
+                        }
+                        self.reload_welcome_skills();
+                        if let Some(welcome) = self.ui.welcome.as_mut() {
+                            if let Some(idx) =
+                                welcome.skills.iter().position(|skill| skill.name == name)
+                            {
+                                welcome.list_selected = idx;
+                            }
+                        }
+                        Action::EditFile(path)
                     }
-                    Action::None
+                    Err(err) => {
+                        if let Some(welcome) = self.ui.welcome.as_mut() {
+                            welcome.error = Some(err);
+                        }
+                        Action::None
+                    }
                 }
-            };
-        }
-        if memory {
-            return match envoy_agent::memory::create(&self.data_dir, &draft) {
+            }
+            WelcomeMode::MemoryNew => match envoy_agent::memory::create(
+                &self.data_dir,
+                &self.session.current.cwd,
+                &draft,
+            ) {
                 Ok(note) => {
                     let id = note.id.clone();
                     let path = note.path.clone();
-                    if let Some(welcome) = self.welcome.as_mut() {
-                        welcome.naming = false;
+                    if let Some(welcome) = self.ui.welcome.as_mut() {
+                        welcome.mode = WelcomeMode::Memory;
                         welcome.draft.clear();
                         welcome.error = None;
                     }
                     self.reload_welcome_notes();
-                    if let Some(welcome) = self.welcome.as_mut() {
+                    if let Some(welcome) = self.ui.welcome.as_mut() {
                         if let Some(idx) = welcome.notes.iter().position(|item| item.id == id) {
                             welcome.list_selected = idx;
                         }
@@ -215,37 +208,37 @@ impl App {
                     Action::EditFile(path)
                 }
                 Err(err) => {
-                    if let Some(welcome) = self.welcome.as_mut() {
+                    if let Some(welcome) = self.ui.welcome.as_mut() {
                         welcome.error = Some(err);
                     }
                     Action::None
                 }
-            };
+            },
+            _ => Action::None,
         }
-        Action::None
     }
 
     fn handle_welcome_home(&mut self, key: KeyEvent) -> Action {
         let len = self
-            .welcome
+            .ui.welcome
             .as_ref()
             .map(|w| w.rows.len())
             .unwrap_or(1)
             .max(1);
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                if let Some(welcome) = self.welcome.as_mut() {
+                if let Some(welcome) = self.ui.welcome.as_mut() {
                     welcome.selected = welcome.selected.saturating_sub(1);
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if let Some(welcome) = self.welcome.as_mut() {
+                if let Some(welcome) = self.ui.welcome.as_mut() {
                     welcome.selected = (welcome.selected + 1).min(len - 1);
                 }
             }
             KeyCode::Char('n') => {
                 let row = self
-                    .welcome
+                    .ui.welcome
                     .as_ref()
                     .and_then(|w| w.rows.get(w.selected))
                     .cloned();
@@ -261,45 +254,40 @@ impl App {
 
     fn activate_welcome_row(&mut self) -> Action {
         let row = self
-            .welcome
+            .ui.welcome
             .as_ref()
             .and_then(|w| w.rows.get(w.selected))
             .cloned();
         match row {
             Some(WelcomeRow::OpenPath) => {
-                if let Some(welcome) = self.welcome.as_mut() {
-                    welcome.path_mode = true;
-                    welcome.folder_mode = false;
+                if let Some(welcome) = self.ui.welcome.as_mut() {
+                    welcome.mode = WelcomeMode::OpenPath;
                     welcome.path_selected = 0;
                     welcome.error = None;
                 }
             }
             Some(WelcomeRow::NewFolder) => {
-                if let Some(welcome) = self.welcome.as_mut() {
-                    welcome.folder_mode = true;
-                    welcome.path_mode = false;
+                if let Some(welcome) = self.ui.welcome.as_mut() {
+                    welcome.mode = WelcomeMode::NewFolderPickParent;
                     welcome.path.clear();
                     welcome.path_selected = 0;
-                    welcome.naming = false;
                     welcome.error = None;
                 }
             }
             Some(WelcomeRow::Account) => self.open_login_modal(),
             Some(WelcomeRow::Skills) => {
-                if let Some(welcome) = self.welcome.as_mut() {
-                    welcome.skills_mode = true;
+                if let Some(welcome) = self.ui.welcome.as_mut() {
+                    welcome.mode = WelcomeMode::Skills;
                     welcome.list_selected = 0;
-                    welcome.naming = false;
                     welcome.draft.clear();
                     welcome.error = None;
                 }
                 self.reload_welcome_skills();
             }
             Some(WelcomeRow::Memory) => {
-                if let Some(welcome) = self.welcome.as_mut() {
-                    welcome.memory_mode = true;
+                if let Some(welcome) = self.ui.welcome.as_mut() {
+                    welcome.mode = WelcomeMode::Memory;
                     welcome.list_selected = 0;
-                    welcome.naming = false;
                     welcome.draft.clear();
                     welcome.error = None;
                 }
@@ -314,18 +302,23 @@ impl App {
     }
 
     pub(super) fn begin_welcome_name(&mut self) {
-        if let Some(welcome) = self.welcome.as_mut() {
-            welcome.naming = true;
+        if let Some(welcome) = self.ui.welcome.as_mut() {
+            welcome.mode = match welcome.mode {
+                WelcomeMode::NewFolderPickParent | WelcomeMode::NewFolderName => {
+                    WelcomeMode::NewFolderName
+                }
+                WelcomeMode::Skills | WelcomeMode::SkillsNew => WelcomeMode::SkillsNew,
+                WelcomeMode::Memory | WelcomeMode::MemoryNew => WelcomeMode::MemoryNew,
+                other => other,
+            };
             welcome.draft.clear();
             welcome.error = None;
         }
     }
 
     pub(super) fn leave_welcome_panel(&mut self) {
-        if let Some(welcome) = self.welcome.as_mut() {
-            welcome.skills_mode = false;
-            welcome.memory_mode = false;
-            welcome.naming = false;
+        if let Some(welcome) = self.ui.welcome.as_mut() {
+            welcome.mode = WelcomeMode::Home;
             welcome.draft.clear();
             welcome.error = None;
         }
@@ -333,7 +326,7 @@ impl App {
     }
 
     pub(super) fn bump_welcome_list(&mut self, delta: isize, len: usize) {
-        let Some(welcome) = self.welcome.as_mut() else {
+        let Some(welcome) = self.ui.welcome.as_mut() else {
             return;
         };
         if len == 0 {
@@ -348,12 +341,13 @@ impl App {
     }
 
     fn recount_welcome(&mut self) {
-        let skill_count = envoy_agent::skills::discover_skills(&self.data_dir, &self.session.cwd)
+        let skill_count = envoy_agent::skills::discover_skills(&self.data_dir, &self.session.current.cwd)
             .into_iter()
             .filter(|skill| skill.scope == envoy_agent::skills::SkillScope::User)
             .count();
-        let memory_count = envoy_agent::memory::list(&self.data_dir).len();
-        if let Some(welcome) = self.welcome.as_mut() {
+        let memory_count =
+            envoy_agent::memory::list_for(&self.data_dir, &self.session.current.cwd).len();
+        if let Some(welcome) = self.ui.welcome.as_mut() {
             welcome.skill_count = skill_count;
             welcome.memory_count = memory_count;
         }
@@ -364,7 +358,7 @@ impl App {
     }
 
     fn activate_workspace_with_mode(&mut self, path: PathBuf, resume: bool) {
-        self.welcome = None;
+        self.ui.welcome = None;
         let loaded = if resume {
             exact_session_for_cwd(&self.data_dir, &path)
         } else {
@@ -375,15 +369,9 @@ impl App {
         } else {
             // A new id so the daemon cannot keep the launch directory from an
             // earlier Resume of the session created before the picker closed.
-            let target = self.session.target.clone();
-            self.session = Session::new(path, target);
-            self.selected_card = None;
-            self.follow = true;
-            self.expanded_explore_groups.clear();
-            self.transcript_cache.clear();
-            self.inspector = InspectorState::default();
-            self.workspace_index.invalidate();
-            self.reset_agent_view();
+            let target = self.session.current.target.clone();
+            self.session.current = Session::new(path, target);
+            self.reset_session_view();
         }
         self.spawn_agent_attach();
     }

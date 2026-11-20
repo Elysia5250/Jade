@@ -29,25 +29,28 @@ use welcome::draw_workspace_picker;
 pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     let theme = app.theme();
     let area = frame.area();
-    app.hit_regions.clear();
+    app.ui.hit_regions.clear();
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
 
     frame.render_widget(Block::default().style(Style::default().bg(theme.bg)), area);
 
-    if app.welcome.is_some() {
+    if app.ui.welcome.is_some() {
         draw_workspace_picker(frame, app, &theme, area);
-        if app.modal.is_some() {
+        if app.ui.modal.is_some() {
             draw_modal(frame, app, &theme, area);
         }
         return;
     }
 
     let show_inspector =
-        app.show_sidebar && (area.width >= 104 || (app.inspector.force_open && area.width >= 76));
+        app.ui.show_sidebar && (area.width >= 104 || (app.ui.inspector.force_open && area.width >= 76));
 
     let (main_area, sidebar_area, divider_x) = if show_inspector {
-        let desired = if let Some(ratio) = app.inspector.dragged_ratio {
+        let desired = if let Some(ratio) = app.ui.inspector.dragged_ratio {
             (area.width as f32 * ratio).round() as u16
-        } else if app.inspector.tab.prefers_wide() {
+        } else if app.ui.inspector.tab.prefers_wide() {
             (area.width as f32 * 0.46).round() as u16
         } else {
             (area.width as f32 * 0.34).round() as u16
@@ -72,13 +75,13 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
             Some(div_x),
         )
     } else {
-        app.inspector.last_area = Rect::default();
+        app.ui.inspector.last_area = Rect::default();
         (area, None, None)
     };
-    app.inspector.divider_x = divider_x;
+    app.ui.inspector.divider_x = divider_x;
 
     if let Some(dx) = divider_x {
-        let active = app.inspector.dragging_divider || app.inspector.hover_divider;
+        let active = app.ui.inspector.dragging_divider || app.ui.inspector.hover_divider;
         let glyph = "|";
         let fg = if active { theme.accent } else { theme.border };
         let div_lines: Vec<Line> = (0..area.height)
@@ -98,7 +101,7 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     let column = centered_column(main_area, 96);
     let editor_inner_width = column.width.saturating_sub(8).max(10) as usize;
     let (visual_lines, cursor_row, cursor_col) =
-        layout_editor_text(&app.input, app.input_cursor, editor_inner_width);
+        layout_editor_text(&app.ui.input, app.ui.input_cursor, editor_inner_width);
     let inner_rows = visual_lines.len().clamp(2, 8) as u16;
     let v_pad: u16 = if main_area.height >= 16 { 1 } else { 0 };
     let editor_height = inner_rows + 2 + v_pad * 2;
@@ -151,8 +154,8 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(ask_rect) = ask_area {
         draw_ask(frame, app, &theme, ask_rect);
     } else {
-        if app.focus == Focus::Input && app.modal.is_none() {
-            if !app.cd_completions().is_empty() {
+        if app.ui.focus == Focus::Input && app.ui.modal.is_none() {
+            if !app.inputs.cd_comps.is_empty() {
                 draw_cd_menu(frame, app, &theme, editor_area);
             } else if !app.filtered_slash().is_empty() {
                 draw_slash_menu(frame, app, &theme, editor_area);
@@ -160,12 +163,12 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
                 draw_at_menu(frame, app, &theme, editor_area);
             }
         }
-        if app.modal.is_some() {
+        if app.ui.modal.is_some() {
             draw_modal(frame, app, &theme, area);
         }
     }
 
-    if app.modal.is_none() && app.pending_ask.is_none() && app.focus == Focus::Input {
+    if app.ui.modal.is_none() && app.agent.pending_ask.is_none() && app.ui.focus == Focus::Input {
         let x = editor_area.x + 4 + cursor_col as u16;
         let visible_row = cursor_row
             .saturating_sub(editor_skip)
@@ -179,11 +182,11 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     let buf = frame.buffer_mut();
-    apply_selection_highlight(buf, app.selection.as_ref(), theme.selection);
-    if app.selection.as_ref().is_some_and(|sel| sel.active) {
-        snapshot_screen_lines(buf, &mut app.screen_lines);
+    apply_selection_highlight(buf, app.ui.selection.as_ref(), theme.selection);
+    if app.ui.selection.as_ref().is_some_and(|sel| sel.active) {
+        snapshot_screen_lines(buf, &mut app.ui.screen_lines);
     } else {
-        app.screen_lines.clear();
+        app.ui.screen_lines.clear();
     }
 }
 
@@ -224,7 +227,7 @@ fn apply_selection_highlight(
     }
 }
 
-fn snapshot_screen_lines(buf: &ratatui::buffer::Buffer, out: &mut Vec<Vec<String>>) {
+pub(in crate::tui) fn snapshot_screen_lines(buf: &ratatui::buffer::Buffer, out: &mut Vec<Vec<String>>) {
     let area = buf.area;
     let total_rows = (area.y + area.height) as usize;
     let total_cols = (area.x + area.width) as usize;

@@ -2,7 +2,7 @@
 use crate::tui::*;
 
 pub(super) fn ask_inline_height(app: &App, width: u16) -> u16 {
-    let Some(ask) = &app.pending_ask else {
+    let Some(ask) = &app.agent.pending_ask else {
         return 0;
     };
     let inner_w = width.saturating_sub(4).max(16) as usize;
@@ -18,7 +18,7 @@ pub(super) fn ask_inline_height(app: &App, width: u16) -> u16 {
 }
 
 pub(super) fn draw_ask(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
-    let Some(ask) = &app.pending_ask else {
+    let Some(ask) = &app.agent.pending_ask else {
         return;
     };
     if area.width < 20 || area.height < 5 {
@@ -58,7 +58,7 @@ pub(super) fn draw_ask(frame: &mut Frame, app: &mut App, theme: &Theme, area: Re
     for (index, option) in ask.options.iter().enumerate() {
         let row_y = inner.y + lines.len() as u16;
         if row_y < inner.y + inner.height {
-            app.hit_regions.push(HitRegion {
+            app.ui.hit_regions.push(HitRegion {
                 rect: Rect {
                     x: inner.x,
                     y: row_y,

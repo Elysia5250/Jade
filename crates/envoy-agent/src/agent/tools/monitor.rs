@@ -1,10 +1,10 @@
 //! Background log monitor tool (`start`, `list`, `stop`).
 
-use super::resolve_path;
 use crate::agent::asks::AskBroker;
 use crate::agent::events::AgentEvent;
 use crate::agent::monitors::{MonitorBroker, MonitorStartSpec};
 use crate::permissions::PermissionEngine;
+use crate::tools_core::resolve_path;
 use anyhow::{bail, Context, Result};
 use envoy_proto::{SubmitRequest, TaskSpec, DEFAULT_GROUP};
 use envoy_service::{AgentDialer, Remote};

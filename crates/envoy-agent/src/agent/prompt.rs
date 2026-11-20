@@ -28,7 +28,7 @@ impl EnvDiskSnapshot {
                 agents: None,
             };
         }
-        let memory = crate::memory::prompt_block(data_dir);
+        let memory = crate::memory::prompt_block(data_dir, cwd);
         let found = super::subagent::discover_agents(data_dir, cwd);
         let agents = super::subagent::format_agents_catalog(&found).map(|catalog| {
             let rule = super::delegate_pref::instruction(data_dir);
@@ -168,12 +168,33 @@ struct VolatileTail {
     pre_model: Option<String>,
 }
 
+pub(crate) fn is_synthetic_tail_message(msg: &ChatMessage) -> bool {
+    msg.role == ChatRole::User
+        && (msg.content.starts_with(ENV_UPDATE_PREFIX) || msg.content.starts_with(PRE_MODEL_PREFIX))
+}
+
 fn is_env_update(msg: &ChatMessage) -> bool {
     msg.role == ChatRole::User && msg.content.starts_with(ENV_UPDATE_PREFIX)
 }
 
 fn is_pre_model(msg: &ChatMessage) -> bool {
     msg.role == ChatRole::User && msg.content.starts_with(PRE_MODEL_PREFIX)
+}
+
+fn latest_emitted_env_note(messages: &[ChatMessage]) -> Option<&str> {
+    for msg in messages.iter().rev() {
+        if let Some(rest) = msg
+            .content
+            .strip_prefix(ENV_UPDATE_PREFIX)
+            .and_then(|s| s.strip_suffix("\n</environment_update>"))
+        {
+            return Some(rest);
+        }
+    }
+    messages
+        .first()
+        .and_then(|msg| msg.content.strip_prefix(ENV_PREFIX))
+        .and_then(|s| s.strip_suffix("\n</environment>"))
 }
 
 fn take_volatile_tail(messages: &mut Vec<ChatMessage>) -> VolatileTail {
@@ -213,7 +234,7 @@ pub(crate) fn sync_environment(messages: &mut Vec<ChatMessage>, note: Option<&st
         .first()
         .is_some_and(|msg| msg.content.starts_with(ENV_PREFIX))
     {
-        if messages[0].content == content {
+        if latest_emitted_env_note(messages) == Some(note) {
             tail.environment_update = None;
         } else {
             tail.environment_update = Some(format!(
@@ -319,22 +340,25 @@ fn project_instructions(cwd: &Path) -> Option<String> {
 }
 
 fn instruction_files(cwd: &Path) -> Vec<PathBuf> {
-    let mut chain = Vec::new();
+    let mut dirs = Vec::new();
     let mut dir = cwd.to_path_buf();
     loop {
-        for name in ["AGENTS.md", "ENVOY.md"] {
-            let path = dir.join(name);
-            if path.is_file() {
-                chain.push(path);
-                break;
-            }
-        }
+        dirs.push(dir.clone());
         let at_git_root = dir.join(".git").exists();
         if at_git_root || !dir.pop() {
             break;
         }
     }
-    chain.reverse();
+    dirs.reverse();
+    let mut chain = Vec::new();
+    for dir in dirs {
+        for name in ["AGENTS.md", "ENVOY.md"] {
+            let path = dir.join(name);
+            if path.is_file() {
+                chain.push(path);
+            }
+        }
+    }
     chain
 }
 
@@ -474,5 +498,49 @@ mod tests {
         let crate_at = prompt.find("crate rule").unwrap();
         assert!(root_at < crate_at);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unchanged_environment_update_is_not_duplicated_across_tool_steps() {
+        let mut messages = vec![env_message("initial prompt".into())];
+        sync_environment(&mut messages, Some("base env"));
+        sync_environment(&mut messages, Some("base env\n- todo 1"));
+        messages.push(ack_message());
+        messages.push(ChatMessage {
+            role: ChatRole::Tool,
+            content: "tool out".into(),
+            reasoning: None,
+            tool_calls: Vec::new(),
+            tool_call_id: Some("c1".into()),
+            tool_name: Some("exec".into()),
+            reasoning_blocks: Vec::new(),
+        });
+        for _ in 0..3 {
+            sync_environment(&mut messages, Some("base env\n- todo 1"));
+        }
+        let updates = messages
+            .iter()
+            .filter(|msg| msg.content.starts_with(ENV_UPDATE_PREFIX))
+            .count();
+        assert_eq!(updates, 1);
+
+        sync_environment(&mut messages, Some("base env\n- todo 2"));
+        let updates_after_change = messages
+            .iter()
+            .filter(|msg| msg.content.starts_with(ENV_UPDATE_PREFIX))
+            .count();
+        assert_eq!(updates_after_change, 2);
+    }
+
+    #[test]
+    fn same_directory_agents_and_envoy_are_both_injected() {
+        let dir = tmpdir("both-md");
+        std::fs::write(dir.join("AGENTS.md"), "agents-body-marker").unwrap();
+        std::fs::write(dir.join("ENVOY.md"), "envoy-body-marker").unwrap();
+        let prompt = build_system_prompt("local", &dir);
+        let agents_at = prompt.find("agents-body-marker").unwrap();
+        let envoy_at = prompt.find("envoy-body-marker").unwrap();
+        assert!(agents_at < envoy_at);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

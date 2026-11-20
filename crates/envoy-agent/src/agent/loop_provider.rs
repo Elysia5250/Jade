@@ -4,7 +4,7 @@
 use super::config::TurnConfig;
 use super::context::{
     is_context_overflow_error, parse_overflow_limit, prepare_context, record_model_cap,
-    resolve_budget, tools_overhead, BudgetPlan, TokenCalibration,
+    resolve_budget, tools_overhead_for, BudgetPlan, TokenCalibration,
 };
 use super::events::AgentEvent;
 use super::loop_hooks::TurnHookSession;
@@ -31,6 +31,10 @@ pub(crate) async fn call_provider_with_overflow_retry(
     plan: &mut BudgetPlan,
     hook_session: Option<&mut TurnHookSession>,
     step: usize,
+    total_in: &mut u64,
+    total_out: &mut u64,
+    cache_read_tokens: &mut u64,
+    cache_create_tokens: &mut u64,
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<StreamReply> {
     let mut max_tokens = turn_max_tokens(cfg);
@@ -69,6 +73,7 @@ pub(crate) async fn call_provider_with_overflow_retry(
         *plan = resolve_budget(&cfg.data_dir, &cfg.provider.id, &cfg.model.model_id);
     }
 
+    let overhead = tools_overhead_for(Some(&cfg.permissions), tool_filter, extra_tools);
     let compacted = match hook_session {
         Some(hs) => {
             hs.prepare_context_step(
@@ -83,7 +88,7 @@ pub(crate) async fn call_provider_with_overflow_retry(
                 messages,
                 calibration,
                 plan,
-                tools_overhead(extra_tools),
+                overhead,
                 true,
                 tx,
             )
@@ -101,7 +106,7 @@ pub(crate) async fn call_provider_with_overflow_retry(
                 messages,
                 calibration,
                 plan,
-                tools_overhead(extra_tools),
+                overhead,
                 true,
                 None,
                 Some(tx),
@@ -115,6 +120,10 @@ pub(crate) async fn call_provider_with_overflow_retry(
     let Some(outcome) = compacted else {
         return Err(err);
     };
+    *total_in += outcome.input_tokens;
+    *total_out += outcome.output_tokens;
+    *cache_read_tokens += outcome.cache_read_tokens;
+    *cache_create_tokens += outcome.cache_create_tokens;
     let _ = tx.send(AgentEvent::Compacted {
         messages: outcome.messages,
         before_tokens: outcome.before_tokens,
@@ -232,6 +241,9 @@ pub(super) async fn finalize_step_limit(
     mut total_in: u64,
     mut total_out: u64,
     mut context_tokens: u64,
+    mut cache_read_tokens: u64,
+    mut cache_create_tokens: u64,
+    calibration_factor: f64,
     max_steps: usize,
     hook_session: &TurnHookSession,
     tx: &mpsc::UnboundedSender<AgentEvent>,
@@ -275,6 +287,8 @@ pub(super) async fn finalize_step_limit(
         Ok(reply) => {
             total_in += reply.input_tokens;
             total_out += reply.output_tokens;
+            cache_read_tokens += reply.cache_read_tokens;
+            cache_create_tokens += reply.cache_create_tokens;
             if reply.input_tokens > 0 {
                 context_tokens = reply.input_tokens;
             }
@@ -297,16 +311,16 @@ pub(super) async fn finalize_step_limit(
         tool_calls: Vec::new(),
         tool_call_id: None,
         tool_name: None,
-    
-        reasoning_blocks: Vec::new(),});
+        reasoning_blocks: Vec::new(),
+    });
     Ok(LoopOutcome {
         messages,
         input_tokens: total_in,
         output_tokens: total_out,
         context_tokens,
-        cache_read_tokens: 0,
-        cache_create_tokens: 0,
-        calibration_factor: 1.0,
+        cache_read_tokens,
+        cache_create_tokens,
+        calibration_factor,
         hook_state: hook_session.state.clone(),
     })
 }

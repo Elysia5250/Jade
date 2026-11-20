@@ -1,10 +1,10 @@
 //! Fold source observations down to an outline.
 //!
-//! Rust uses tree-sitter. Other source files use signature lines and indent.
-//! Shell logs and prose stay with the caller.
+//! Rust uses a lightweight structural scanner for item headers and bodies.
+//! Other source files use signature lines and indent. Shell logs and prose stay
+//! with the caller.
 
 use std::collections::HashSet;
-use tree_sitter::Node;
 
 const SOURCE_EXT: &[&str] = &[
     "rs", "py", "pyi", "ts", "tsx", "js", "jsx", "mjs", "cjs", "go", "java", "c", "h", "cc", "cpp",
@@ -35,13 +35,8 @@ pub fn fold_source(path: &str, source: &str, focus: &HashSet<String>) -> Option<
 }
 
 fn fold_rust(source: &str, focus: &HashSet<String>) -> Option<String> {
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&tree_sitter_rust::LANGUAGE.into())
-        .ok()?;
-    let tree = parser.parse(source, None)?;
     let mut out = String::new();
-    render_children(tree.root_node(), source, focus, &mut out);
+    scan_rust_items(source, focus, &mut out);
     let trimmed = out.trim();
     if trimmed.is_empty() {
         None
@@ -50,79 +45,309 @@ fn fold_rust(source: &str, focus: &HashSet<String>) -> Option<String> {
     }
 }
 
-fn render_children(node: Node, src: &str, focus: &HashSet<String>, out: &mut String) {
-    let mut cursor = node.walk();
-    for child in node.named_children(&mut cursor) {
-        render_item(child, src, focus, out);
+fn scan_rust_items(src: &str, focus: &HashSet<String>, out: &mut String) {
+    let bytes = src.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        i = skip_trivia_and_attrs(src, i);
+        if i >= bytes.len() {
+            break;
+        }
+        let start = i;
+        let Some((delim_pos, delim)) = find_item_delimiter(src, start) else {
+            break;
+        };
+        if delim == b';' {
+            let item = &src[start..=delim_pos];
+            let (kind, _) = classify_rust_item(item);
+            if matches!(
+                kind,
+                Some("use" | "mod" | "type" | "const" | "static" | "fn" | "struct")
+            ) {
+                push_line(out, &one_line(item));
+            }
+            i = delim_pos + 1;
+            continue;
+        }
+
+        let Some(close_brace) = find_matching_brace(src, delim_pos) else {
+            break;
+        };
+        let header = &src[start..delim_pos];
+        let (kind, name) = classify_rust_item(header);
+        if !name.is_empty() && focus.contains(&name) {
+            push_block(out, &src[start..=close_brace]);
+        } else if matches!(kind, Some("impl" | "mod")) {
+            push_line(out, &one_line(header));
+            scan_rust_items(&src[delim_pos + 1..close_brace], focus, out);
+        } else if matches!(kind, Some("fn" | "struct" | "enum" | "union" | "trait")) {
+            push_line(out, &one_line(header));
+        }
+        i = close_brace + 1;
     }
 }
 
-fn render_item(node: Node, src: &str, focus: &HashSet<String>, out: &mut String) {
-    match node.kind() {
-        "use_declaration" => push_line(out, node_text(node, src)),
-        "function_item" | "function_signature_item" => render_function(node, src, focus, out),
-        "struct_item" | "enum_item" | "union_item" | "trait_item" | "type_item" | "const_item"
-        | "static_item" | "mod_item" => render_container(node, src, focus, out),
-        "impl_item" => {
-            push_line(out, &header_without_body(node, src));
-            if let Some(body) = node.child_by_field_name("body") {
-                render_children(body, src, focus, out);
+fn skip_trivia_and_attrs(src: &str, mut i: usize) -> usize {
+    let bytes = src.as_bytes();
+    while i < bytes.len() {
+        if bytes[i].is_ascii_whitespace() {
+            i += 1;
+        } else if let Some(next) = skip_comment_or_literal(src, i, false) {
+            i = next;
+        } else if bytes[i] == b'#'
+            && (bytes.get(i + 1) == Some(&b'[')
+                || (bytes.get(i + 1) == Some(&b'!') && bytes.get(i + 2) == Some(&b'[')))
+        {
+            let bracket = if bytes[i + 1] == b'!' { i + 2 } else { i + 1 };
+            i = find_matching_delim(src, bracket, b'[', b']')
+                .map(|c| c + 1)
+                .unwrap_or(bytes.len());
+        } else if bytes[i] == b';' {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    i
+}
+
+fn find_item_delimiter(src: &str, mut i: usize) -> Option<(usize, u8)> {
+    let bytes = src.as_bytes();
+    let mut paren = 0usize;
+    let mut bracket = 0usize;
+    while i < bytes.len() {
+        if let Some(next) = skip_comment_or_literal(src, i, true) {
+            i = next;
+            continue;
+        }
+        match bytes[i] {
+            b'(' => paren += 1,
+            b')' => paren = paren.saturating_sub(1),
+            b'[' => bracket += 1,
+            b']' => bracket = bracket.saturating_sub(1),
+            b';' | b'{' if paren == 0 && bracket == 0 => return Some((i, bytes[i])),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn find_matching_brace(src: &str, open_pos: usize) -> Option<usize> {
+    find_matching_delim(src, open_pos, b'{', b'}')
+}
+
+fn find_matching_delim(src: &str, open_pos: usize, open: u8, close: u8) -> Option<usize> {
+    let bytes = src.as_bytes();
+    let mut depth = 0usize;
+    let mut i = open_pos;
+    while i < bytes.len() {
+        if let Some(next) = skip_comment_or_literal(src, i, true) {
+            i = next;
+            continue;
+        }
+        if bytes[i] == open {
+            depth += 1;
+        } else if bytes[i] == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
             }
         }
-        "inner_attribute_item" | "attribute_item" => {}
-        other if node.child_count() > 0 && !other.ends_with("_item") => {
-            render_children(node, src, focus, out);
+        i += 1;
+    }
+    None
+}
+
+/// Skip comments (and optionally strings/raw strings/char literals) starting at `i`.
+fn skip_comment_or_literal(src: &str, i: usize, include_literals: bool) -> Option<usize> {
+    let bytes = src.as_bytes();
+    if bytes.get(i..i + 2) == Some(b"//") {
+        let mut j = i + 2;
+        while j < bytes.len() && bytes[j] != b'\n' {
+            j += 1;
         }
-        _ => {}
+        return Some(j);
     }
-}
-
-fn render_function(node: Node, src: &str, focus: &HashSet<String>, out: &mut String) {
-    let name = node
-        .child_by_field_name("name")
-        .map(|n| node_text(n, src).to_string())
-        .unwrap_or_default();
-    if !name.is_empty() && focus.contains(&name) {
-        push_block(out, node_text(node, src));
-    } else {
-        push_line(out, &signature_line(node, src));
+    if bytes.get(i..i + 2) == Some(b"/*") {
+        let mut depth = 1usize;
+        let mut j = i + 2;
+        while j + 1 < bytes.len() && depth > 0 {
+            if &bytes[j..j + 2] == b"/*" {
+                depth += 1;
+                j += 2;
+            } else if &bytes[j..j + 2] == b"*/" {
+                depth -= 1;
+                j += 2;
+            } else {
+                j += 1;
+            }
+        }
+        return Some(j);
     }
-}
-
-fn render_container(node: Node, src: &str, focus: &HashSet<String>, out: &mut String) {
-    let name = node
-        .child_by_field_name("name")
-        .map(|n| node_text(n, src).to_string())
-        .unwrap_or_default();
-    let keep_body = !name.is_empty() && focus.contains(&name);
-    if keep_body {
-        push_block(out, node_text(node, src));
-        return;
+    if !include_literals {
+        return None;
     }
-    if node.kind() == "mod_item" {
-        if let Some(body) = node.child_by_field_name("body") {
-            push_line(out, &header_without_body(node, src));
-            render_children(body, src, focus, out);
-            return;
+    if bytes[i] == b'r' {
+        if let Some(next) = skip_raw_string(bytes, i) {
+            return Some(next);
         }
     }
-    push_line(out, &signature_line(node, src));
+    if bytes[i] == b'"' {
+        let mut j = i + 1;
+        while j < bytes.len() {
+            if bytes[j] == b'\\' {
+                j += 2;
+                continue;
+            }
+            if bytes[j] == b'"' {
+                return Some(j + 1);
+            }
+            j += 1;
+        }
+        return Some(bytes.len());
+    }
+    if bytes[i] == b'\'' {
+        return skip_char_literal(src, i);
+    }
+    None
 }
 
-fn signature_line(node: Node, src: &str) -> String {
-    let end = node
-        .child_by_field_name("body")
-        .map(|b| b.start_byte())
-        .unwrap_or(node.end_byte());
-    one_line(&src[node.start_byte()..end.min(src.len())])
+fn skip_raw_string(bytes: &[u8], i: usize) -> Option<usize> {
+    let prev_ident = i > 0
+        && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_')
+        && !(bytes[i - 1] == b'b'
+            && (i == 1 || !(bytes[i - 2].is_ascii_alphanumeric() || bytes[i - 2] == b'_')));
+    if prev_ident {
+        return None;
+    }
+    let mut j = i + 1;
+    let mut hashes = 0usize;
+    while j < bytes.len() && bytes[j] == b'#' {
+        hashes += 1;
+        j += 1;
+    }
+    if bytes.get(j) != Some(&b'"') {
+        return None;
+    }
+    j += 1;
+    while j < bytes.len() {
+        if bytes[j] == b'"' {
+            let end = j + 1;
+            if end + hashes <= bytes.len() && bytes[end..end + hashes].iter().all(|&b| b == b'#') {
+                return Some(end + hashes);
+            }
+        }
+        j += 1;
+    }
+    Some(bytes.len())
 }
 
-fn header_without_body(node: Node, src: &str) -> String {
-    signature_line(node, src)
+fn skip_char_literal(src: &str, i: usize) -> Option<usize> {
+    let rest = &src[i + 1..];
+    if let Some(after_esc) = rest.strip_prefix('\\') {
+        if after_esc.starts_with("u{") {
+            if let Some(close) = after_esc.find("}'") {
+                if close <= 10 {
+                    return Some(i + 1 + 1 + close + 2);
+                }
+            }
+        } else if after_esc.starts_with('x') && after_esc.as_bytes().get(3) == Some(&b'\'') {
+            return Some(i + 6);
+        } else if let Some(ch) = after_esc.chars().next() {
+            let close_idx = 1 + 1 + ch.len_utf8();
+            if src.as_bytes().get(i + close_idx) == Some(&b'\'') {
+                return Some(i + close_idx + 1);
+            }
+        }
+        return None;
+    }
+    let ch = rest.chars().next()?;
+    if ch == '\n' || ch == '\r' || ch == '\'' {
+        return None;
+    }
+    let after = i + 1 + ch.len_utf8();
+    (src.as_bytes().get(after) == Some(&b'\'')).then_some(after + 1)
 }
 
-fn node_text<'a>(node: Node, src: &'a str) -> &'a str {
-    &src[node.start_byte().min(src.len())..node.end_byte().min(src.len())]
+fn classify_rust_item(header: &str) -> (Option<&'static str>, String) {
+    let tokens = top_level_words(header);
+    let mut idx = 0;
+    while idx < tokens.len() {
+        let tok = tokens[idx].as_str();
+        match tok {
+            "pub" | "async" | "unsafe" | "default" | "extern" => idx += 1,
+            "const" if matches!(tokens.get(idx + 1).map(String::as_str), Some("fn" | "unsafe")) => {
+                idx += 1;
+            }
+            "use" => return (Some("use"), String::new()),
+            "impl" => return (Some("impl"), String::new()),
+            "fn" => return (Some("fn"), tokens.get(idx + 1).cloned().unwrap_or_default()),
+            "struct" => {
+                return (
+                    Some("struct"),
+                    tokens.get(idx + 1).cloned().unwrap_or_default(),
+                )
+            }
+            "enum" => return (Some("enum"), tokens.get(idx + 1).cloned().unwrap_or_default()),
+            "union" => {
+                return (
+                    Some("union"),
+                    tokens.get(idx + 1).cloned().unwrap_or_default(),
+                )
+            }
+            "trait" => return (Some("trait"), tokens.get(idx + 1).cloned().unwrap_or_default()),
+            "mod" => return (Some("mod"), tokens.get(idx + 1).cloned().unwrap_or_default()),
+            "type" => return (Some("type"), tokens.get(idx + 1).cloned().unwrap_or_default()),
+            "const" => return (Some("const"), tokens.get(idx + 1).cloned().unwrap_or_default()),
+            "static" => {
+                return (
+                    Some("static"),
+                    tokens.get(idx + 1).cloned().unwrap_or_default(),
+                )
+            }
+            _ => break,
+        }
+    }
+    (None, String::new())
+}
+
+fn top_level_words(header: &str) -> Vec<String> {
+    let bytes = header.as_bytes();
+    let mut words = Vec::new();
+    let mut paren = 0usize;
+    let mut bracket = 0usize;
+    let mut angle = 0usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(next) = skip_comment_or_literal(header, i, true) {
+            i = next;
+            continue;
+        }
+        match bytes[i] {
+            b'(' => paren += 1,
+            b')' => paren = paren.saturating_sub(1),
+            b'[' => bracket += 1,
+            b']' => bracket = bracket.saturating_sub(1),
+            b'<' if paren == 0 && bracket == 0 => angle += 1,
+            b'>' if paren == 0 && bracket == 0 => angle = angle.saturating_sub(1),
+            b if paren == 0
+                && bracket == 0
+                && angle == 0
+                && (b.is_ascii_alphabetic() || b == b'_') =>
+            {
+                let start = i;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                words.push(header[start..i].to_string());
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    words
 }
 
 fn one_line(text: &str) -> String {
@@ -298,6 +523,32 @@ fn drop_me() {
         assert!(out.contains("marker"), "{out}");
         assert!(out.contains("fn drop_me"), "{out}");
         assert!(!out.contains("SHOULD_FOLD"), "{out}");
+    }
+
+    #[test]
+    fn rust_outline_expands_focused_method_inside_impl() {
+        let src = r#"
+struct Foo<'a>(&'a str);
+
+impl<'a> Foo<'a> {
+    pub fn keep_method(&self) -> char {
+        let brace = '{';
+        let escaped = '\'';
+        brace
+    }
+
+    fn fold_method(&self) {
+        let hidden = "METHOD_SECRET";
+        println!("{hidden}");
+    }
+}
+"#;
+        let focus = HashSet::from(["keep_method".to_string()]);
+        let out = fold_source("src/foo.rs", src, &focus).unwrap();
+        assert!(out.contains("impl<'a> Foo<'a>"), "{out}");
+        assert!(out.contains("let brace = '{';"), "{out}");
+        assert!(out.contains("fn fold_method"), "{out}");
+        assert!(!out.contains("METHOD_SECRET"), "{out}");
     }
 
     #[test]

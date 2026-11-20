@@ -51,9 +51,9 @@ fn markdown_table_formats_inline_cells_and_blockquotes_cleanly() {
 fn composer_and_user_block_have_vertical_breathing_room() {
     let dir = tmpdir("breathing");
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    app.connected = true;
-    let uid = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::User {
+    app.jobs.connected = true;
+    let uid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::User {
         id: uid,
         text: "short prompt".into(),
         mode: "Agent".into(),

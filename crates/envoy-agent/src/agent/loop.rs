@@ -3,7 +3,7 @@
 use super::config::{TurnConfig, TurnUsage};
 use super::context::{
     estimate_turn_raw_tokens, estimate_turn_tokens, refresh_models_dev_if_stale, resolve_budget,
-    skip_inplace_mask, tools_overhead, TokenCalibration,
+    tools_overhead_for, TokenCalibration,
 };
 use super::events::AgentEvent;
 use super::loop_hooks::{hook_context_message, TurnHookSession};
@@ -19,7 +19,6 @@ use crate::daemon;
 use crate::mcp::client::McpManager;
 use crate::session::{ChatMessage, ChatRole};
 use anyhow::Result;
-use envoy_service::{dialer_for, AgentDialer, Remote, UnixDialer};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
@@ -57,6 +56,7 @@ pub async fn run_agent_turn(cfg: TurnConfig, tx: mpsc::UnboundedSender<AgentEven
         data_dir: cfg.data_dir.clone(),
         conduit: cfg.conduit.clone(),
         local_socket: cfg.local_socket.clone(),
+        local_server: cfg.local_server.clone(),
         target: cfg.target.clone(),
         cwd: cfg.cwd.clone(),
         provider: cfg.provider.clone(),
@@ -135,7 +135,7 @@ pub(crate) async fn execute_loop(
             refresh_models_dev_if_stale(&bg_http, &bg_dir).await;
         });
 
-        if is_local && cfg.local_socket.is_none() {
+        if is_local && cfg.local_socket.is_none() && cfg.local_server.is_none() {
             daemon::ensure(&cfg.data_dir).await?;
         }
     }
@@ -152,14 +152,15 @@ pub(crate) async fn execute_loop(
     };
     let mut cache_read_tokens = 0u64;
     let mut cache_create_tokens = 0u64;
-    let mut mask_latched = false;
     let env_disk = EnvDiskSnapshot::capture(&cfg.data_dir, &cfg.cwd, opts.depth);
 
-    let dialer: Box<dyn AgentDialer> = match (&cfg.local_socket, is_local) {
-        (Some(sock), true) => Box::new(UnixDialer::new(sock.clone())),
-        _ => dialer_for(&cfg.data_dir, &cfg.target, cfg.conduit.clone()),
-    };
-    let remote: Remote<Box<dyn AgentDialer>> = Remote::new(dialer);
+    let remote = crate::runtime::remote_for(
+        &cfg.data_dir,
+        &cfg.target,
+        cfg.conduit.clone(),
+        cfg.local_socket.clone(),
+        cfg.local_server.clone(),
+    );
 
     let mcp = if opts.connect_mcp {
         Some(McpManager::connect_configured(&cfg.data_dir, &cfg.cwd).await)
@@ -171,12 +172,12 @@ pub(crate) async fn execute_loop(
         .map(McpManager::extra_tool_schemas)
         .unwrap_or_default();
 
-    let tool_filter = ToolFilter {
+    let mut tool_filter = ToolFilter {
         depth: opts.depth,
         allowed: opts.allowed_tools,
     };
     let system = opts.system;
-    let overhead = tools_overhead(&extra_tools);
+    let overhead = tools_overhead_for(Some(&cfg.permissions), &tool_filter, &extra_tools);
     let mut plan = resolve_budget(&cfg.data_dir, &cfg.provider.id, &cfg.model.model_id);
     let max_steps = opts.max_steps.clamp(1, HARD_MAX_TOOL_STEPS);
     let mut hook_session = TurnHookSession {
@@ -205,7 +206,9 @@ pub(crate) async fn execute_loop(
 
             let before_tokens = estimate_turn_tokens(&system, &messages, overhead, calibration);
             let mut compressed = false;
-            if !skip_inplace_mask(mask_latched, before_tokens, &plan) {
+            // Only mask/compact once the turn reaches Stage 2 (`compact_at`), so
+            // repeated steps or new turns in the 60%–85% band keep prompt prefixes intact.
+            if before_tokens > plan.compact_at {
                 if let Some(outcome) = hook_session
                     .prepare_context_step(
                         step,
@@ -226,6 +229,10 @@ pub(crate) async fn execute_loop(
                     .await?
                 {
                     compressed = true;
+                    total_in += outcome.input_tokens;
+                    total_out += outcome.output_tokens;
+                    cache_read_tokens += outcome.cache_read_tokens;
+                    cache_create_tokens += outcome.cache_create_tokens;
                     if !outcome.pruned_only {
                         let _ = tx.send(AgentEvent::Compacted {
                             messages: outcome.messages,
@@ -235,9 +242,6 @@ pub(crate) async fn execute_loop(
                             auto: true,
                         });
                     }
-                }
-                if before_tokens > plan.prune_at {
-                    mask_latched = true;
                 }
             }
 
@@ -266,6 +270,10 @@ pub(crate) async fn execute_loop(
                 &mut plan,
                 Some(&mut hook_session),
                 step,
+                &mut total_in,
+                &mut total_out,
+                &mut cache_read_tokens,
+                &mut cache_create_tokens,
                 tx,
             )
             .await?;
@@ -362,7 +370,7 @@ pub(crate) async fn execute_loop(
                     &cfg.asks,
                     &cfg.permissions,
                     mcp.as_ref(),
-                    &tool_filter,
+                    &mut tool_filter,
                     opts.subagent_host.as_ref(),
                     cfg.monitors.as_ref(),
                 )
@@ -413,6 +421,9 @@ pub(crate) async fn execute_loop(
             total_in,
             total_out,
             context_tokens,
+            cache_read_tokens,
+            cache_create_tokens,
+            calibration.factor,
             max_steps,
             &hook_session,
             tx,

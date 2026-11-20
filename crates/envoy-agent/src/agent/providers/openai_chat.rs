@@ -278,6 +278,7 @@ mod tests {
             base_url: format!("http://{addr}/v1"),
             credential: Credential::ApiKey { key: "k".into() },
             custom_models: vec![],
+            fetched_models: vec![],
             model_routes: Default::default(),
             updated_ms: 0,
         };
@@ -333,6 +334,7 @@ mod tests {
             base_url: format!("http://{addr}/v1"),
             credential: Credential::ApiKey { key: "k".into() },
             custom_models: vec![],
+            fetched_models: vec![],
             model_routes: Default::default(),
             updated_ms: 0,
         };
@@ -416,6 +418,7 @@ mod tests {
             base_url,
             credential: Credential::ApiKey { key: "k".into() },
             custom_models: vec![],
+            fetched_models: vec![],
             model_routes: Default::default(),
             updated_ms: 0,
         }

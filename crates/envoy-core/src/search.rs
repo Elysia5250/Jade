@@ -1,12 +1,17 @@
 //! Recursive workspace `glob` and `grep` primitives.
 //!
-//! Skips VCS/build/protected directories (`.git`, `target`, `node_modules`,
-//! `.ssh`, `.aws`, `.envoy`, `.codex`, `.agents`), avoids symlink escapes,
-//! ignores binary files and `.env*` secret files, and bounds output volume.
+//! Backed by `regex`, `globset`, and `ignore::WalkBuilder`. Skips
+//! VCS/build/protected directories (`.git`, `target`, `node_modules`, `.ssh`,
+//! `.aws`, `.envoy`, `.conduit`, `.gnupg`, `.kube`, `.codex`, `.agents`), avoids
+//! symlink escapes, honors repo `.gitignore`, ignores binary files and `.env*`
+//! secret files, and bounds traversal and output volume.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use envoy_proto::GrepHit;
-use std::collections::VecDeque;
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
+use ignore::WalkBuilder;
+use regex::RegexBuilder;
+use std::ops::ControlFlow;
 use std::path::{Component, Path, PathBuf};
 
 const SKIP_DIRS: &[&str] = &[
@@ -25,6 +30,10 @@ const SKIP_DIRS: &[&str] = &[
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_LINE_CHARS: usize = 512;
 const DEFAULT_MAX_RESULTS: usize = 200;
+const MAX_WALK_ENTRIES: usize = 50_000;
+const MAX_BRACE_GROUPS: usize = 8;
+const MAX_BRACE_COMBINATIONS: usize = 64;
+const REGEX_SIZE_LIMIT: usize = 2 * 1024 * 1024;
 
 /// Recursively find files under `root` whose relative path matches `pattern`.
 pub async fn glob_files(root: &str, pattern: &str, max_results: u32) -> Result<Vec<String>> {
@@ -100,54 +109,149 @@ fn resolve_root(root: &str) -> Result<PathBuf> {
     let canon = std::fs::canonicalize(&resolved)
         .with_context(|| format!("search root {}", resolved.display()))?;
     if is_protected_search_root(&canon) {
-        anyhow::bail!("refusing to search protected path {}", canon.display());
+        bail!("refusing to search protected path {}", canon.display());
     }
     if !canon.is_dir() {
-        anyhow::bail!("{} is not a directory", canon.display());
+        bail!("{} is not a directory", canon.display());
     }
     Ok(canon)
 }
 
-fn walk_files(root: &Path) -> Vec<(String, PathBuf)> {
-    let mut dirs = VecDeque::new();
-    dirs.push_back(root.to_path_buf());
-    let mut files = Vec::new();
+/// Reject nested or combinatorial `{a,b}` expansions before `globset` expands them.
+fn validate_brace_budget(pattern: &str) -> Result<()> {
+    let mut escaped = false;
+    let mut in_class = false;
+    let mut in_brace = false;
+    let mut groups = 0usize;
+    let mut combos = 1usize;
+    let mut alts = 1usize;
 
-    while let Some(dir) = dirs.pop_front() {
-        let Ok(rd) = std::fs::read_dir(&dir) else {
+    for ch in pattern.chars() {
+        if escaped {
+            escaped = false;
             continue;
-        };
-        let mut children: Vec<_> = rd.flatten().collect();
-        children.sort_by_key(|e| e.file_name());
-        for entry in children {
-            let name_os = entry.file_name();
-            let name = name_os.to_string_lossy();
-            let Ok(ft) = entry.file_type() else {
-                continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == '[' && !in_class {
+            in_class = true;
+            continue;
+        }
+        if ch == ']' && in_class {
+            in_class = false;
+            continue;
+        }
+        if in_class {
+            continue;
+        }
+        if ch == '{' {
+            if in_brace {
+                bail!("nested brace expansion is not supported in glob pattern");
+            }
+            groups += 1;
+            if groups > MAX_BRACE_GROUPS {
+                bail!("too many brace groups in glob pattern (max {MAX_BRACE_GROUPS})");
+            }
+            in_brace = true;
+            alts = 1;
+        } else if ch == ',' && in_brace {
+            alts += 1;
+        } else if ch == '}' && in_brace {
+            in_brace = false;
+            combos = combos
+                .checked_mul(alts)
+                .filter(|&n| n <= MAX_BRACE_COMBINATIONS)
+                .context("glob brace expansion exceeds combination budget")?;
+        }
+    }
+    Ok(())
+}
+
+fn compile_glob(pattern: &str) -> Result<GlobSet> {
+    validate_brace_budget(pattern)?;
+    let pat = pattern.trim_start_matches("./");
+    let mut builder = GlobSetBuilder::new();
+    let primary = GlobBuilder::new(pat)
+        .literal_separator(true)
+        .build()
+        .with_context(|| format!("invalid glob pattern `{pattern}`"))?;
+    builder.add(primary);
+    // Single-segment patterns like `*.rs` match any nested basename too.
+    if !pat.contains('/') {
+        let nested = GlobBuilder::new(&format!("**/{pat}"))
+            .literal_separator(true)
+            .build()
+            .with_context(|| format!("invalid glob pattern `{pattern}`"))?;
+        builder.add(nested);
+    }
+    builder
+        .build()
+        .with_context(|| format!("building glob set `{pattern}`"))
+}
+
+fn walk_files_bounded(
+    root: &Path,
+    max_entries: usize,
+    mut visit: impl FnMut(String, PathBuf) -> ControlFlow<()>,
+) {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(false)
+        .follow_links(false)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(true)
+        .ignore(false)
+        .parents(true)
+        .require_git(true)
+        .sort_by_file_name(|a, b| a.cmp(b))
+        .filter_entry(|entry| {
+            if entry.depth() == 0 {
+                return true;
+            }
+            let Some(ft) = entry.file_type() else {
+                return false;
             };
             // Never traverse symlinked directories or follow escapes.
             if ft.is_symlink() {
-                continue;
+                return false;
             }
-            let path = entry.path();
+            let name = entry.file_name().to_string_lossy();
             if ft.is_dir() {
-                if SKIP_DIRS.contains(&name.as_ref()) {
-                    continue;
-                }
-                dirs.push_back(path);
-            } else if ft.is_file() {
-                if crate::sandbox::is_env_filename(&name) {
-                    continue;
-                }
-                if let Ok(rel) = path.strip_prefix(root) {
-                    let rel_str = rel.to_string_lossy().replace('\\', "/");
-                    files.push((rel_str, path));
-                }
+                return !SKIP_DIRS.contains(&name.as_ref());
+            }
+            !crate::sandbox::is_env_filename(&name)
+        });
+
+    let mut visited = 0usize;
+    for item in builder.build() {
+        let Ok(entry) = item else {
+            visited += 1;
+            if visited >= max_entries {
+                break;
+            }
+            continue;
+        };
+        if entry.depth() == 0 {
+            continue;
+        }
+        visited += 1;
+        if visited > max_entries {
+            break;
+        }
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+        let path = entry.into_path();
+        if let Ok(rel) = path.strip_prefix(root) {
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            if visit(rel_str, path).is_break() {
+                break;
             }
         }
     }
-    files.sort_by(|a, b| a.0.cmp(&b.0));
-    files
 }
 
 fn glob_files_sync(root: &str, pattern: &str, cap: usize) -> Result<Vec<String>> {
@@ -157,15 +261,17 @@ fn glob_files_sync(root: &str, pattern: &str, cap: usize) -> Result<Vec<String>>
     } else {
         pattern.trim()
     };
+    let matcher = compile_glob(pat)?;
     let mut out = Vec::new();
-    for (rel, _) in walk_files(&root_path) {
-        if glob_match(pat, &rel) {
+    walk_files_bounded(&root_path, MAX_WALK_ENTRIES, |rel, _| {
+        if matcher.is_match(&rel) {
             out.push(rel);
             if out.len() >= cap {
-                break;
+                return ControlFlow::Break(());
             }
         }
-    }
+        ControlFlow::Continue(())
+    });
     Ok(out)
 }
 
@@ -176,380 +282,76 @@ fn grep_files_sync(
     cap: usize,
 ) -> Result<Vec<GrepHit>> {
     if pattern.is_empty() {
-        anyhow::bail!("grep `pattern` must not be empty");
+        bail!("grep `pattern` must not be empty");
     }
     let root_path = resolve_root(root)?;
-    let matcher = RegexLite::compile(pattern);
-    let include_pat = include.map(str::trim).filter(|s| !s.is_empty());
-    let mut hits = Vec::new();
+    let matcher = RegexBuilder::new(pattern)
+        .size_limit(REGEX_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_SIZE_LIMIT)
+        .build()
+        .context("invalid grep regex pattern")?;
+    let include_matcher = include
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(compile_glob)
+        .transpose()?;
 
-    for (rel, full) in walk_files(&root_path) {
-        if let Some(inc) = include_pat {
-            if !glob_match(inc, &rel)
-                && !Path::new(&rel)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| glob_match(inc, n))
-            {
-                continue;
+    let mut hits = Vec::new();
+    walk_files_bounded(&root_path, MAX_WALK_ENTRIES, |rel, full| {
+        if let Some(inc) = &include_matcher {
+            if !inc.is_match(&rel) {
+                return ControlFlow::Continue(());
             }
         }
-        let Ok(meta) = std::fs::metadata(&full) else {
-            continue;
-        };
-        if meta.len() > MAX_FILE_BYTES {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&full) else {
-            continue;
-        };
-        if bytes.iter().take(4096).any(|&b| b == 0) {
-            continue;
-        }
-        let Ok(text) = std::str::from_utf8(&bytes) else {
-            continue;
-        };
-        for (idx, line) in text.lines().enumerate() {
-            if matcher.is_match(line) {
-                let snippet: String = line.chars().take(MAX_LINE_CHARS).collect();
-                hits.push(GrepHit {
-                    path: rel.clone(),
-                    line: (idx + 1) as u32,
-                    text: snippet,
-                });
-                if hits.len() >= cap {
-                    return Ok(hits);
-                }
+        grep_file(&full, &rel, &matcher, &mut hits, cap)
+    });
+    Ok(hits)
+}
+
+fn grep_file(
+    full: &Path,
+    rel: &str,
+    matcher: &regex::Regex,
+    hits: &mut Vec<GrepHit>,
+    cap: usize,
+) -> ControlFlow<()> {
+    let Ok(meta) = std::fs::metadata(full) else {
+        return ControlFlow::Continue(());
+    };
+    if meta.len() > MAX_FILE_BYTES {
+        return ControlFlow::Continue(());
+    }
+    let Ok(bytes) = std::fs::read(full) else {
+        return ControlFlow::Continue(());
+    };
+    if bytes.iter().take(4096).any(|&b| b == 0) {
+        return ControlFlow::Continue(());
+    }
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return ControlFlow::Continue(());
+    };
+    for (idx, line) in text.lines().enumerate() {
+        if matcher.is_match(line) {
+            let snippet: String = line.chars().take(MAX_LINE_CHARS).collect();
+            hits.push(GrepHit {
+                path: rel.to_string(),
+                line: (idx + 1) as u32,
+                text: snippet,
+            });
+            if hits.len() >= cap {
+                return ControlFlow::Break(());
             }
         }
     }
-    Ok(hits)
+    ControlFlow::Continue(())
 }
 
 /// Match a relative POSIX path against a glob pattern (`*`, `?`, `**`, `{a,b}`).
 pub fn glob_match(pattern: &str, path: &str) -> bool {
-    for alt in expand_braces(pattern) {
-        let pat = alt.trim_start_matches("./");
-        let p = path.trim_start_matches("./");
-        let pat_segs: Vec<&str> = pat.split('/').collect();
-        let path_segs: Vec<&str> = p.split('/').collect();
-        if match_segments(&pat_segs, &path_segs) {
-            return true;
-        }
-        // Convenience: single-segment patterns like `*.rs` match any basename too.
-        if pat_segs.len() == 1 && !pat.contains('/') {
-            if let Some(base) = path_segs.last() {
-                if match_segment(pat, base) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-fn expand_braces(pattern: &str) -> Vec<String> {
-    let Some(start) = pattern.find('{') else {
-        return vec![pattern.to_string()];
-    };
-    let Some(rel_end) = pattern[start + 1..].find('}') else {
-        return vec![pattern.to_string()];
-    };
-    let end = start + 1 + rel_end;
-    let prefix = &pattern[..start];
-    let suffix = &pattern[end + 1..];
-    let mut out = Vec::new();
-    for item in pattern[start + 1..end].split(',') {
-        let combined = format!("{prefix}{item}{suffix}");
-        out.extend(expand_braces(&combined));
-    }
-    out
-}
-
-fn match_segments(pat: &[&str], path: &[&str]) -> bool {
-    if pat.is_empty() {
-        return path.is_empty();
-    }
-    if pat[0] == "**" {
-        if match_segments(&pat[1..], path) {
-            return true;
-        }
-        return !path.is_empty() && match_segments(pat, &path[1..]);
-    }
-    if path.is_empty() {
+    let Ok(matcher) = compile_glob(pattern) else {
         return false;
-    }
-    match_segment(pat[0], path[0]) && match_segments(&pat[1..], &path[1..])
-}
-
-fn match_segment(pat: &str, text: &str) -> bool {
-    let p: Vec<char> = pat.chars().collect();
-    let t: Vec<char> = text.chars().collect();
-    let mut dp = vec![vec![false; t.len() + 1]; p.len() + 1];
-    dp[0][0] = true;
-    for i in 1..=p.len() {
-        if p[i - 1] == '*' {
-            dp[i][0] = dp[i - 1][0];
-        }
-    }
-    for i in 1..=p.len() {
-        for j in 1..=t.len() {
-            dp[i][j] = match p[i - 1] {
-                '*' => dp[i - 1][j] || dp[i][j - 1],
-                '?' => dp[i - 1][j - 1],
-                c => dp[i - 1][j - 1] && c == t[j - 1],
-            };
-        }
-    }
-    dp[p.len()][t.len()]
-}
-
-/// Lightweight regex/substring engine supporting `|`, `^`, `$`, `.`, `*`, `+`,
-/// `?`, `[abc]`/`[^a-z]`, `\d`, `\w`, `\s`, and escaped literals, with literal
-/// fallback on malformed patterns.
-struct RegexLite {
-    branches: Vec<Vec<Atom>>,
-    literal_fallback: Option<String>,
-}
-
-#[derive(Clone)]
-enum Atom {
-    StartAnchor,
-    EndAnchor,
-    Rep {
-        kind: Matcher,
-        min: usize,
-        max: Option<usize>,
-    },
-}
-
-#[derive(Clone)]
-enum Matcher {
-    Any,
-    Lit(char),
-    Digit,
-    Word,
-    Space,
-    Class {
-        negated: bool,
-        ranges: Vec<(char, char)>,
-    },
-}
-
-impl Matcher {
-    fn matches(&self, c: char) -> bool {
-        match self {
-            Matcher::Any => true,
-            Matcher::Lit(x) => *x == c,
-            Matcher::Digit => c.is_ascii_digit(),
-            Matcher::Word => c.is_ascii_alphanumeric() || c == '_',
-            Matcher::Space => c.is_whitespace(),
-            Matcher::Class { negated, ranges } => {
-                let hit = ranges.iter().any(|(a, b)| c >= *a && c <= *b);
-                if *negated {
-                    !hit
-                } else {
-                    hit
-                }
-            }
-        }
-    }
-}
-
-impl RegexLite {
-    fn compile(pattern: &str) -> Self {
-        match parse_branches(pattern) {
-            Some(branches) => Self {
-                branches,
-                literal_fallback: None,
-            },
-            None => Self {
-                branches: Vec::new(),
-                literal_fallback: Some(pattern.to_string()),
-            },
-        }
-    }
-
-    fn is_match(&self, line: &str) -> bool {
-        if let Some(lit) = &self.literal_fallback {
-            return line.contains(lit);
-        }
-        let chars: Vec<char> = line.chars().collect();
-        self.branches.iter().any(|seq| {
-            let anchored_start = matches!(seq.first(), Some(Atom::StartAnchor));
-            if anchored_start {
-                match_seq(seq, &chars, 0)
-            } else {
-                (0..=chars.len()).any(|start| match_seq(seq, &chars, start))
-            }
-        })
-    }
-}
-
-fn parse_branches(pattern: &str) -> Option<Vec<Vec<Atom>>> {
-    let mut branches = Vec::new();
-    let mut cur = String::new();
-    let mut in_class = false;
-    let mut escaped = false;
-    for ch in pattern.chars() {
-        if escaped {
-            cur.push(ch);
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' {
-            cur.push(ch);
-            escaped = true;
-            continue;
-        }
-        if ch == '[' && !in_class {
-            in_class = true;
-            cur.push(ch);
-            continue;
-        }
-        if ch == ']' && in_class {
-            in_class = false;
-            cur.push(ch);
-            continue;
-        }
-        if ch == '|' && !in_class {
-            branches.push(parse_seq(&cur)?);
-            cur.clear();
-            continue;
-        }
-        cur.push(ch);
-    }
-    if in_class || escaped {
-        return None;
-    }
-    branches.push(parse_seq(&cur)?);
-    Some(branches)
-}
-
-fn parse_seq(s: &str) -> Option<Vec<Atom>> {
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0;
-    let mut atoms = Vec::new();
-    while i < chars.len() {
-        let atom = match chars[i] {
-            '^' => {
-                i += 1;
-                atoms.push(Atom::StartAnchor);
-                continue;
-            }
-            '$' => {
-                i += 1;
-                atoms.push(Atom::EndAnchor);
-                continue;
-            }
-            '.' => {
-                i += 1;
-                Matcher::Any
-            }
-            '\\' => {
-                i += 1;
-                let esc = *chars.get(i)?;
-                i += 1;
-                match esc {
-                    'd' => Matcher::Digit,
-                    'w' => Matcher::Word,
-                    's' => Matcher::Space,
-                    c => Matcher::Lit(c),
-                }
-            }
-            '[' => {
-                i += 1;
-                let negated = chars.get(i) == Some(&'^');
-                if negated {
-                    i += 1;
-                }
-                let mut ranges = Vec::new();
-                while i < chars.len() && chars[i] != ']' {
-                    let start = chars[i];
-                    if i + 2 < chars.len() && chars[i + 1] == '-' && chars[i + 2] != ']' {
-                        let end = chars[i + 2];
-                        ranges.push((start, end));
-                        i += 3;
-                    } else {
-                        ranges.push((start, start));
-                        i += 1;
-                    }
-                }
-                if i >= chars.len() || chars[i] != ']' {
-                    return None;
-                }
-                i += 1;
-                Matcher::Class { negated, ranges }
-            }
-            '(' | ')' => {
-                // Skip grouping parens when not nested into full sub-expressions.
-                i += 1;
-                continue;
-            }
-            c => {
-                i += 1;
-                Matcher::Lit(c)
-            }
-        };
-        let (min, max) = match chars.get(i) {
-            Some('*') => {
-                i += 1;
-                (0, None)
-            }
-            Some('+') => {
-                i += 1;
-                (1, None)
-            }
-            Some('?') => {
-                i += 1;
-                (0, Some(1))
-            }
-            _ => (1, Some(1)),
-        };
-        atoms.push(Atom::Rep {
-            kind: atom,
-            min,
-            max,
-        });
-    }
-    Some(atoms)
-}
-
-fn match_seq(seq: &[Atom], text: &[char], pos: usize) -> bool {
-    let mut steps = 0usize;
-    match_seq_bounded(seq, text, pos, &mut steps)
-}
-
-fn match_seq_bounded(seq: &[Atom], text: &[char], pos: usize, steps: &mut usize) -> bool {
-    *steps += 1;
-    if *steps > 50_000 {
-        return false;
-    }
-    let Some((first, rest)) = seq.split_first() else {
-        return true;
     };
-    match first {
-        Atom::StartAnchor => pos == 0 && match_seq_bounded(rest, text, pos, steps),
-        Atom::EndAnchor => pos == text.len() && match_seq_bounded(rest, text, pos, steps),
-        Atom::Rep { kind, min, max } => {
-            let mut limit = 0usize;
-            while pos + limit < text.len()
-                && max.is_none_or(|m| limit < m)
-                && kind.matches(text[pos + limit])
-            {
-                limit += 1;
-            }
-            if limit < *min {
-                return false;
-            }
-            for count in (*min..=limit).rev() {
-                if match_seq_bounded(rest, text, pos + count, steps) {
-                    return true;
-                }
-            }
-            false
-        }
-    }
+    matcher.is_match(path.trim_start_matches("./"))
 }
 
 #[cfg(test)]
@@ -561,7 +363,8 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let p = std::env::temp_dir().join(format!("envoy-search-{tag}-{n}"));
+        let p = std::env::temp_dir().join(format!("envoy-search-{tag}-{n}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
         p
     }
@@ -621,6 +424,60 @@ mod tests {
         assert_eq!(hits.len(), 3, "{hits:?}");
         assert_eq!(hits[0].path, "src/lib.rs");
         assert_eq!(hits[0].line, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn glob_brace_bomb_rejects_fast_without_oom() {
+        let dir = tmpdir("brace-bomb");
+        std::fs::write(dir.join("a.txt"), "hi\n").unwrap();
+        let bomb = "{a,b}".repeat(30);
+        assert!(!glob_match(&bomb, "aaa"));
+        let err = glob_files(dir.to_str().unwrap(), &bomb, 10)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("brace"), "{err:#}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn grep_supports_parenthesized_alternation_and_groups() {
+        let dir = tmpdir("groups");
+        std::fs::write(dir.join("sample.txt"), "foobaz\nbarbaz\nfooqux\n").unwrap();
+        let hits = grep_files(dir.to_str().unwrap(), r"^(foo|bar)baz$", None, 20)
+            .await
+            .unwrap();
+        let texts: Vec<&str> = hits.iter().map(|h| h.text.as_str()).collect();
+        assert_eq!(texts, vec!["foobaz", "barbaz"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn walk_files_bounded_stops_early_and_skips_symlinks() {
+        let dir = tmpdir("bounded");
+        for i in 0..45 {
+            std::fs::write(dir.join(format!("file-{i:02}.txt")), "x\n").unwrap();
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.join("file-00.txt"), dir.join("sym-file.txt")).unwrap();
+            let outside = tmpdir("outside");
+            std::fs::write(outside.join("secret.txt"), "nope\n").unwrap();
+            std::os::unix::fs::symlink(&outside, dir.join("sym-dir")).unwrap();
+            let all = glob_files(dir.to_str().unwrap(), "**/*", 100).await.unwrap();
+            assert!(!all.iter().any(|p| p.contains("sym-")), "{all:?}");
+            let _ = std::fs::remove_dir_all(&outside);
+        }
+
+        let mut seen = 0usize;
+        walk_files_bounded(&dir, 10, |_, _| {
+            seen += 1;
+            ControlFlow::Continue(())
+        });
+        assert!(seen <= 10, "expected <= 10 visited entries, got {seen}");
+
+        let capped = glob_files(dir.to_str().unwrap(), "*.txt", 5).await.unwrap();
+        assert_eq!(capped.len(), 5);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

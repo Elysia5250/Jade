@@ -9,16 +9,19 @@ pub(super) fn draw_editor(
     visual_lines: &[String],
     skip: usize,
 ) {
-    let mode_color = match app.mode {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let mode_color = match app.ui.mode {
         InputMode::Agent => theme.accent,
         InputMode::Shell => theme.warn,
     };
-    let frame_color = if app.focus == Focus::Input {
+    let frame_color = if app.ui.focus == Focus::Input {
         mode_color
     } else {
         theme.border
     };
-    let title = match app.mode {
+    let title = match app.ui.mode {
         InputMode::Agent => Span::styled(
             " / commands · @ files · ! shell · Ctrl+J newline ",
             Style::default().fg(theme.dim),
@@ -45,7 +48,7 @@ pub(super) fn draw_editor(
     let max_rows = inner.height as usize;
     let skip = skip.min(visual_lines.len().saturating_sub(max_rows));
     let end = (skip + max_rows).min(visual_lines.len());
-    let prompt_glyph = match app.mode {
+    let prompt_glyph = match app.ui.mode {
         InputMode::Agent => Span::styled(
             "❯ ",
             Style::default()
@@ -59,8 +62,8 @@ pub(super) fn draw_editor(
     };
     let text_budget = inner.width.saturating_sub(2) as usize;
 
-    let lines: Vec<Line> = if app.input.is_empty() {
-        let placeholder = match app.mode {
+    let lines: Vec<Line> = if app.ui.input.is_empty() {
+        let placeholder = match app.ui.mode {
             InputMode::Agent if !app.inputs.catalog.signed_in => {
                 "Sign in first (/login or press Enter to connect a provider)"
             }

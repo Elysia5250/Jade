@@ -123,6 +123,7 @@ async fn stress_concurrent_steer_followup_and_multi_subscriber_fanout() {
             key: "sk-rt".into(),
         },
         custom_models: vec!["gpt-rt".into()],
+        fetched_models: Vec::new(),
         model_routes: BTreeMap::new(),
         updated_ms: now_ms(),
     };

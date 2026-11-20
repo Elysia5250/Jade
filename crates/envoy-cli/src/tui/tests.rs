@@ -12,7 +12,7 @@ fn tmpdir() -> PathBuf {
     p
 }
 
-fn job(id: JobId, state: JobState) -> Job {
+fn job(id: JobId, state: ProtoJobState) -> Job {
     Job {
         id,
         owner: "local".into(),
@@ -39,8 +39,8 @@ fn opens_with_input_focused_and_welcome_screen() {
         None,
         PathBuf::from("/tmp/project"),
     );
-    app.connected = true;
-    assert_eq!(app.focus, Focus::Input);
+    app.jobs.connected = true;
+    assert_eq!(app.ui.focus, Focus::Input);
 
     let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
     terminal.draw(|frame| paint(frame, &mut app)).unwrap();
@@ -79,6 +79,7 @@ fn status_line_shows_model_workspace_and_context() {
                 key: "sk-test".into(),
             },
             custom_models: Vec::new(),
+            fetched_models: Vec::new(),
             model_routes: std::collections::BTreeMap::new(),
             updated_ms: now_ms(),
         },
@@ -92,9 +93,9 @@ fn status_line_shows_model_workspace_and_context() {
         None,
         PathBuf::from("/tmp/project"),
     );
-    app.connected = true;
-    app.session.prompt_tokens = 50_000;
-    assert_eq!(app.mode, InputMode::Agent);
+    app.jobs.connected = true;
+    app.session.current.prompt_tokens = 50_000;
+    assert_eq!(app.ui.mode, InputMode::Agent);
 
     let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
     terminal.draw(|frame| paint(frame, &mut app)).unwrap();
@@ -115,18 +116,18 @@ fn status_line_shows_model_workspace_and_context() {
 fn slash_menu_filters_completes_and_opens_login() {
     let dir = tmpdir();
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    app.input = "/log".into();
-    app.input_cursor = 4;
+    app.ui.input = "/log".into();
+    app.ui.input_cursor = 4;
 
     let names: Vec<&str> = app.filtered_slash().iter().map(|c| c.name).collect();
-    assert_eq!(names, vec!["login", "logout"]);
+    assert_eq!(names, vec!["login", "logout", "logs"]);
 
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    assert_eq!(app.input, "/login");
+    assert_eq!(app.ui.input, "/login");
 
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(matches!(
-        app.modal,
+        app.ui.modal,
         Some(Modal::Login(LoginModal::SelectProvider { .. }))
     ));
     let _ = std::fs::remove_dir_all(&dir);
@@ -136,7 +137,7 @@ fn slash_menu_filters_completes_and_opens_login() {
 fn login_api_key_flow_persists_and_enables_agent_mode() {
     let dir = tmpdir();
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    assert_eq!(app.mode, InputMode::Agent);
+    assert_eq!(app.ui.mode, InputMode::Agent);
 
     app.run_slash("/login");
     // Filter to deepseek
@@ -145,7 +146,7 @@ fn login_api_key_flow_persists_and_enables_agent_mode() {
     }
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(matches!(
-        app.modal,
+        app.ui.modal,
         Some(Modal::Login(LoginModal::ApiKeyForm { .. }))
     ));
 
@@ -154,11 +155,14 @@ fn login_api_key_flow_persists_and_enables_agent_mode() {
     }
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-    assert!(app.modal.is_none());
-    assert_eq!(app.mode, InputMode::Agent);
+    assert!(app.ui.modal.is_none());
+    assert_eq!(app.ui.mode, InputMode::Agent);
     let (prov, model) = resolve_active_provider(&dir).unwrap();
     assert_eq!(prov.id, "deepseek");
-    assert!(model.model_id.is_empty());
+    assert_eq!(
+        model.model_id,
+        envoy_agent::model_registry::default_env_model("deepseek")
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -170,14 +174,14 @@ fn cd_directory_autocomplete_lists_subdirs_and_switches() {
     std::fs::create_dir_all(dir.join("beta-proj")).unwrap();
 
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    app.input = "/cd al".into();
-    app.input_cursor = app.input.chars().count();
+    app.ui.input = "/cd al".into();
+    app.ui.input_cursor = app.ui.input.chars().count();
 
     let comps = app.cd_completions();
     assert_eq!(comps, vec![("alpha-proj/".into(), "alpha-proj/".into())]);
 
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.session.cwd, std::fs::canonicalize(&sub).unwrap());
+    assert_eq!(app.session.current.cwd, std::fs::canonicalize(&sub).unwrap());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -185,15 +189,15 @@ fn cd_directory_autocomplete_lists_subdirs_and_switches() {
 fn multiline_shift_enter_inserts_newline_and_bang_runs_shell() {
     let dir = tmpdir();
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    app.mode = InputMode::Agent;
+    app.ui.mode = InputMode::Agent;
 
     app.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
     app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
-    assert_eq!(app.input, "a\nb");
+    assert_eq!(app.ui.input, "a\nb");
 
-    app.input = "!echo hi".into();
-    app.input_cursor = app.input.chars().count();
+    app.ui.input = "!echo hi".into();
+    app.ui.input_cursor = app.ui.input.chars().count();
     match app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
         Action::SubmitShell(req) => assert_eq!(req.spec.display(), "echo hi"),
         _ => panic!("!cmd should always submit shell even in Agent mode"),
@@ -206,25 +210,25 @@ fn renders_transcript_cards_and_sidebar() {
     use ratatui::backend::TestBackend;
     let dir = tmpdir();
     let mut app = App::new(dir.clone(), "local".into(), None, PathBuf::from("/tmp"));
-    app.connected = true;
-    app.show_sidebar = true;
-    app.jobs = vec![job(
+    app.jobs.connected = true;
+    app.ui.show_sidebar = true;
+    app.jobs.list = vec![job(
         1,
-        JobState::Done {
+        ProtoJobState::Done {
             at_ms: now_ms(),
             result: envoy_proto::JobResult::Success,
         },
     )];
-    let uid = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::User {
+    let uid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::User {
         id: uid,
         text: "check files".into(),
         mode: "Agent".into(),
         cwd: "/tmp".into(),
         ts_ms: now_ms(),
     });
-    let tid = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::Tool {
+    let tid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Tool {
         id: tid,
         call_id: "c1".into(),
         name: "exec".into(),
@@ -260,7 +264,7 @@ fn renders_transcript_cards_and_sidebar() {
     // ctrl+o collapses tool output
     app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL));
     assert!(matches!(
-        app.session.items[1],
+        app.session.current.items[1],
         TranscriptItem::Tool {
             collapsed: true,
             ..
@@ -283,7 +287,7 @@ fn leader_requires_prefix_and_palette_filters() {
     ));
 
     app.handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
-    assert!(matches!(app.modal, Some(Modal::Picker(_))));
+    assert!(matches!(app.ui.modal, Some(Modal::Picker(_))));
     for ch in "quit".chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
     }
@@ -305,16 +309,17 @@ async fn context_budget_compacted_and_handoff_render_cleanly() {
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai".into(),
         credential: Credential::ApiKey { key: "k".into() },
         custom_models: vec![],
+        fetched_models: vec![],
         model_routes: std::collections::BTreeMap::new(),
         updated_ms: 0,
     };
     record_provider_login(&dir, prov, Some("gemini-4-hydrogen".into())).unwrap();
 
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    app.connected = true;
-    app.session.prompt_tokens = 50_000;
-    let uid = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::User {
+    app.jobs.connected = true;
+    app.session.current.prompt_tokens = 50_000;
+    let uid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::User {
         id: uid,
         text: "visible item".into(),
         mode: "Agent".into(),
@@ -355,7 +360,7 @@ async fn context_budget_compacted_and_handoff_render_cleanly() {
     let second = draw_text(&mut app);
     assert!(second.contains("50k/200k~1.0m"), "status bar:\n{second}");
 
-    let old_id = app.session.id.clone();
+    let old_id = app.session.current.id.clone();
     app.apply_event(
         1,
         AgentEvent::Compacted {
@@ -374,9 +379,9 @@ async fn context_budget_compacted_and_handoff_render_cleanly() {
             auto: true,
         },
     );
-    assert_eq!(app.session.messages.len(), 1);
+    assert_eq!(app.session.current.messages.len(), 1);
     assert!(app
-        .session
+        .session.current
         .items
         .iter()
         .any(|i| matches!(i, TranscriptItem::User { .. })));
@@ -390,9 +395,9 @@ async fn context_budget_compacted_and_handoff_render_cleanly() {
             title: "finish".into(),
         },
     );
-    assert_ne!(app.session.id, old_id);
-    assert_eq!(app.session.messages.len(), 2);
-    assert!(app.session.messages[0]
+    assert_ne!(app.session.current.id, old_id);
+    assert_eq!(app.session.current.messages.len(), 2);
+    assert!(app.session.current.messages[0]
         .content
         .contains("<handoff_context>"));
     let _ = std::fs::remove_dir_all(&dir);
@@ -403,13 +408,13 @@ fn permission_mode_cycles_on_shift_tab_and_renders_status_badge() {
     use ratatui::backend::TestBackend;
     let dir = tmpdir();
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    assert_eq!(app.perm_mode, PermissionMode::Default);
+    assert_eq!(app.session.perm_mode, PermissionMode::Default);
 
     app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
-    assert_eq!(app.perm_mode, PermissionMode::AcceptEdits);
+    assert_eq!(app.session.perm_mode, PermissionMode::AcceptEdits);
 
     app.run_slash("/plan");
-    assert_eq!(app.perm_mode, PermissionMode::Plan);
+    assert_eq!(app.session.perm_mode, PermissionMode::Plan);
 
     let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
     terminal.draw(|frame| paint(frame, &mut app)).unwrap();
@@ -428,12 +433,12 @@ fn permission_mode_cycles_on_shift_tab_and_renders_status_badge() {
 fn slash_choices_open_a_picker_instead_of_cycling() {
     let dir = tmpdir();
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    assert_eq!(app.perm_mode, PermissionMode::Default);
-    assert_eq!(app.mode, InputMode::Agent);
+    assert_eq!(app.session.perm_mode, PermissionMode::Default);
+    assert_eq!(app.ui.mode, InputMode::Agent);
 
     app.run_slash("/permission");
     {
-        let Some(Modal::Picker(picker)) = app.modal.as_ref() else {
+        let Some(Modal::Picker(picker)) = app.ui.modal.as_ref() else {
             panic!("expected a permission picker");
         };
         assert_eq!(picker.title, "permissions");
@@ -443,30 +448,30 @@ fn slash_choices_open_a_picker_instead_of_cycling() {
             .iter()
             .any(|(label, _)| label.contains("accept-edits")));
     }
-    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.modal.is_none());
-    assert_eq!(app.perm_mode, PermissionMode::AcceptEdits);
+    assert!(app.ui.modal.is_none());
+    assert_eq!(app.session.perm_mode, PermissionMode::AcceptEdits);
 
     app.run_slash("/permissions plan");
-    assert!(app.modal.is_none());
-    assert_eq!(app.perm_mode, PermissionMode::Plan);
+    assert!(app.ui.modal.is_none());
+    assert_eq!(app.session.perm_mode, PermissionMode::Plan);
 
     app.run_slash("/mode");
     {
-        let Some(Modal::Picker(picker)) = app.modal.as_ref() else {
+        let Some(Modal::Picker(picker)) = app.ui.modal.as_ref() else {
             panic!("expected a mode picker");
         };
         assert_eq!(picker.selected, 0);
     }
-    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.mode, InputMode::Shell);
+    assert_eq!(app.ui.mode, InputMode::Shell);
 
     app.run_slash("/theme");
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.theme, 1);
+    assert_eq!(app.ui.theme, 1);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -493,8 +498,8 @@ async fn welcome_picker_selects_a_recent_workspace() {
 
     let mut app = App::new(dir.clone(), "local".into(), None, here.clone());
     app.open_welcome();
-    assert_eq!(app.welcome.as_ref().unwrap().rows.len(), 7);
-    assert_eq!(app.welcome.as_ref().unwrap().selected, 0);
+    assert_eq!(app.ui.welcome.as_ref().unwrap().rows.len(), 7);
+    assert_eq!(app.ui.welcome.as_ref().unwrap().selected, 0);
 
     let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
     terminal.draw(|frame| paint(frame, &mut app)).unwrap();
@@ -511,13 +516,13 @@ async fn welcome_picker_selects_a_recent_workspace() {
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.welcome.as_ref().unwrap().path_mode);
+    assert_eq!(app.ui.welcome.as_ref().unwrap().mode, WelcomeMode::OpenPath);
     for ch in dir.join("missing").display().to_string().chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
     }
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     let err = app
-        .welcome
+        .ui.welcome
         .as_ref()
         .unwrap()
         .error
@@ -527,14 +532,14 @@ async fn welcome_picker_selects_a_recent_workspace() {
 
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
-    assert_eq!(app.welcome.as_ref().unwrap().selected, 1);
+    assert_eq!(app.ui.welcome.as_ref().unwrap().selected, 1);
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.welcome.is_none());
+    assert!(app.ui.welcome.is_none());
     assert_eq!(
-        std::fs::canonicalize(&app.session.cwd).unwrap(),
+        std::fs::canonicalize(&app.session.current.cwd).unwrap(),
         std::fs::canonicalize(&other).unwrap()
     );
-    assert_eq!(app.session.id, saved.id);
+    assert_eq!(app.session.current.id, saved.id);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -546,17 +551,17 @@ async fn welcome_without_a_saved_session_mints_a_new_id() {
     std::fs::create_dir_all(&here).unwrap();
     std::fs::create_dir_all(&fresh).unwrap();
     let mut app = App::new(dir.clone(), "local".into(), None, here.clone());
-    let launch_id = app.session.id.clone();
+    let launch_id = app.session.current.id.clone();
     app.open_welcome();
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.welcome.is_none());
-    assert_ne!(app.session.id, launch_id);
+    assert!(app.ui.welcome.is_none());
+    assert_ne!(app.session.current.id, launch_id);
     assert_eq!(
-        std::fs::canonicalize(&app.session.cwd).unwrap(),
+        std::fs::canonicalize(&app.session.current.cwd).unwrap(),
         std::fs::canonicalize(&here).unwrap()
     );
 
-    let picked = app.session.id.clone();
+    let picked = app.session.current.id.clone();
     app.open_welcome();
     app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -564,10 +569,10 @@ async fn welcome_without_a_saved_session_mints_a_new_id() {
         app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
     }
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.welcome.is_none());
-    assert_ne!(app.session.id, picked);
+    assert!(app.ui.welcome.is_none());
+    assert_ne!(app.session.current.id, picked);
     assert_eq!(
-        std::fs::canonicalize(&app.session.cwd).unwrap(),
+        std::fs::canonicalize(&app.session.current.cwd).unwrap(),
         std::fs::canonicalize(&fresh).unwrap()
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -578,23 +583,23 @@ fn composer_and_turns_keep_vertical_room() {
     use ratatui::backend::TestBackend;
     let dir = tmpdir();
     let mut app = App::new(dir.clone(), "local".into(), None, PathBuf::from("/tmp"));
-    app.connected = true;
-    app.show_sidebar = false;
+    app.jobs.connected = true;
+    app.ui.show_sidebar = false;
 
     for (user, reply) in [
         ("first-question", "alpha-reply"),
         ("second-question", "beta-reply"),
     ] {
-        let uid = app.session.alloc_id();
-        app.session.items.push(TranscriptItem::User {
+        let uid = app.session.current.alloc_id();
+        app.session.current.items.push(TranscriptItem::User {
             id: uid,
             text: user.into(),
             mode: "Agent".into(),
             cwd: "/tmp".into(),
             ts_ms: now_ms(),
         });
-        let aid = app.session.alloc_id();
-        app.session.items.push(TranscriptItem::Assistant {
+        let aid = app.session.current.alloc_id();
+        app.session.current.items.push(TranscriptItem::Assistant {
             id: aid,
             text: reply.into(),
             reasoning: String::new(),

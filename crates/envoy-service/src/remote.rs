@@ -4,7 +4,9 @@ use crate::client::{
     cancel, edit, jobs, list, logs, next_reply, open, probe, read, status, submit, write,
     WriteStream,
 };
+use crate::local_direct;
 use crate::transport::{AgentDialer, BoxStream};
+use crate::AgentServer;
 use anyhow::{bail, Result};
 use envoy_proto::{
     Entry, GrepHit, Hello, Job, JobId, LogRecord, Op, Reply, SubmitRequest, AGENT_SERVICE_ID,
@@ -69,14 +71,29 @@ where
     }
 }
 
-/// High-level client backed by any [`AgentDialer`] adapter.
+/// High-level client backed by any [`AgentDialer`] adapter, with optional
+/// direct in-process dispatch for local peers.
 pub struct Remote<D> {
     dialer: D,
+    local: Option<AgentServer>,
 }
 
 impl<D: AgentDialer> Remote<D> {
     pub fn new(dialer: D) -> Self {
-        Self { dialer }
+        Self {
+            dialer,
+            local: None,
+        }
+    }
+
+    pub fn with_local(dialer: D, local: Option<AgentServer>) -> Self {
+        Self { dialer, local }
+    }
+
+    fn local_for(&self, peer: &str) -> Option<&AgentServer> {
+        (peer.is_empty() || peer == "local")
+            .then_some(self.local.as_ref())
+            .flatten()
     }
 
     pub fn dialer(&self) -> &D {
@@ -88,22 +105,37 @@ impl<D: AgentDialer> Remote<D> {
     }
 
     pub async fn probe(&self, peer: &str) -> Result<Hello> {
+        if let Some(server) = self.local_for(peer) {
+            return Ok(local_direct::probe(server));
+        }
         probe(self.dial(peer).await?, peer).await
     }
 
     pub async fn submit(&self, peer: &str, req: SubmitRequest) -> Result<Job> {
+        if let Some(server) = self.local_for(peer) {
+            return local_direct::submit(server, req);
+        }
         submit(self.dial(peer).await?, peer, req).await
     }
 
     pub async fn jobs(&self, peer: &str) -> Result<Vec<Job>> {
+        if let Some(server) = self.local_for(peer) {
+            return local_direct::jobs(server);
+        }
         jobs(self.dial(peer).await?, peer).await
     }
 
     pub async fn status(&self, peer: &str, id: JobId) -> Result<Job> {
+        if let Some(server) = self.local_for(peer) {
+            return local_direct::status(server, id);
+        }
         status(self.dial(peer).await?, peer, id).await
     }
 
     pub async fn cancel(&self, peer: &str, id: JobId) -> Result<()> {
+        if let Some(server) = self.local_for(peer) {
+            return local_direct::cancel(server, id);
+        }
         cancel(self.dial(peer).await?, peer, id).await
     }
 
@@ -118,6 +150,9 @@ impl<D: AgentDialer> Remote<D> {
     where
         F: FnMut(&[LogRecord]),
     {
+        if let Some(server) = self.local_for(peer) {
+            return local_direct::logs(server, id, offset, follow, sink).await;
+        }
         logs(self.dial(peer).await?, peer, id, offset, follow, sink).await
     }
 
@@ -128,6 +163,9 @@ impl<D: AgentDialer> Remote<D> {
         offset: u64,
         limit: u64,
     ) -> Result<(u64, u32, Vec<u8>)> {
+        if self.local_for(peer).is_some() {
+            return local_direct::read(path, offset, limit).await;
+        }
         read(self.dial(peer).await?, peer, path, offset, limit).await
     }
 
@@ -138,6 +176,9 @@ impl<D: AgentDialer> Remote<D> {
         data: &[u8],
         mode: Option<u32>,
     ) -> Result<u64> {
+        if self.local_for(peer).is_some() {
+            return local_direct::write(path, data, mode).await;
+        }
         write(self.dial(peer).await?, peer, path, data, mode).await
     }
 
@@ -149,6 +190,9 @@ impl<D: AgentDialer> Remote<D> {
         new: &str,
         replace_all: bool,
     ) -> Result<usize> {
+        if self.local_for(peer).is_some() {
+            return local_direct::edit(path, old, new, replace_all).await;
+        }
         edit(self.dial(peer).await?, peer, path, old, new, replace_all).await
     }
 
@@ -164,6 +208,9 @@ impl<D: AgentDialer> Remote<D> {
     }
 
     pub async fn list(&self, peer: &str, path: &str) -> Result<Vec<Entry>> {
+        if self.local_for(peer).is_some() {
+            return local_direct::list(path).await;
+        }
         list(self.dial(peer).await?, peer, path).await
     }
 
@@ -174,6 +221,9 @@ impl<D: AgentDialer> Remote<D> {
         pattern: &str,
         max_results: u32,
     ) -> Result<Vec<String>> {
+        if self.local_for(peer).is_some() {
+            return local_direct::glob(root, pattern, max_results).await;
+        }
         glob(self.dial(peer).await?, peer, root, pattern, max_results).await
     }
 
@@ -185,6 +235,9 @@ impl<D: AgentDialer> Remote<D> {
         include: Option<&str>,
         max_results: u32,
     ) -> Result<Vec<GrepHit>> {
+        if self.local_for(peer).is_some() {
+            return local_direct::grep(root, pattern, include, max_results).await;
+        }
         grep(
             self.dial(peer).await?,
             peer,

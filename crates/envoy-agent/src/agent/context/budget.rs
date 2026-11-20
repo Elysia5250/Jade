@@ -164,20 +164,21 @@ fn native_harness_trigger(model_id: &str, cap: &ModelCap, max_trigger: u64) -> (
     // Claude and Gemini first so a haiku-4 id is not swallowed by the small-model tag.
     // The small-model tag stays ahead of OpenAI and the open families so names like
     // gpt-4o-mini and qwen2.5-7b keep the tighter cap.
-    if let Some((target, profile)) = match_claude_or_gemini(&id, hard, max_trigger) {
-        return (target, profile);
+    let (mut target, profile) = if let Some(hit) = match_claude_or_gemini(&id, hard, max_trigger) {
+        hit
+    } else if has_small_model_tag(&id) {
+        ((hard / 2).min(96_000).min(max_trigger), "small-50%")
+    } else if let Some(hit) = match_openai_or_grok(&id, hard, max_trigger) {
+        hit
+    } else if let Some(hit) = match_cn_or_open_family(&id, hard, max_trigger) {
+        hit
+    } else {
+        conservative_fallback_trigger(hard, max_trigger)
+    };
+    if let Some(cliff) = cap.pricing_cliff {
+        target = target.min((cliff * 90 / 100).max(8_192));
     }
-    if has_small_model_tag(&id) {
-        return ((hard / 2).min(96_000).min(max_trigger), "small-50%");
-    }
-    if let Some((target, profile)) = match_openai_or_grok(&id, hard, max_trigger) {
-        return (target, profile);
-    }
-    if let Some((target, profile)) = match_cn_or_open_family(&id, hard, max_trigger) {
-        return (target, profile);
-    }
-
-    conservative_fallback_trigger(hard, cap.pricing_cliff, max_trigger)
+    (target.min(max_trigger), profile)
 }
 
 fn match_claude_or_gemini(id: &str, hard: u64, max_trigger: u64) -> Option<(u64, &'static str)> {
@@ -302,21 +303,14 @@ fn match_cn_or_open_family(id: &str, hard: u64, max_trigger: u64) -> Option<(u64
     None
 }
 
-fn conservative_fallback_trigger(
-    hard: u64,
-    pricing_cliff: Option<u64>,
-    max_trigger: u64,
-) -> (u64, &'static str) {
-    let mut target = if hard <= 32_768 {
+fn conservative_fallback_trigger(hard: u64, max_trigger: u64) -> (u64, &'static str) {
+    let target = if hard <= 32_768 {
         hard * 50 / 100
     } else if hard <= 131_072 {
         hard * 55 / 100
     } else {
         hard * 60 / 100
     };
-    if let Some(cliff) = pricing_cliff {
-        target = target.min(cliff * 90 / 100);
-    }
     (target.min(max_trigger).max(8_192), "conservative-fallback")
 }
 
@@ -531,5 +525,18 @@ mod tests {
             .compact_at,
             512_000
         );
+
+        let cliff_capped = plan_for_cap(
+            "claude-opus-5",
+            &ModelCap {
+                context_window: 1_000_000,
+                max_output: Some(128_000),
+                pricing_cliff: Some(200_000),
+                source: "test".into(),
+                updated_ms: 0,
+            },
+            CompactionTier::Native,
+        );
+        assert_eq!(cliff_capped.compact_at, 180_000);
     }
 }

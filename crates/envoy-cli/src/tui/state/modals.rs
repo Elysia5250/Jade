@@ -9,7 +9,7 @@ impl App {
             return;
         }
         let fetching = self.spawn_model_refresh();
-        self.modal = Some(Modal::Models(ModelsModal {
+        self.ui.modal = Some(Modal::Models(ModelsModal {
             filter: String::new(),
             selected: 0,
             models: available_models(&self.data_dir),
@@ -23,29 +23,32 @@ impl App {
         if tokio::runtime::Handle::try_current().is_err() {
             return false;
         }
-        let Some((prov, _)) = resolve_active_provider(&self.data_dir) else {
+        if resolve_active_provider(&self.data_dir).is_none() {
             return false;
-        };
+        }
         let dir = self.data_dir.clone();
-        tokio::spawn(async move {
-            let http = reqwest::Client::new();
-            envoy_agent::agent::context::refresh_models_dev_if_stale(&http, &dir).await;
-        });
-        let dir = self.data_dir.clone();
-        let pid = prov.id.clone();
         let (tx, rx) = oneshot::channel();
         tokio::spawn(async move {
-            let http = reqwest::Client::new();
-            let list =
-                envoy_agent::agent::context::fetch_provider_models(&http, Some(&dir), &prov).await;
-            let _ = tx.send((pid, list));
+            if let Ok(AgentResp::ModelsRefreshed {
+                provider_id,
+                models,
+            }) = runtime::request(&dir, &AgentReq::RefreshModels).await
+            {
+                let _ = tx.send((provider_id, models));
+                return;
+            }
+            if let Some((provider_id, models)) =
+                envoy_agent::agent::context::refresh_active_provider_models(&dir).await
+            {
+                let _ = tx.send((provider_id, models));
+            }
         });
-        self.models_rx = Some(rx);
+        self.login.models_rx = Some(rx);
         true
     }
 
     pub(in crate::tui) fn drain_model_events(&mut self) -> bool {
-        let Some(mut rx) = self.models_rx.take() else {
+        let Some(mut rx) = self.login.models_rx.take() else {
             return false;
         };
         match rx.try_recv() {
@@ -54,7 +57,7 @@ impl App {
                 true
             }
             Err(oneshot::error::TryRecvError::Empty) => {
-                self.models_rx = Some(rx);
+                self.login.models_rx = Some(rx);
                 false
             }
             Err(_) => {
@@ -87,7 +90,7 @@ impl App {
                 Err(e) => self.set_toast(format!("{e:#}"), true),
             }
         }
-        if let Some(Modal::Models(m)) = self.modal.as_mut() {
+        if let Some(Modal::Models(m)) = self.ui.modal.as_mut() {
             m.fetching = false;
             m.models = available_models(&self.data_dir);
             m.selected = m.selected.min(m.models.len().saturating_sub(1));
@@ -96,7 +99,7 @@ impl App {
     }
 
     pub(in crate::tui) fn model_fetch_failed(&mut self) {
-        if let Some(Modal::Models(m)) = self.modal.as_mut() {
+        if let Some(Modal::Models(m)) = self.ui.modal.as_mut() {
             m.fetching = false;
         }
     }
@@ -104,14 +107,14 @@ impl App {
     pub(in crate::tui) fn open_sessions_modal(&mut self) {
         self.persist_session();
         let sessions = list_sessions(&self.data_dir);
-        self.modal = Some(Modal::Sessions(SessionsModal {
+        self.ui.modal = Some(Modal::Sessions(SessionsModal {
             sessions,
             selected: 0,
         }));
     }
 
     pub(in crate::tui) fn open_picker(&mut self, title: &str, items: Vec<(String, Command)>) {
-        self.modal = Some(Modal::Picker(Picker {
+        self.ui.modal = Some(Modal::Picker(Picker {
             title: title.to_string(),
             query: String::new(),
             items,
@@ -124,14 +127,14 @@ impl App {
     }
 
     fn select_picker(&mut self, index: usize) {
-        if let Some(Modal::Picker(picker)) = self.modal.as_mut() {
+        if let Some(Modal::Picker(picker)) = self.ui.modal.as_mut() {
             let last = picker.items.len().saturating_sub(1);
             picker.selected = index.min(last);
         }
     }
 
     pub(in crate::tui) fn open_mode_picker(&mut self) {
-        let current = self.mode;
+        let current = self.ui.mode;
         self.open_picker(
             "mode",
             vec![
@@ -149,7 +152,7 @@ impl App {
     }
 
     pub(in crate::tui) fn open_permission_picker(&mut self) {
-        let current = self.perm_mode;
+        let current = self.session.perm_mode;
         let rows = [
             (PermissionMode::Default, "ask", "prompt before tools"),
             (
@@ -178,7 +181,7 @@ impl App {
     }
 
     pub(in crate::tui) fn open_theme_picker(&mut self) {
-        let current = self.theme;
+        let current = self.ui.theme;
         let items = THEMES
             .iter()
             .enumerate()
@@ -194,7 +197,7 @@ impl App {
     }
 
     pub(in crate::tui) fn open_trust_picker(&mut self) {
-        let on = is_workspace_trusted(&self.data_dir, &self.session.cwd);
+        let on = is_workspace_trusted(&self.data_dir, &self.session.current.cwd);
         self.open_picker(
             "trust",
             vec![
@@ -212,7 +215,7 @@ impl App {
     }
 
     pub(in crate::tui) fn open_sidebar_picker(&mut self) {
-        let shown = self.show_sidebar;
+        let shown = self.ui.show_sidebar;
         self.open_picker(
             "inspector",
             vec![
@@ -228,7 +231,7 @@ impl App {
     }
 
     pub(in crate::tui) fn open_mouse_picker(&mut self) {
-        let on = self.mouse_capture;
+        let on = self.ui.mouse_capture;
         self.open_picker(
             "mouse",
             vec![
@@ -281,7 +284,7 @@ impl App {
     pub(in crate::tui) fn machine_items(&self) -> Vec<(String, Command)> {
         let mut items = Vec::new();
         for peer in self
-            .status
+            .jobs.status
             .as_ref()
             .map(|s| s.peers.as_slice())
             .unwrap_or(&[])
@@ -296,7 +299,7 @@ impl App {
                 Command::Switch(peer.device_id.clone()),
             ));
         }
-        if self.target != "local" {
+        if self.jobs.target != "local" {
             items.push(("local".to_string(), Command::Switch("local".into())));
         }
         if items.is_empty() {
@@ -316,11 +319,11 @@ impl App {
             ),
             ("Switch model (/models)".to_string(), Command::OpenModels),
             (
-                format!("Switch mode (now {})", self.mode.label()),
+                format!("Switch mode (now {})", self.ui.mode.label()),
                 Command::OpenModePicker,
             ),
             (
-                format!("Set permission mode (now {})", self.perm_mode.label()),
+                format!("Set permission mode (now {})", self.session.perm_mode.label()),
                 Command::OpenPermissionPicker,
             ),
             ("New session (/new)".to_string(), Command::NewSession),
@@ -344,7 +347,7 @@ impl App {
             ("Refresh".to_string(), Command::Refresh),
         ];
         for peer in self
-            .status
+            .jobs.status
             .as_ref()
             .map(|s| s.peers.as_slice())
             .unwrap_or(&[])
@@ -359,7 +362,7 @@ impl App {
                 Command::Switch(peer.device_id.clone()),
             ));
         }
-        if self.target != "local" {
+        if self.jobs.target != "local" {
             items.push((
                 "Switch machine: local".to_string(),
                 Command::Switch("local".into()),
@@ -371,7 +374,7 @@ impl App {
     }
 
     pub(in crate::tui) fn handle_modal_key(&mut self, key: KeyEvent) -> Action {
-        let Some(modal) = self.modal.take() else {
+        let Some(modal) = self.ui.modal.take() else {
             return Action::None;
         };
         match modal {
@@ -392,12 +395,6 @@ impl App {
                     KeyCode::Esc => return Action::None,
                     KeyCode::Up => p.selected = p.selected.saturating_sub(1),
                     KeyCode::Down => p.selected = (p.selected + 1).min(len - 1),
-                    KeyCode::Char('k') if p.query.is_empty() => {
-                        p.selected = p.selected.saturating_sub(1);
-                    }
-                    KeyCode::Char('j') if p.query.is_empty() => {
-                        p.selected = (p.selected + 1).min(len - 1);
-                    }
                     KeyCode::Backspace => {
                         p.query.pop();
                         p.selected = 0;
@@ -415,7 +412,7 @@ impl App {
                     }
                     _ => {}
                 }
-                self.modal = Some(Modal::Picker(p));
+                self.ui.modal = Some(Modal::Picker(p));
                 Action::None
             }
             Modal::Login(login) => {
@@ -465,7 +462,8 @@ impl App {
                             if let Err(e) = set_active_model(&self.data_dir, mref.clone()) {
                                 self.set_toast(format!("{e:#}"), true);
                             } else {
-                                self.mode = InputMode::Agent;
+                                self.ui.mode = InputMode::Agent;
+                                self.inputs.invalidate_catalog();
                                 self.set_toast(format!("model: {}", mref.display()), false);
                             }
                         }
@@ -477,7 +475,7 @@ impl App {
                     }
                     _ => {}
                 }
-                self.modal = Some(Modal::Models(m));
+                self.ui.modal = Some(Modal::Models(m));
                 Action::None
             }
             Modal::Sessions(mut s) => {
@@ -490,11 +488,15 @@ impl App {
                     }
                     KeyCode::Char('d') => {
                         if let Some(target) = s.sessions.get(s.selected).map(|x| x.id.clone()) {
-                            let _ = delete_session(&self.data_dir, &target);
-                            let close_id = target.clone();
-                            self.sync_agent(AgentReq::CloseSession { id: close_id });
-                            s.sessions.retain(|x| x.id != target);
-                            s.selected = s.selected.min(s.sessions.len().saturating_sub(1));
+                            if target == self.session.current.id {
+                                self.set_toast("cannot delete the active session", true);
+                            } else {
+                                let _ = delete_session(&self.data_dir, &target);
+                                let close_id = target.clone();
+                                self.sync_agent(AgentReq::CloseSession { id: close_id });
+                                s.sessions.retain(|x| x.id != target);
+                                s.selected = s.selected.min(s.sessions.len().saturating_sub(1));
+                            }
                         }
                     }
                     KeyCode::Enter => {
@@ -512,7 +514,7 @@ impl App {
                     }
                     _ => {}
                 }
-                self.modal = Some(Modal::Sessions(s));
+                self.ui.modal = Some(Modal::Sessions(s));
                 Action::None
             }
             Modal::Rewind(mut r) => {
@@ -531,7 +533,7 @@ impl App {
                     }
                     _ => {}
                 }
-                self.modal = Some(Modal::Rewind(r));
+                self.ui.modal = Some(Modal::Rewind(r));
                 Action::None
             }
         }
@@ -545,17 +547,17 @@ impl App {
                     p.query.push_str(&clean);
                     p.selected = 0;
                 }
-                self.modal = Some(Modal::Picker(p));
+                self.ui.modal = Some(Modal::Picker(p));
             }
             Modal::Models(mut m) => {
                 if !clean.is_empty() {
                     m.filter.push_str(&clean);
                     m.selected = 0;
                 }
-                self.modal = Some(Modal::Models(m));
+                self.ui.modal = Some(Modal::Models(m));
             }
             Modal::Login(login) => self.handle_login_paste(login, &clean),
-            other => self.modal = Some(other),
+            other => self.ui.modal = Some(other),
         }
     }
 }

@@ -175,3 +175,63 @@ fn merge_conflict_stays_in_progress_on_the_main_tree() {
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir_all(linked_path(&root, "topic").unwrap().parent().unwrap());
 }
+
+#[test]
+fn list_and_merge_work_from_linked_worktree_subdirectory() {
+    let root = init_repo();
+    let Effect::Enter { path: side, .. } = execute(&root, "side").unwrap() else {
+        panic!("expected enter");
+    };
+    let sub = side.join("nested/dir");
+    std::fs::create_dir_all(&sub).unwrap();
+    let Effect::Listed(listing) = execute(&sub, "").unwrap() else {
+        panic!("expected list");
+    };
+    let starred = listing
+        .lines()
+        .find(|l| l.starts_with('*'))
+        .expect("starred line");
+    assert!(starred.contains("side"), "{listing}");
+
+    std::fs::write(sub.join("f.txt"), "hi\n").unwrap();
+    git_ok(&side, &["add", "nested/dir/f.txt"]);
+    git_ok(&side, &["commit", "-m", "sub commit"]);
+
+    let Effect::Enter { path, .. } = execute(&sub, "merge").unwrap() else {
+        panic!("expected merge enter");
+    };
+    assert_eq!(path, canon(&root));
+    assert_eq!(
+        std::fs::read_to_string(root.join("nested/dir/f.txt")).unwrap(),
+        "hi\n"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_dir_all(linked_path(&root, "side").unwrap().parent().unwrap());
+}
+
+#[test]
+fn main_root_succeeds_inside_a_git_submodule() {
+    let parent = init_repo();
+    let sub_src = init_repo();
+    git_ok(
+        &parent,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            &sub_src.display().to_string(),
+            "deps/sub",
+        ],
+    );
+    let sub_checkout = parent.join("deps/sub");
+    let root = main_root(&sub_checkout).expect("submodule main_root");
+    assert_eq!(root, canon(&sub_checkout));
+    let Effect::Enter { path: tree, .. } = execute(&sub_checkout, "subwt").unwrap() else {
+        panic!("expected sub worktree");
+    };
+    assert_eq!(main_root(&tree).unwrap(), canon(&sub_checkout));
+    let _ = execute(&sub_checkout, "remove subwt");
+    let _ = std::fs::remove_dir_all(&parent);
+    let _ = std::fs::remove_dir_all(&sub_src);
+}

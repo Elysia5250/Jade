@@ -206,6 +206,7 @@ async fn stress_250_step_loop_with_compaction_and_fd_rss_profile() {
         data_dir: data.clone(),
         conduit: None,
         local_socket: None,
+        local_server: None,
         target: "local".into(),
         cwd: ws.clone(),
         provider: StoredProvider {
@@ -217,6 +218,7 @@ async fn stress_250_step_loop_with_compaction_and_fd_rss_profile() {
                 key: "sk-test".into(),
             },
             custom_models: vec!["gpt-5.4".into()],
+            fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
             updated_ms: 0,
         },
@@ -356,6 +358,7 @@ async fn stress_8way_parallel_subagents_and_midflight_abort() {
         data_dir: data.clone(),
         conduit: None,
         local_socket: None,
+        local_server: None,
         target: "local".into(),
         cwd: ws.clone(),
         provider: StoredProvider {
@@ -367,6 +370,7 @@ async fn stress_8way_parallel_subagents_and_midflight_abort() {
                 key: "sk-test".into(),
             },
             custom_models: vec!["m1".into()],
+            fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
             updated_ms: 0,
         },

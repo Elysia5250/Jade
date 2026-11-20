@@ -5,20 +5,20 @@ pub const BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
     BuiltinProvider {
         id: "openai",
         name: "OpenAI / ChatGPT",
-        subtitle: "ChatGPT Plus/Pro OAuth or API Key",
+        subtitle: "Official API key, or experimental / unofficial subscription OAuth",
         default_base_url: "https://api.openai.com/v1",
         protocol: ProviderProtocol::OpenAiChat,
         env_var: Some("OPENAI_API_KEY"),
         methods: &[
             AuthMethodDef {
                 kind: AuthMethodKind::OpenAiBrowserOAuth,
-                label: "ChatGPT Plus / Pro (OAuth — Browser)",
-                hint: "Opens browser login on localhost:1455 (with manual paste fallback)",
+                label: "ChatGPT Plus / Pro (OAuth — Browser, experimental / unofficial)",
+                hint: "experimental / unofficial. Prefer an official API key. Browser login on localhost:1455",
             },
             AuthMethodDef {
                 kind: AuthMethodKind::OpenAiDeviceOAuth,
-                label: "ChatGPT Plus / Pro (OAuth — Device Code)",
-                hint: "Headless/SSH friendly: enter a short code at auth.openai.com",
+                label: "ChatGPT Plus / Pro (OAuth — Device Code, experimental / unofficial)",
+                hint: "experimental / unofficial. Prefer an official API key. Enter a code at auth.openai.com",
             },
             AuthMethodDef {
                 kind: AuthMethodKind::OpenAiApiKey,
@@ -30,20 +30,20 @@ pub const BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
     BuiltinProvider {
         id: "anthropic",
         name: "Anthropic (Claude)",
-        subtitle: "Claude Pro/Max OAuth or API Key",
+        subtitle: "Official API key, or experimental / unofficial subscription OAuth",
         default_base_url: "https://api.anthropic.com/v1",
         protocol: ProviderProtocol::Anthropic,
         env_var: Some("ANTHROPIC_API_KEY"),
         methods: &[
             AuthMethodDef {
                 kind: AuthMethodKind::AnthropicClaudeOAuth,
-                label: "Claude Pro / Max (OAuth)",
-                hint: "Sign in with your claude.ai subscription and paste the code",
+                label: "Claude Pro / Max (OAuth, experimental / unofficial)",
+                hint: "experimental / unofficial. Prefer an official API key. Paste the claude.ai code",
             },
             AuthMethodDef {
                 kind: AuthMethodKind::AnthropicConsoleOAuth,
-                label: "Anthropic Console (OAuth -> Create API Key)",
-                hint: "Sign in with Anthropic Console to mint an API key automatically",
+                label: "Anthropic Console (OAuth, experimental / unofficial)",
+                hint: "experimental / unofficial. Prefer an official API key. Console sign-in mints a key",
             },
             AuthMethodDef {
                 kind: AuthMethodKind::AnthropicApiKey,
@@ -55,14 +55,14 @@ pub const BUILTIN_PROVIDERS: &[BuiltinProvider] = &[
     BuiltinProvider {
         id: "github-copilot",
         name: "GitHub Copilot",
-        subtitle: "GitHub OAuth Device Flow",
+        subtitle: "experimental / unofficial device OAuth. Prefer an official API key when one exists",
         default_base_url: "https://api.githubcopilot.com",
         protocol: ProviderProtocol::OpenAiChat,
         env_var: None,
         methods: &[AuthMethodDef {
             kind: AuthMethodKind::GitHubCopilotDeviceOAuth,
-            label: "GitHub Copilot (OAuth Device Code)",
-            hint: "Sign in at github.com/login/device with your Copilot subscription",
+            label: "GitHub Copilot (OAuth Device Code, experimental / unofficial)",
+            hint: "experimental / unofficial. Sign in at github.com/login/device",
         }],
     },
     BuiltinProvider {

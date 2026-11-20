@@ -10,7 +10,7 @@ impl App {
             AuthMethodKind::OpenAiApiKey
             | AuthMethodKind::AnthropicApiKey
             | AuthMethodKind::SimpleApiKey => {
-                self.modal = Some(Modal::Login(LoginModal::ApiKeyForm {
+                self.ui.modal = Some(Modal::Login(LoginModal::ApiKeyForm {
                     provider_idx,
                     key: String::new(),
                     base_url: prov.default_base_url.to_string(),
@@ -21,7 +21,7 @@ impl App {
                 }));
             }
             AuthMethodKind::CustomForm => {
-                self.modal = Some(Modal::Login(LoginModal::CustomForm {
+                self.ui.modal = Some(Modal::Login(LoginModal::CustomForm {
                     protocol_idx: 0,
                     name: "Custom Provider".to_string(),
                     base_url: "http://127.0.0.1:11434/v1".to_string(),
@@ -61,12 +61,14 @@ impl App {
                                 },
                                 &st,
                             );
+                            let _ = tx_task.send(LoginEvent::OpenAiBrowserBound {
+                                url: url.clone(),
+                                redirect_uri: redirect_uri.clone(),
+                            });
                             open_browser(&url);
                             match wait_openai_browser_callback(listener, st, cancel_rx).await {
                                 Ok(code) => {
-                                    let http = reqwest::Client::new();
-                                    match exchange_openai_code(
-                                        &http,
+                                    match exchange_openai_code_default(
                                         &code,
                                         &redirect_uri,
                                         &verifier,
@@ -93,10 +95,10 @@ impl App {
                         }
                     }
                 });
-                self.login_rx = Some(rx);
-                self.login_task = Some(handle);
-                self.login_cancel = Some(cancel_tx);
-                self.modal = Some(Modal::Login(LoginModal::OAuthBrowser {
+                self.login.rx = Some(rx);
+                self.login.task = Some(handle);
+                self.login.cancel = Some(cancel_tx);
+                self.ui.modal = Some(Modal::Login(LoginModal::OAuthBrowser {
                     provider_name: prov.name.to_string(),
                     url: initial_url,
                     redirect_uri: initial_redirect,
@@ -110,15 +112,14 @@ impl App {
             AuthMethodKind::OpenAiDeviceOAuth => {
                 let (tx, rx) = mpsc::unbounded_channel();
                 let handle = tokio::spawn(async move {
-                    let http = reqwest::Client::new();
-                    match start_openai_device_auth(&http).await {
+                    match start_openai_device_auth_default().await {
                         Ok(start) => {
                             open_browser(&start.verification_url);
                             let _ = tx.send(LoginEvent::OpenAiDeviceStarted {
                                 verification_url: start.verification_url.clone(),
                                 user_code: start.user_code.clone(),
                             });
-                            match poll_openai_device_auth(&http, &start).await {
+                            match poll_openai_device_auth_default(&start).await {
                                 Ok(sp) => {
                                     let _ = tx.send(LoginEvent::Success(sp, None));
                                 }
@@ -132,9 +133,9 @@ impl App {
                         }
                     }
                 });
-                self.login_rx = Some(rx);
-                self.login_task = Some(handle);
-                self.modal = Some(Modal::Login(LoginModal::OAuthDevice {
+                self.login.rx = Some(rx);
+                self.login.task = Some(handle);
+                self.ui.modal = Some(Modal::Login(LoginModal::OAuthDevice {
                     provider_name: prov.name.to_string(),
                     verification_uri: "https://auth.openai.com/codex/device".into(),
                     user_code: "requesting.".into(),
@@ -154,11 +155,11 @@ impl App {
                 };
                 let url = anthropic_authorize_url(console, &pkce, &state);
                 open_browser(&url);
-                self.modal = Some(Modal::Login(LoginModal::OAuthCodePaste {
+                self.ui.modal = Some(Modal::Login(LoginModal::OAuthCodePaste {
                     provider_name: if console {
-                        "Anthropic Console (API Key)".into()
+                        "Anthropic Console (OAuth, experimental / unofficial)".into()
                     } else {
-                        "Claude Pro / Max (OAuth)".into()
+                        "Claude Pro / Max (OAuth, experimental / unofficial)".into()
                     },
                     url,
                     verifier: pkce.verifier,
@@ -172,15 +173,14 @@ impl App {
             AuthMethodKind::GitHubCopilotDeviceOAuth => {
                 let (tx, rx) = mpsc::unbounded_channel();
                 let handle = tokio::spawn(async move {
-                    let http = reqwest::Client::new();
-                    match start_github_copilot_device(&http).await {
+                    match start_github_copilot_device_default().await {
                         Ok(start) => {
                             open_browser(&start.verification_uri);
                             let _ = tx.send(LoginEvent::GitHubDeviceStarted {
                                 verification_uri: start.verification_uri.clone(),
                                 user_code: start.user_code.clone(),
                             });
-                            match poll_github_copilot_device(&http, &start).await {
+                            match poll_github_copilot_device_default(&start).await {
                                 Ok(sp) => {
                                     let _ = tx.send(LoginEvent::Success(sp, None));
                                 }
@@ -194,9 +194,9 @@ impl App {
                         }
                     }
                 });
-                self.login_rx = Some(rx);
-                self.login_task = Some(handle);
-                self.modal = Some(Modal::Login(LoginModal::OAuthDevice {
+                self.login.rx = Some(rx);
+                self.login.task = Some(handle);
+                self.ui.modal = Some(Modal::Login(LoginModal::OAuthDevice {
                     provider_name: prov.name.to_string(),
                     verification_uri: "https://github.com/login/device".into(),
                     user_code: "requesting.".into(),

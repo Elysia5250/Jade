@@ -30,11 +30,9 @@ pub(crate) mod web;
 pub(crate) use ask::ask_tool;
 use fs::{edit_tool, ls_tool, read_tool, write_tool};
 use monitor::{monitor_tool, summarize_monitor};
-#[allow(unused_imports)]
 pub(crate) use schema::{
-    anthropic_tools_json, anthropic_tools_json_filtered, anthropic_tools_json_for,
-    openai_tools_json, openai_tools_json_filtered, openai_tools_json_for, responses_tools_json,
-    responses_tools_json_filtered, responses_tools_json_for, ToolFilter,
+    anthropic_tools_json_filtered, openai_tools_json, openai_tools_json_filtered,
+    responses_tools_json_filtered, ToolFilter,
 };
 use search::{glob_tool, grep_tool};
 use shell::{exec_tool, job_tool};
@@ -51,17 +49,7 @@ pub(crate) struct ToolExecOutcome {
     pub(crate) updated_hook_state: Option<BTreeMap<String, Value>>,
     pub(crate) child_input_tokens: u64,
     pub(crate) child_output_tokens: u64,
-}
-
-fn resolve_path(cwd: &Path, raw: &str) -> String {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed == "." {
-        return cwd.display().to_string();
-    }
-    if trimmed.starts_with('/') || trimmed.starts_with("~/") || trimmed == "~" {
-        return trimmed.to_string();
-    }
-    cwd.join(trimmed).display().to_string()
+    pub(crate) skill_allow: Option<Vec<String>>,
 }
 
 fn summarize_tool(name: &str, args: &Value) -> (String, String) {
@@ -159,6 +147,7 @@ pub(crate) async fn run_prepared_tool_call(
     let mut updated_hook_state = None;
     let mut child_input_tokens = 0u64;
     let mut child_output_tokens = 0u64;
+    let mut skill_allow = None;
     let res = if let Some(blocked) = &prepared.blocked_error {
         Err(anyhow!("{blocked}"))
     } else if !tool_filter.allows(&tc.name) {
@@ -226,7 +215,13 @@ pub(crate) async fn run_prepared_tool_call(
                     .map(|s| (s, None)),
                 "todo" => todo_tool(permissions.data_dir(), permissions.session_id(), args)
                     .map(|s| (s, None)),
-                "skill" => skill_tool(permissions.data_dir(), cwd, args).map(|s| (s, None)),
+                "skill" => match skill_tool(permissions.data_dir(), cwd, args) {
+                    Ok((text, allow)) => {
+                        skill_allow = allow;
+                        Ok((text, None))
+                    }
+                    Err(err) => Err(err),
+                },
                 "job" => job_tool(remote, target, cwd, args)
                     .await
                     .map(|s| (s, None)),
@@ -298,6 +293,7 @@ pub(crate) async fn run_prepared_tool_call(
                 updated_hook_state,
                 child_input_tokens,
                 child_output_tokens,
+                skill_allow,
             }
         }
         Err(e) => {
@@ -319,6 +315,7 @@ pub(crate) async fn run_prepared_tool_call(
                 updated_hook_state,
                 child_input_tokens,
                 child_output_tokens,
+                skill_allow: None,
             }
         }
     }
@@ -345,10 +342,10 @@ mod tests {
 
     #[test]
     fn resolve_path_uses_cwd_for_relative() {
-        let p = resolve_path(Path::new("/tmp/proj"), "src/main.rs");
+        let p = crate::tools_core::resolve_path(Path::new("/tmp/proj"), "src/main.rs");
         assert_eq!(p, "/tmp/proj/src/main.rs");
         assert_eq!(
-            resolve_path(Path::new("/tmp/proj"), "/etc/hosts"),
+            crate::tools_core::resolve_path(Path::new("/tmp/proj"), "/etc/hosts"),
             "/etc/hosts"
         );
     }

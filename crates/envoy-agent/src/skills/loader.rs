@@ -122,8 +122,11 @@ fn envoy_skill_root(data_dir: &Path, cwd: &Path, skill: &SkillSummary) -> bool {
     roots.into_iter().any(|root| path_under(&root, &skill.dir))
 }
 
-/// `envoy`, `claude`, `agents`, or `user`, from the directory that won discovery.
+/// `project`, `envoy`, `claude`, `agents`, or `user`, from scope and directory.
 pub fn skill_root_kind(data_dir: &Path, skill: &SkillSummary) -> &'static str {
+    if skill.scope == SkillScope::Project {
+        return "project";
+    }
     if path_under(&data_dir.join("skills"), &skill.dir) {
         return "envoy";
     }
@@ -192,7 +195,7 @@ pub fn load_skill(data_dir: &Path, cwd: &Path, name: &str) -> Result<LoadedSkill
 
     let raw = std::fs::read_to_string(&summary.skill_file)
         .with_context(|| format!("reading {}", summary.skill_file.display()))?;
-    let (_, body) = split_frontmatter(&raw);
+    let (_, body) = crate::frontmatter::split_frontmatter(&raw);
     let resources = collect_skill_resources(&summary.dir);
 
     Ok(LoadedSkill {
@@ -204,7 +207,7 @@ pub fn load_skill(data_dir: &Path, cwd: &Path, name: &str) -> Result<LoadedSkill
 
 fn parse_skill_summary(scope: SkillScope, dir: &Path, skill_file: &Path) -> Option<SkillSummary> {
     let raw = std::fs::read_to_string(skill_file).ok()?;
-    let (fm_opt, body) = split_frontmatter(&raw);
+    let (fm_opt, body) = crate::frontmatter::split_frontmatter(&raw);
     let fallback_name = dir
         .file_name()
         .and_then(|n| n.to_str())
@@ -251,28 +254,6 @@ fn parse_skill_summary(scope: SkillScope, dir: &Path, skill_file: &Path) -> Opti
     })
 }
 
-fn split_frontmatter(raw: &str) -> (Option<&str>, &str) {
-    let normalized = raw.strip_prefix('\u{feff}').unwrap_or(raw);
-    let Some(rest) = normalized
-        .strip_prefix("---\n")
-        .or_else(|| normalized.strip_prefix("---\r\n"))
-    else {
-        return (None, normalized);
-    };
-
-    let mut offset = 0usize;
-    for line in rest.split_inclusive('\n') {
-        let trimmed = line.trim_end_matches(['\r', '\n']).trim();
-        if trimmed == "---" {
-            let fm = &rest[..offset];
-            let body = &rest[offset + line.len()..];
-            return (Some(fm), body);
-        }
-        offset += line.len();
-    }
-    (None, normalized)
-}
-
 fn parse_frontmatter(
     fm: &str,
     name: &mut String,
@@ -281,6 +262,8 @@ fn parse_frontmatter(
     allowed_tools: &mut Vec<String>,
     metadata: &mut BTreeMap<String, String>,
 ) {
+    use crate::frontmatter::{parse_inline_list, strip_inline_comment, unquote};
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum Section {
         None,
@@ -307,13 +290,14 @@ fn parse_frontmatter(
             match section {
                 Section::Metadata => {
                     if let Some((k, v)) = trimmed.split_once(':') {
-                        metadata.insert(k.trim().to_string(), unquote(v.trim()));
+                        metadata.insert(k.trim().to_string(), unquote(v));
                     }
                 }
                 Section::AllowedTools => {
                     if let Some(item) = trimmed.strip_prefix('-').map(str::trim) {
-                        if !item.is_empty() {
-                            allowed_tools.push(unquote(item));
+                        let cleaned = unquote(item);
+                        if !cleaned.is_empty() {
+                            allowed_tools.push(cleaned);
                         }
                     }
                 }
@@ -331,11 +315,11 @@ fn parse_frontmatter(
         }
         section = Section::None;
 
-        let Some((key, val)) = trimmed.split_once(':') else {
+        let Some((key, raw_val)) = trimmed.split_once(':') else {
             continue;
         };
         let key = key.trim();
-        let val = val.trim();
+        let val = strip_inline_comment(raw_val).trim();
 
         match key {
             "name" => {
@@ -360,20 +344,8 @@ fn parse_frontmatter(
             "allowed-tools" | "allowed_tools" => {
                 if val.is_empty() {
                     section = Section::AllowedTools;
-                } else if val.starts_with('[') && val.ends_with(']') {
-                    for part in val[1..val.len() - 1].split(',') {
-                        let item = unquote(part.trim());
-                        if !item.is_empty() {
-                            allowed_tools.push(item);
-                        }
-                    }
                 } else {
-                    for part in val.split([',', ' ']) {
-                        let item = unquote(part.trim());
-                        if !item.is_empty() {
-                            allowed_tools.push(item);
-                        }
-                    }
+                    allowed_tools.extend(parse_inline_list(val, true));
                 }
             }
             "metadata" if val.is_empty() => {
@@ -385,17 +357,6 @@ fn parse_frontmatter(
 
     if section == Section::DescriptionBlock && !desc_lines.is_empty() {
         *description = desc_lines.join(" ").trim().to_string();
-    }
-}
-
-fn unquote(raw: &str) -> String {
-    let s = raw.trim();
-    if s.len() >= 2
-        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
-    {
-        s[1..s.len() - 1].to_string()
-    } else {
-        s.to_string()
     }
 }
 
@@ -412,24 +373,106 @@ fn collect_skill_resources(dir: &Path) -> Vec<String> {
     files
 }
 
+const WALK_MAX_DEPTH: usize = 16;
+
 fn walk_rel(current: &Path, base: &Path, out: &mut Vec<String>, cap: usize) {
-    if out.len() >= cap {
+    let mut seen = BTreeSet::new();
+    walk_rel_at(current, base, out, cap, 0, &mut seen);
+}
+
+fn walk_rel_at(
+    current: &Path,
+    base: &Path,
+    out: &mut Vec<String>,
+    cap: usize,
+    depth: usize,
+    seen: &mut BTreeSet<(u64, u64)>,
+) {
+    if out.len() >= cap || depth > WALK_MAX_DEPTH {
         return;
+    }
+    if let Some(id) = followed_dir_id(current) {
+        if !seen.insert(id) {
+            return;
+        }
     }
     let Ok(entries) = std::fs::read_dir(current) else {
         return;
     };
-    let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|x| x.path())).collect();
-    paths.sort();
-    for p in paths {
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|entry| entry.path());
+    let mut dirs = Vec::new();
+    for entry in entries {
         if out.len() >= cap {
             break;
         }
-        if p.is_dir() {
-            walk_rel(&p, base, out, cap);
-        } else if let Ok(rel) = p.strip_prefix(base) {
-            out.push(rel.display().to_string());
+        let path = entry.path();
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() {
+            consider_skill_link(base, &path, out, seen, &mut dirs);
+        } else if kind.is_dir() {
+            dirs.push(path);
+        } else if kind.is_file() {
+            push_skill_rel(base, &path, out);
         }
+    }
+    for dir in dirs {
+        if out.len() >= cap {
+            break;
+        }
+        walk_rel_at(&dir, base, out, cap, depth + 1, seen);
+    }
+}
+
+fn consider_skill_link(
+    base: &Path,
+    path: &Path,
+    out: &mut Vec<String>,
+    seen: &BTreeSet<(u64, u64)>,
+    dirs: &mut Vec<PathBuf>,
+) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.is_dir() {
+        if followed_id(&meta).is_some_and(|id| seen.contains(&id)) {
+            return;
+        }
+        dirs.push(path.to_path_buf());
+        return;
+    }
+    if meta.is_file() {
+        push_skill_rel(base, path, out);
+    }
+}
+
+fn push_skill_rel(base: &Path, path: &Path, out: &mut Vec<String>) {
+    if let Ok(rel) = path.strip_prefix(base) {
+        out.push(rel.display().to_string());
+    }
+}
+
+fn followed_dir_id(dir: &Path) -> Option<(u64, u64)> {
+    let meta = std::fs::metadata(dir).ok()?;
+    if meta.is_dir() {
+        followed_id(&meta)
+    } else {
+        None
+    }
+}
+
+fn followed_id(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((meta.dev(), meta.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
     }
 }
 

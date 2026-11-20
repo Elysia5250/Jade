@@ -250,7 +250,7 @@ pub(crate) fn format_agents_catalog(specs: &[SubagentSpec]) -> Option<String> {
 
 fn parse_agent_file(scope: AgentScope, path: &Path) -> Option<SubagentSpec> {
     let raw = std::fs::read_to_string(path).ok()?;
-    let (fm_opt, body) = split_frontmatter(&raw);
+    let (fm_opt, body) = crate::frontmatter::split_frontmatter(&raw);
     let fallback_name = path
         .file_stem()
         .and_then(|n| n.to_str())
@@ -308,28 +308,6 @@ fn parse_agent_file(scope: AgentScope, path: &Path) -> Option<SubagentSpec> {
     })
 }
 
-fn split_frontmatter(raw: &str) -> (Option<&str>, &str) {
-    let normalized = raw.strip_prefix('\u{feff}').unwrap_or(raw);
-    let Some(rest) = normalized
-        .strip_prefix("---\n")
-        .or_else(|| normalized.strip_prefix("---\r\n"))
-    else {
-        return (None, normalized);
-    };
-
-    let mut offset = 0usize;
-    for line in rest.split_inclusive('\n') {
-        let trimmed = line.trim_end_matches(['\r', '\n']).trim();
-        if trimmed == "---" {
-            let fm = &rest[..offset];
-            let body = &rest[offset + line.len()..];
-            return (Some(fm), body);
-        }
-        offset += line.len();
-    }
-    (None, normalized)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn parse_frontmatter(
     fm: &str,
@@ -341,6 +319,8 @@ fn parse_frontmatter(
     max_steps: &mut usize,
     timeout_s: &mut u64,
 ) {
+    use crate::frontmatter::{parse_inline_list, strip_inline_comment, unquote};
+
     let mut in_tools = false;
     for raw_line in fm.lines() {
         let line = raw_line.trim_end_matches('\r');
@@ -362,7 +342,7 @@ fn parse_frontmatter(
             continue;
         };
         let k = key.trim();
-        let v = val.trim();
+        let v = strip_inline_comment(val).trim();
         match k {
             "name" if !v.is_empty() => *name = unquote(v),
             "description" if !v.is_empty() => *description = unquote(v),
@@ -388,28 +368,12 @@ fn parse_frontmatter(
                 if v.is_empty() {
                     in_tools = true;
                 } else {
-                    let inner = v.trim_start_matches('[').trim_end_matches(']');
-                    for part in inner.split(',') {
-                        let cleaned = unquote(part.trim());
-                        if !cleaned.is_empty() {
-                            tools.push(cleaned);
-                        }
-                    }
+                    tools.extend(parse_inline_list(v, false));
                 }
             }
             _ => {}
         }
     }
-}
-
-fn unquote(s: &str) -> String {
-    let t = s.trim();
-    if ((t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\'')))
-        && t.len() >= 2
-    {
-        return t[1..t.len() - 1].to_string();
-    }
-    t.to_string()
 }
 
 fn escape_xml(s: &str) -> String {

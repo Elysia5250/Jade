@@ -4,6 +4,7 @@ use super::config::{safe_stdio_env, McpScope, McpTransportConfig};
 use crate::agent::tools::web::{validate_http_url, SafeDnsResolver};
 use crate::permissions::paths::is_path_under_workspace;
 use anyhow::{bail, Context, Result};
+use envoy_core::ScratchGuard;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,16 +22,6 @@ const MAX_MCP_HTTP_BYTES: usize = 4 * 1024 * 1024;
 pub enum McpTransport {
     Stdio(StdioTransport),
     Http(HttpTransport),
-}
-
-struct ScratchGuard(Option<PathBuf>);
-
-impl Drop for ScratchGuard {
-    fn drop(&mut self) {
-        if let Some(path) = self.0.take() {
-            let _ = std::fs::remove_dir_all(path);
-        }
-    }
 }
 
 pub struct StdioTransport {

@@ -8,7 +8,6 @@
 use crate::log::LogWriter;
 use crate::sandbox;
 use envoy_proto::{JobResult, SandboxPolicy, AGENT_CHUNK, DEFAULT_EXEC_TIMEOUT, MAX_EXEC_TIMEOUT};
-use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -76,7 +75,7 @@ pub async fn run_job(
     };
     // Declared before the process guard so the directory is removed after the
     // child has been reaped or killed.
-    let _scratch = ScratchGuard(prepared.scratch_dir.clone());
+    let _scratch = sandbox::ScratchGuard(prepared.scratch_dir.clone());
 
     let mut cmd = tokio::process::Command::new(&prepared.argv[0]);
     cmd.args(&prepared.argv[1..]);
@@ -256,17 +255,6 @@ async fn drain_output(out_rx: &mut mpsc::Receiver<(u8, Vec<u8>)>, log: &mut LogW
 fn stop_readers(readers: Vec<tokio::task::JoinHandle<()>>) {
     for reader in readers {
         reader.abort();
-    }
-}
-
-/// Removes a Seatbelt scratch directory when the job future ends.
-struct ScratchGuard(Option<PathBuf>);
-
-impl Drop for ScratchGuard {
-    fn drop(&mut self) {
-        if let Some(path) = self.0.take() {
-            let _ = std::fs::remove_dir_all(path);
-        }
     }
 }
 

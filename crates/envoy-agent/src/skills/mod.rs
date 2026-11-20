@@ -168,4 +168,47 @@ mod tests {
         assert!(!names.contains(&"from-data"), "{names:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn project_skill_root_kind_is_project() {
+        let root = tmpdir("kind");
+        let data = root.join("data");
+        let cwd = root.join("repo");
+        let skill = cwd.join(".envoy").join("skills").join("deploy-helper");
+        std::fs::create_dir_all(skill.join("scripts")).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: deploy-helper\ndescription: Project deployment checklist\n---\n\nbody\n",
+        )
+        .unwrap();
+        set_workspace_trusted(&data, &cwd, true).unwrap();
+        let loaded = load_skill(&data, &cwd, "deploy-helper").unwrap();
+        assert_eq!(loaded.summary.scope, SkillScope::Project);
+        assert_eq!(skill_root_kind(&data, &loaded.summary), "project");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_skill_walk_finishes() {
+        let root = tmpdir("symlink");
+        let data = root.join("data");
+        let cwd = root.join("repo");
+        let skill = cwd.join(".envoy").join("skills").join("loop-helper");
+        let scripts = skill.join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: loop-helper\ndescription: loop\n---\n\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(scripts.join("check.sh"), "echo ok\n").unwrap();
+        std::os::unix::fs::symlink(".", scripts.join("loop")).unwrap();
+        std::os::unix::fs::symlink(&scripts, scripts.join("again")).unwrap();
+        set_workspace_trusted(&data, &cwd, true).unwrap();
+        let loaded = load_skill(&data, &cwd, "loop-helper").unwrap();
+        assert!(loaded.resources.iter().any(|rel| rel.ends_with("check.sh")));
+        assert!(loaded.resources.len() < 64, "{}", loaded.resources.len());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

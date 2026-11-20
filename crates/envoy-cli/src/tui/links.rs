@@ -16,6 +16,7 @@ const MAX_WALK_DEPTH: usize = 16;
 pub(crate) struct WorkspaceIndex {
     cwd: PathBuf,
     files: Vec<String>,
+    file_set: HashSet<String>,
     by_basename: HashMap<String, Vec<String>>,
     built_at: Option<Instant>,
 }
@@ -35,10 +36,12 @@ impl WorkspaceIndex {
         }
         self.cwd = cwd.to_path_buf();
         self.files.clear();
+        self.file_set.clear();
         self.by_basename.clear();
         let mut seen = HashSet::new();
         walk_workspace(cwd, cwd, 0, &mut seen, &mut self.files);
         for rel in &self.files {
+            self.file_set.insert(rel.clone());
             if let Some(name) = Path::new(rel).file_name().and_then(|s| s.to_str()) {
                 self.by_basename
                     .entry(name.to_string())
@@ -49,11 +52,31 @@ impl WorkspaceIndex {
         self.built_at = Some(Instant::now());
     }
 
+    /// Resolve against indexed/changed paths only (zero filesystem syscalls).
+    pub(crate) fn resolve_path_cached(
+        &self,
+        cwd: &Path,
+        changed: &[FileChange],
+        raw: &str,
+    ) -> Option<(String, Option<usize>)> {
+        self.resolve_path_inner(cwd, changed, raw, false)
+    }
+
     pub(crate) fn resolve_path(
         &self,
         cwd: &Path,
         changed: &[FileChange],
         raw: &str,
+    ) -> Option<(String, Option<usize>)> {
+        self.resolve_path_inner(cwd, changed, raw, true)
+    }
+
+    fn resolve_path_inner(
+        &self,
+        cwd: &Path,
+        changed: &[FileChange],
+        raw: &str,
+        allow_fs: bool,
     ) -> Option<(String, Option<usize>)> {
         let (candidate, line) = split_path_and_line(raw)?;
         if candidate.is_empty()
@@ -63,30 +86,36 @@ impl WorkspaceIndex {
             return None;
         }
 
-        // 1. Exact or suffix match in session changed_files (highest priority)
-        if let Some(found) = match_in_changed(cwd, changed, &candidate) {
+        if let Some(found) = match_in_changed_with(cwd, changed, &candidate, allow_fs) {
             return Some((found, line));
         }
 
-        // 2. Direct filesystem check (relative to cwd or absolute)
         let p = Path::new(&candidate);
         let joined = if p.is_absolute() {
             p.to_path_buf()
         } else {
             cwd.join(p)
         };
-        if joined.is_file() {
-            let rel = normalize_display_path(cwd, &joined);
-            return Some((rel, line));
+        if allow_fs {
+            if joined.is_file() {
+                let rel = normalize_display_path(cwd, &joined);
+                return Some((rel, line));
+            }
+        } else {
+            let rel = display_rel(cwd, &joined);
+            let clean = rel.trim_start_matches("./");
+            if self.file_set.contains(clean) {
+                return Some((clean.to_string(), line));
+            }
         }
 
-        // 3. Indexed workspace suffix / unique basename match
         if candidate.contains('/') {
-            let suffix = format!("/{}", candidate.trim_start_matches("./"));
+            let clean = candidate.trim_start_matches("./");
+            let suffix = format!("/{clean}");
             let mut hits = self
                 .files
                 .iter()
-                .filter(|f| *f == &candidate || f.ends_with(&suffix));
+                .filter(|f| *f == clean || f.ends_with(&suffix));
             if let Some(first) = hits.next() {
                 if hits.next().is_none() {
                     return Some((first.clone(), line));
@@ -158,41 +187,6 @@ pub(crate) fn is_subsequence(needle: &str, haystack: &str) -> bool {
         }
     }
     false
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn tmpdir() -> std::path::PathBuf {
-        let mut bytes = [0u8; 4];
-        getrandom::fill(&mut bytes).unwrap();
-        let dir = std::env::temp_dir().join(format!(
-            "envoy-idx-{:02x}{:02x}{:02x}{:02x}",
-            bytes[0], bytes[1], bytes[2], bytes[3]
-        ));
-        std::fs::create_dir_all(dir.join("sub")).unwrap();
-        dir
-    }
-
-    #[test]
-    fn symlink_loop_indexes_each_inode_once() {
-        let dir = tmpdir();
-        std::fs::write(dir.join("sub/a.txt"), "hi").unwrap();
-        std::os::unix::fs::symlink(dir.join("sub/a.txt"), dir.join("sub/b.txt")).unwrap();
-        std::os::unix::fs::symlink(&dir, dir.join("sub/loop")).unwrap();
-        let mut index = WorkspaceIndex::default();
-        let started = Instant::now();
-        index.ensure_fresh(&dir);
-        assert!(started.elapsed() < Duration::from_secs(2));
-        let files = index.search_files("", 20);
-        let copies = files
-            .iter()
-            .filter(|path| path.ends_with("a.txt") || path.ends_with("b.txt"))
-            .count();
-        assert_eq!(copies, 1, "{files:?}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }
 
 fn walk_workspace(
@@ -324,11 +318,20 @@ fn meta_id(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
     }
 }
 
-fn match_in_changed(cwd: &Path, changed: &[FileChange], candidate: &str) -> Option<String> {
+fn match_in_changed_with(
+    cwd: &Path,
+    changed: &[FileChange],
+    candidate: &str,
+    allow_fs: bool,
+) -> Option<String> {
     let clean = candidate.trim_start_matches("./");
     let suffix = format!("/{clean}");
     for fc in changed.iter().rev() {
-        let rel = normalize_display_path(cwd, Path::new(&fc.path));
+        let rel = if allow_fs {
+            normalize_display_path(cwd, Path::new(&fc.path))
+        } else {
+            display_rel(cwd, Path::new(&fc.path))
+        };
         if fc.path == candidate || rel == clean || rel.ends_with(&suffix) {
             return Some(rel);
         }
@@ -477,7 +480,7 @@ pub(crate) fn inline_spans_linked(
                     let target_raw = &after[..close_paren];
                     if !label.is_empty() && !target_raw.is_empty() {
                         flush_plain(&mut plain, &mut out);
-                        if let Some((path, ln)) = index.resolve_path(cwd, changed, target_raw) {
+                        if let Some((path, ln)) = index.resolve_path_cached(cwd, changed, target_raw) {
                             out.push(LinkedSpan {
                                 span: Span::styled(
                                     label.to_string(),
@@ -511,7 +514,7 @@ pub(crate) fn inline_spans_linked(
                 if end > 0 {
                     flush_plain(&mut plain, &mut out);
                     let content = &after[..end];
-                    if let Some((path, ln)) = index.resolve_path(cwd, changed, content) {
+                    if let Some((path, ln)) = index.resolve_path_cached(cwd, changed, content) {
                         out.push(LinkedSpan {
                             span: Span::styled(
                                 content.to_string(),
@@ -552,7 +555,7 @@ pub(crate) fn inline_spans_linked(
                     flush_plain(&mut plain, &mut out);
                     let content = &after[..end];
                     if marker == "**" {
-                        if let Some((path, ln)) = index.resolve_path(cwd, changed, content) {
+                        if let Some((path, ln)) = index.resolve_path_cached(cwd, changed, content) {
                             out.push(LinkedSpan {
                                 span: Span::styled(
                                     content.to_string(),
@@ -650,7 +653,7 @@ fn emit_token(
     let trimmed = tok.trim_end_matches('.');
     let suffix_len = tok.len() - trimmed.len();
     if (trimmed.contains('/') || trimmed.contains('.')) && trimmed.len() >= 3 {
-        if let Some((path, ln)) = index.resolve_path(cwd, changed, trimmed) {
+        if let Some((path, ln)) = index.resolve_path_cached(cwd, changed, trimmed) {
             if !buf.is_empty() {
                 out.push(LinkedSpan {
                     span: Span::raw(std::mem::take(buf)),

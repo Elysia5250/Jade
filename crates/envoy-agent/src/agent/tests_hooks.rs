@@ -185,6 +185,7 @@ async fn loop_hooks_pipeline_permission_recheck_and_stop_reentry() {
         data_dir: data.clone(),
         conduit: None,
         local_socket: None,
+        local_server: None,
         target: "local".into(),
         cwd: ws.clone(),
         provider: StoredProvider {
@@ -196,6 +197,7 @@ async fn loop_hooks_pipeline_permission_recheck_and_stop_reentry() {
                 key: "sk-test".into(),
             },
             custom_models: vec!["m1".into()],
+            fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
             updated_ms: 0,
         },
@@ -334,6 +336,7 @@ async fn subagent_start_block_fallback_stop_and_ordered_state_merge() {
         data_dir: data.clone(),
         conduit: None,
         local_socket: None,
+        local_server: None,
         target: "local".into(),
         cwd: ws.clone(),
         provider: StoredProvider {
@@ -345,6 +348,7 @@ async fn subagent_start_block_fallback_stop_and_ordered_state_merge() {
                 key: "sk-test".into(),
             },
             custom_models: vec!["m1".into()],
+            fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
             updated_ms: 0,
         },

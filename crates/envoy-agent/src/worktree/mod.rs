@@ -55,7 +55,7 @@ fn parse_arg(arg: &str) -> Result<Cmd<'_>, String> {
 
 fn list_effect(cwd: &Path) -> Result<Effect, String> {
     let main = main_root(cwd)?;
-    let here = canon(cwd);
+    let here = worktree_root(cwd).unwrap_or_else(|_| canon(cwd));
     let mut lines = Vec::new();
     for tree in list_worktrees(&main)? {
         let mark = if same_path(&tree.path, &here) {
@@ -111,7 +111,8 @@ fn remove_tree(cwd: &Path, name: &str) -> Result<Effect, String> {
     if same_path(&tree.path, &main) {
         return Err("cannot remove the main worktree".into());
     }
-    let inside = same_path(&canon(cwd), &tree.path);
+    let here = worktree_root(cwd).unwrap_or_else(|_| canon(cwd));
+    let inside = same_path(&here, &tree.path);
     git_text(
         &main,
         &["worktree", "remove", &tree.path.display().to_string()],
@@ -168,13 +169,20 @@ fn source_tree(main: &Path, cwd: &Path, name: Option<&str>) -> Result<PathBuf, S
             .map(|tree| tree.path)
             .ok_or_else(|| format!("no worktree {name}"));
     }
-    let here = canon(cwd);
+    let here = worktree_root(cwd)?;
     if same_path(&here, main) {
         return Err("usage: /worktree merge <name>".into());
     }
     find_tree(main, &here)?
         .map(|tree| tree.path)
         .ok_or_else(|| "not a worktree of this repository".to_string())
+}
+
+fn worktree_root(cwd: &Path) -> Result<PathBuf, String> {
+    Ok(canon(&PathBuf::from(git_text(
+        cwd,
+        &["rev-parse", "--show-toplevel"],
+    )?)))
 }
 
 fn enter(path: PathBuf, resume: bool, notice: String, error: bool) -> Effect {
@@ -299,26 +307,38 @@ fn main_root(cwd: &Path) -> Result<PathBuf, String> {
         cwd,
         &["rev-parse", "--path-format=absolute", "--git-dir"],
     )?);
-    let toplevel = canon(&PathBuf::from(git_text(
-        cwd,
-        &["rev-parse", "--show-toplevel"],
-    )?));
-    // A main checkout's git dir is named `.git` (a directory, or a gitfile
-    // that rev-parse already resolved). A linked worktree's git dir is
-    // `.git/worktrees/<name>`.
-    if git_dir.file_name().and_then(|name| name.to_str()) == Some(".git") && toplevel.is_dir() {
-        return Ok(toplevel);
-    }
     let common = PathBuf::from(git_text(
         cwd,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?);
-    if common.file_name().and_then(|name| name.to_str()) != Some(".git") {
-        return Err("cannot find the main worktree".into());
+    let toplevel = worktree_root(cwd)?;
+    // A main checkout (including inside a submodule) shares `--git-dir` and `--git-common-dir`.
+    if canon(&git_dir) == canon(&common) && toplevel.is_dir() {
+        return Ok(toplevel);
     }
-    common
-        .parent()
-        .map(canon)
+    if common.file_name().and_then(|name| name.to_str()) == Some(".git") {
+        if let Some(root) = common.parent().map(canon).filter(|path| path.is_dir()) {
+            return Ok(root);
+        }
+    }
+    if let Ok(wt) = git_text(&common, &["config", "--get", "core.worktree"]) {
+        if !wt.trim().is_empty() {
+            let wt_path = PathBuf::from(wt.trim());
+            let resolved = if wt_path.is_absolute() {
+                canon(&wt_path)
+            } else {
+                canon(&common.join(&wt_path))
+            };
+            if resolved.is_dir() {
+                return Ok(resolved);
+            }
+        }
+    }
+    let list = git_text(cwd, &["worktree", "list", "--porcelain"])?;
+    parse_worktrees(&list)
+        .into_iter()
+        .next()
+        .map(|tree| canon(&tree.path))
         .filter(|path| path.is_dir())
         .ok_or_else(|| "cannot find the main worktree".to_string())
 }

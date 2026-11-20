@@ -156,6 +156,14 @@ pub fn assemble_compacted_messages(
     out
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct SummaryUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_create_tokens: u64,
+}
+
 /// Summarize `slice` via the active provider (reusing `system` prefix for cache
 /// hits), backing off by dropping oldest atomic groups on overflow and falling
 /// back to deterministic extraction if the provider call fails.
@@ -171,9 +179,37 @@ pub async fn summarize_messages(
     for_handoff: bool,
     session_id: &str,
 ) -> Result<String> {
+    let (summary, _usage) = summarize_messages_with_usage(
+        http,
+        data_dir,
+        provider,
+        model_id,
+        system,
+        slice,
+        focus,
+        for_handoff,
+        session_id,
+    )
+    .await?;
+    Ok(summary)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn summarize_messages_with_usage(
+    http: &reqwest::Client,
+    data_dir: &Path,
+    provider: &StoredProvider,
+    model_id: &str,
+    system: &str,
+    slice: &[ChatMessage],
+    focus: Option<&str>,
+    for_handoff: bool,
+    session_id: &str,
+) -> Result<(String, SummaryUsage)> {
     let (previous, dossier) = condense_for_summary(slice);
     let mut body = summary_input(&previous, &dossier);
     let instruction = build_summary_prompt(focus, for_handoff);
+    let mut usage = SummaryUsage::default();
 
     for attempt in 0..2 {
         if body.trim().is_empty() {
@@ -241,10 +277,16 @@ pub async fn summarize_messages(
         };
 
         match res {
-            Ok(reply) if !reply.text.trim().is_empty() => {
-                return Ok(reply.text.trim().to_string());
+            Ok(reply) => {
+                usage.input_tokens += reply.input_tokens;
+                usage.output_tokens += reply.output_tokens;
+                usage.cache_read_tokens += reply.cache_read_tokens;
+                usage.cache_create_tokens += reply.cache_create_tokens;
+                if !reply.text.trim().is_empty() {
+                    return Ok((reply.text.trim().to_string(), usage));
+                }
+                break;
             }
-            Ok(_) => break,
             Err(err) if attempt == 0 && is_context_overflow_error(&format!("{err:#}")) => {
                 body = truncate_chars(&body, body.chars().count() / 2);
             }
@@ -252,7 +294,7 @@ pub async fn summarize_messages(
         }
     }
 
-    Ok(merge_summary(previous.as_deref(), &dossier))
+    Ok((merge_summary(previous.as_deref(), &dossier), usage))
 }
 
 /// One synthetic user message and no tools. Two user messages in a row are

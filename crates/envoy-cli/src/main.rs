@@ -7,20 +7,22 @@
 //! Remote targets (`--on laptop`) go through `conduit run`'s control socket.
 //! envoy never links conduit: it is an HTTP/WebSocket client of that socket.
 
+mod auth_cli;
 mod cli_ops;
 mod headless;
+mod mcp_cli;
 mod tui;
 
 mod cli_args;
 pub(crate) use cli_args::{AuthCmd, Commands, DaemonCmd};
 
 use anyhow::{bail, Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use cli_ops::{
     cmd_allow, cmd_copy, cmd_deny, cmd_devices, cmd_ls, cmd_models, cmd_read, cmd_set_enabled,
     cmd_status, cmd_write,
 };
-use envoy_agent::{auth, daemon, mcp, runtime};
+use envoy_agent::{daemon, runtime};
 use envoy_core::{parse_mode, AgentConfigStore};
 use envoy_proto::{Job, JobState, SubmitRequest};
 use envoy_service::{
@@ -121,8 +123,19 @@ impl Ctx {
     }
 }
 
-fn tui_unsupported_flag(args: &headless::HeadlessArgs) -> Option<&'static str> {
-    if args.model.is_some() {
+fn tui_unsupported_flag(
+    args: &headless::HeadlessArgs,
+    matches: &clap::ArgMatches,
+) -> Option<&'static str> {
+    let model_from_cli = matches.value_source("model") == Some(clap::parser::ValueSource::CommandLine);
+    tui_unsupported_flag_with(args, model_from_cli)
+}
+
+fn tui_unsupported_flag_with(
+    args: &headless::HeadlessArgs,
+    model_from_cli: bool,
+) -> Option<&'static str> {
+    if args.model.is_some() && model_from_cli {
         return Some("--model");
     }
     if args.permission_mode.is_some() {
@@ -175,7 +188,8 @@ fn init_tracing(stderr_logs: bool, tui_log: Option<&Path>) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches)?;
     let is_mcp = matches!(cli.cmd.as_ref(), Some(Commands::Mcp { .. }));
     let piped_stdin = cli.cmd.is_none() && !std::io::IsTerminal::is_terminal(&std::io::stdin());
     let is_ask = matches!(cli.cmd.as_ref(), Some(Commands::Ask { .. }));
@@ -186,7 +200,7 @@ async fn main() -> Result<()> {
         Some(_) => false,
     };
     if opening_tui {
-        if let Some(flag) = tui_unsupported_flag(&cli.headless) {
+        if let Some(flag) = tui_unsupported_flag(&cli.headless, &matches) {
             bail!(
                 "{flag} applies to headless -p/--print runs and is rejected when opening the TUI"
             );
@@ -238,11 +252,11 @@ async fn main() -> Result<()> {
             headless::run_ask(&ctx, cont, cli.session, cli.headless, prompt).await
         }
         Commands::Status => cmd_status(&ctx).await,
-        Commands::Login => auth::cmd_auth_login(&ctx.data_dir).await,
+        Commands::Login => auth_cli::cmd_auth_login(&ctx.data_dir).await,
         Commands::Auth { cmd } => match cmd {
-            AuthCmd::Login => auth::cmd_auth_login(&ctx.data_dir).await,
-            AuthCmd::List => auth::cmd_auth_list(&ctx.data_dir).await,
-            AuthCmd::Logout { provider } => auth::cmd_auth_logout(&ctx.data_dir, provider).await,
+            AuthCmd::Login => auth_cli::cmd_auth_login(&ctx.data_dir).await,
+            AuthCmd::List => auth_cli::cmd_auth_list(&ctx.data_dir).await,
+            AuthCmd::Logout { provider } => auth_cli::cmd_auth_logout(&ctx.data_dir, provider).await,
         },
         Commands::Models => cmd_models(&ctx.data_dir).await,
         Commands::Enable => cmd_set_enabled(&ctx.data_dir, true),
@@ -301,7 +315,9 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Commands::Mcp { cmd } => mcp::cmd_mcp(ctx.data_dir.clone(), cmd, ctx.conduit.clone()).await,
+        Commands::Mcp { cmd } => {
+            mcp_cli::cmd_mcp(ctx.data_dir.clone(), cmd, ctx.conduit.clone()).await
+        }
     }
 }
 
@@ -414,13 +430,21 @@ async fn cmd_serve(
     envoy_core::fs::ensure_private_dir(&data_dir)?;
     let _lock = daemon::InstanceLock::acquire(&data_dir)?;
 
+    // Share the in-process AgentServer with Runtime so local tool calls and
+    // monitors never self-dial `envoy.sock`.
+    let server = AgentServer::open_store(data_dir.clone())?;
+
     // agent.sock must accept before the job socket and pid file advertise readiness.
     let agent_path = runtime::socket_path(&data_dir);
     let _ = std::fs::remove_file(&agent_path);
     let agent_listener = tokio::net::UnixListener::bind(&agent_path)
         .with_context(|| format!("binding {}", agent_path.display()))?;
     envoy_core::fs::set_mode_strict(&agent_path, 0o600)?;
-    let sessions = runtime::Runtime::with_conduit(data_dir.clone(), Some(conduit_socket.clone()));
+    let sessions = runtime::Runtime::with_local_server(
+        data_dir.clone(),
+        Some(conduit_socket.clone()),
+        Some(server.clone()),
+    );
     tokio::spawn(runtime::serve(sessions.clone(), agent_listener));
 
     let path = socket.unwrap_or_else(|| daemon::socket_path(&data_dir));
@@ -441,7 +465,6 @@ async fn cmd_serve(
         0o600,
     )?;
 
-    let server = AgentServer::open_store(data_dir.clone())?;
     tracing::info!(socket = %path.display(), "envoy daemon listening");
     println!("envoy daemon listening on {}", path.display());
 

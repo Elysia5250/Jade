@@ -1,5 +1,5 @@
 //! Inspector Tab 2: Diff review view (Unified / Split + Hunk jump + git fallback).
-use super::push_linked_rows;
+use super::{push_linked_rows, render_scrolled_lines};
 use crate::tui::diff::{render_diff, DiffLayout};
 use crate::tui::links::{display_rel, LinkedSpan};
 use crate::tui::*;
@@ -14,20 +14,20 @@ pub(super) fn draw_diff_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
         .split(area);
     let header_area = chunks[0];
     let body_area = chunks[1];
-    app.inspector.height = body_area.height;
+    app.ui.inspector.height = body_area.height;
 
-    let selected_path = app.inspector.file_path.clone().or_else(|| {
-        app.session
+    let selected_path = app.ui.inspector.file_path.clone().or_else(|| {
+        app.session.current
             .changed_files
-            .get(app.inspector.selected_diff)
-            .or_else(|| app.session.changed_files.last())
+            .get(app.ui.inspector.selected_diff)
+            .or_else(|| app.session.current.changed_files.last())
             .map(|fc| fc.path.clone())
     });
 
     let Some(raw_path) = selected_path else {
-        app.inspector.diff_hunk_lines.clear();
-        app.inspector.max_scroll = 0;
-        app.inspector.scroll = 0;
+        app.ui.inspector.diff_hunk_lines.clear();
+        app.ui.inspector.max_scroll = 0;
+        app.ui.inspector.scroll = 0;
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(""),
@@ -43,21 +43,21 @@ pub(super) fn draw_diff_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
     };
 
     let rel = if app.inputs.diff_rel.is_empty() {
-        display_rel(&app.session.cwd, std::path::Path::new(&raw_path))
+        display_rel(&app.session.current.cwd, std::path::Path::new(&raw_path))
     } else {
         app.inputs.diff_rel.clone()
     };
     let session_match = app
-        .find_changed_file_index(&raw_path)
-        .and_then(|idx| app.session.changed_files.get(idx))
+        .find_changed_file_index_cached(&raw_path)
+        .and_then(|idx| app.session.current.changed_files.get(idx))
         .map(|fc| (fc.before.clone(), fc.after.clone()));
 
     let pair = session_match.or_else(|| app.inputs.diff_git.clone());
 
     let Some((before, after)) = pair else {
-        app.inspector.diff_hunk_lines.clear();
-        app.inspector.max_scroll = 0;
-        app.inspector.scroll = 0;
+        app.ui.inspector.diff_hunk_lines.clear();
+        app.ui.inspector.max_scroll = 0;
+        app.ui.inspector.scroll = 0;
         let open_file_row = LinkedLine::from_linked(vec![
             LinkedSpan {
                 span: Span::raw("  No diff against session/HEAD. "),
@@ -84,14 +84,14 @@ pub(super) fn draw_diff_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
         &before,
         &after,
         body_area.width as usize,
-        app.inspector.diff_layout,
+        app.ui.inspector.diff_layout,
         theme,
     );
-    app.inspector.diff_hunk_lines = rendered.hunk_lines;
+    app.ui.inspector.diff_hunk_lines = rendered.hunk_lines;
 
     // Header: file selector + stats + controls
     let w = header_area.width as usize;
-    let layout_label = match app.inspector.diff_layout {
+    let layout_label = match app.ui.inspector.diff_layout {
         DiffLayout::Unified => "[v:Split]",
         DiffLayout::Split => "[v:Unified]",
     };
@@ -180,12 +180,11 @@ pub(super) fn draw_diff_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
     ];
     push_linked_rows(frame, app, &header_rows, 0, header_area);
 
-    let max_scroll = (rendered.lines.len() as u16).saturating_sub(body_area.height);
-    app.inspector.max_scroll = max_scroll;
-    app.inspector.scroll = app.inspector.scroll.min(max_scroll);
-
-    frame.render_widget(
-        Paragraph::new(rendered.lines).scroll((app.inspector.scroll, 0)),
+    render_scrolled_lines(
+        frame,
+        rendered.lines,
+        &mut app.ui.inspector.scroll,
+        &mut app.ui.inspector.max_scroll,
         body_area,
     );
 }

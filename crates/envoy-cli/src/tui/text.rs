@@ -54,8 +54,9 @@ pub(crate) fn complete_directories(cwd: &Path, raw: &str) -> Vec<(String, String
         let parent_raw = &raw[..=idx];
         let dir = resolve_cd_path(cwd, parent_raw);
         (dir, raw[idx + 1..].to_string(), parent_raw.to_string())
+    } else if raw == "~" {
+        (PathBuf::from(expanded_prefix), String::new(), "~/".to_string())
     } else {
-        let _ = expanded_prefix;
         (cwd.to_path_buf(), raw.to_string(), String::new())
     };
 
@@ -125,7 +126,7 @@ pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
 }
 
 pub(crate) fn char_width(c: char) -> usize {
-    UnicodeWidthChar::width(c).unwrap_or(1).max(1)
+    UnicodeWidthChar::width(c).unwrap_or(0)
 }
 
 pub(crate) fn display_width(s: &str) -> usize {

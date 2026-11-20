@@ -46,8 +46,10 @@ impl SseParser {
             if rest.len() > MAX_EVENT_BYTES && !rest.contains(&b'\n') {
                 self.buf.clear();
                 self.pos = 0;
+                self.cur_event.clear();
+                self.cur_data.clear();
+                self.cur_bytes = 0;
                 self.overflow = true;
-                self.reset_event();
                 break;
             }
             let Some(rel) = rest.iter().position(|b| *b == b'\n') else {
@@ -194,6 +196,7 @@ mod tests {
         let mut p = SseParser::default();
         let big = vec![b'a'; MAX_EVENT_BYTES + 8];
         assert!(p.feed(&big).is_empty());
+        assert!(p.feed(b"tail-fragment-after-overflow").is_empty());
         let evs = p.feed(b"\n\ndata: ok\n\n");
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].data, "ok");

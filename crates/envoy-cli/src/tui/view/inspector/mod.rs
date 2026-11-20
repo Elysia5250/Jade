@@ -7,7 +7,7 @@ mod output_view;
 mod overview;
 
 pub(in crate::tui) fn draw_inspector(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
-    app.inspector.last_area = area;
+    app.ui.inspector.last_area = area;
     if area.width < 12 || area.height < 4 {
         return;
     }
@@ -44,9 +44,9 @@ pub(in crate::tui) fn draw_inspector(frame: &mut Frame, app: &mut App, theme: &T
     );
 
     let body = chunks[2];
-    app.inspector.height = body.height;
+    app.ui.inspector.height = body.height;
 
-    match app.inspector.tab {
+    match app.ui.inspector.tab {
         InspectorTab::Overview => overview::draw_overview(frame, app, theme, body),
         InspectorTab::Diff => diff_view::draw_diff_view(frame, app, theme, body),
         InspectorTab::File => file_view::draw_file_view(frame, app, theme, body),
@@ -58,12 +58,12 @@ pub(in crate::tui) fn draw_inspector(frame: &mut Frame, app: &mut App, theme: &T
 fn draw_tab_bar(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
     let mut cursor_x = area.x;
-    let focused = app.focus == Focus::Sidebar;
+    let focused = app.ui.focus == Focus::Sidebar;
 
     for tab in InspectorTab::ALL {
-        let active = app.inspector.tab == tab;
-        let label = if tab == InspectorTab::Diff && !app.session.changed_files.is_empty() {
-            format!(" 2 Diff({}) ", app.session.changed_files.len())
+        let active = app.ui.inspector.tab == tab;
+        let label = if tab == InspectorTab::Diff && !app.session.current.changed_files.is_empty() {
+            format!(" 2 Diff({}) ", app.session.current.changed_files.len())
         } else {
             format!(" {} ", tab.label())
         };
@@ -83,7 +83,7 @@ fn draw_tab_bar(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         } else {
             Style::default().fg(theme.dim)
         };
-        app.hit_regions.push(HitRegion {
+        app.ui.hit_regions.push(HitRegion {
             rect: Rect {
                 x: cursor_x,
                 y: area.y,
@@ -104,7 +104,7 @@ fn draw_tab_bar(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         if pad > 0 {
             spans.push(Span::raw(" ".repeat(pad)));
         }
-        app.hit_regions.push(HitRegion {
+        app.ui.hit_regions.push(HitRegion {
             rect: Rect {
                 x: close_x,
                 y: area.y,
@@ -123,11 +123,14 @@ pub(super) fn push_linked_rows(
     frame: &mut Frame,
     app: &mut App,
     rows: &[LinkedLine],
-    scroll: u16,
+    scroll: usize,
     area: Rect,
 ) {
-    let start = scroll as usize;
-    let end = (start + area.height as usize).min(rows.len());
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let start = scroll.min(rows.len());
+    let end = start.saturating_add(area.height as usize).min(rows.len());
     let mut display_lines: Vec<Line<'static>> = Vec::with_capacity(end.saturating_sub(start));
 
     for (vis_idx, row) in rows[start..end].iter().enumerate() {
@@ -140,7 +143,7 @@ pub(super) fn push_linked_rows(
             if let Some(target) = &ls.target {
                 let clipped_w = sw.min((area.x + area.width).saturating_sub(cursor_x));
                 if clipped_w > 0 {
-                    app.hit_regions.push(HitRegion {
+                    app.ui.hit_regions.push(HitRegion {
                         rect: Rect {
                             x: cursor_x,
                             y: screen_y,
@@ -173,4 +176,25 @@ pub(super) fn push_linked_rows(
     }
 
     frame.render_widget(Paragraph::new(display_lines), area);
+}
+
+pub(super) fn render_scrolled_lines(
+    frame: &mut Frame,
+    lines: Vec<Line<'static>>,
+    scroll: &mut usize,
+    max_scroll: &mut usize,
+    area: Rect,
+) {
+    if area.width == 0 || area.height == 0 {
+        *max_scroll = 0;
+        *scroll = 0;
+        return;
+    }
+    let max = lines.len().saturating_sub(area.height as usize);
+    *max_scroll = max;
+    *scroll = (*scroll).min(max);
+    let start = *scroll;
+    let end = start.saturating_add(area.height as usize).min(lines.len());
+    let visible: Vec<Line<'static>> = lines.into_iter().skip(start).take(end - start).collect();
+    frame.render_widget(Paragraph::new(visible), area);
 }

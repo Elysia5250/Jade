@@ -1,6 +1,6 @@
 //! One tool card header: verb, path, duration, and the running decrypt line.
 
-use crate::tui::links::{normalize_display_path, LinkedSpan};
+use crate::tui::links::{display_rel, LinkedSpan};
 use crate::tui::*;
 use std::path::Path;
 
@@ -81,7 +81,7 @@ pub(super) fn render_tool_header(
             target: Some(HitTarget::ToggleToolCard(id)),
         });
     } else if let Some((done_verb, run_verb, raw_path)) = file_verb {
-        let rel = normalize_display_path(&app.session.cwd, Path::new(raw_path.trim()));
+        let rel = display_rel(&app.session.current.cwd, Path::new(raw_path.trim()));
         let verb = if status == CardStatus::Running {
             run_verb
         } else {
@@ -89,8 +89,8 @@ pub(super) fn render_tool_header(
         };
         let mut diff_badge = String::new();
         if matches!(name, "edit" | "write") {
-            if let Some(idx) = app.find_changed_file_index(&rel) {
-                let fc = &app.session.changed_files[idx];
+            if let Some(idx) = app.find_changed_file_index_cached(&rel) {
+                let fc = &app.session.current.changed_files[idx];
                 diff_badge = format!("  +{} -{}", fc.added, fc.removed);
             }
         }

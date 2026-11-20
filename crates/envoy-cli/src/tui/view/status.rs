@@ -5,7 +5,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let (mode, mode_color) = match app.mode {
+    let (mode, mode_color) = match app.ui.mode {
         InputMode::Agent => ("agent", theme.accent),
         InputMode::Shell => ("shell", theme.warn),
     };
@@ -16,7 +16,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
     let hard_window = app.inputs.catalog.hard_window;
     let mut right_spans: Vec<Span> = Vec::new();
     let unauthed = if signed_in {
-        let (used, estimated) = context_used(&app.session);
+        let (used, estimated) = context_used(&app.session.current);
         let window = compact_at;
         let ratio = if window == 0 {
             0.0
@@ -30,7 +30,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
         } else {
             theme.accent
         };
-        if app.agent_running {
+        if app.agent.running {
             right_spans.extend(decrypt_line_spans(
                 "working",
                 0,
@@ -80,7 +80,7 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
     let right_w = (right.width() as u16).min(area.width.saturating_sub(4));
     let left_budget = area.width.saturating_sub(right_w + 1) as usize;
     if unauthed && right_w > 0 && area.width >= right_w {
-        app.hit_regions.push(HitRegion {
+        app.ui.hit_regions.push(HitRegion {
             rect: Rect {
                 x: area.x + area.width - right_w,
                 y: area.y,
@@ -91,10 +91,10 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
         });
     }
 
-    let remote = app.target != "local" && !app.target.is_empty();
-    let offline = app.agent_offline || !app.connected;
-    let perm_badge = app.perm_mode.short_badge();
-    let perm_color = match app.perm_mode {
+    let remote = app.jobs.target != "local" && !app.jobs.target.is_empty();
+    let offline = app.agent.offline || !app.jobs.connected;
+    let perm_badge = app.session.perm_mode.short_badge();
+    let perm_color = match app.session.perm_mode {
         PermissionMode::Default => theme.dim,
         PermissionMode::AcceptEdits => theme.ok,
         PermissionMode::Plan => theme.accent,
@@ -117,13 +117,13 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
     let toast = app
         .active_toast()
         .map(|(msg, err)| (format!("  {}", truncate_width(msg, 36)), err));
-    let active_monitors = app.active_monitors.iter().filter(|m| m.active).count();
+    let active_monitors = app.agent.active_monitors.iter().filter(|m| m.active).count();
     let mon_label = if active_monitors > 0 {
         format!("  mon:{active_monitors}")
     } else {
         String::new()
     };
-    let target_label = format!("  {}", app.target);
+    let target_label = format!("  {}", app.jobs.target);
     let offline_label = "  offline";
     let suffix_w = if let Some((label, _)) = &toast {
         display_width(label)
@@ -145,27 +145,34 @@ pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area:
     let cwd_budget = left_budget.saturating_sub(mode_w + suffix_w).max(1);
     let cwd = truncate_width(&app.cwd_label(), cwd_budget);
 
-    let mode_w_cells = display_width(mode) as u16;
-    app.hit_regions.push(HitRegion {
-        rect: Rect {
-            x: area.x,
-            y: area.y,
-            width: mode_w_cells,
-            height: 1,
-        },
-        target: HitTarget::CycleMode,
-    });
+    let mode_w_cells = (display_width(mode) as u16).min(area.width);
+    if mode_w_cells > 0 {
+        app.ui.hit_regions.push(HitRegion {
+            rect: Rect {
+                x: area.x,
+                y: area.y,
+                width: mode_w_cells,
+                height: 1,
+            },
+            target: HitTarget::CycleMode,
+        });
+    }
     let perm_x = area.x + mode_w_cells + 2;
-    let perm_w_cells = display_width(perm_badge) as u16;
-    app.hit_regions.push(HitRegion {
-        rect: Rect {
-            x: perm_x,
-            y: area.y,
-            width: perm_w_cells,
-            height: 1,
-        },
-        target: HitTarget::CyclePermission,
-    });
+    if perm_x < area.x + area.width {
+        let perm_w_cells = (display_width(perm_badge) as u16)
+            .min(area.x + area.width - perm_x);
+        if perm_w_cells > 0 {
+            app.ui.hit_regions.push(HitRegion {
+                rect: Rect {
+                    x: perm_x,
+                    y: area.y,
+                    width: perm_w_cells,
+                    height: 1,
+                },
+                target: HitTarget::CyclePermission,
+            });
+        }
+    }
 
     let mut left = vec![
         Span::styled(

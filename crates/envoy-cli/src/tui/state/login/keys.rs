@@ -26,7 +26,7 @@ impl App {
                             if prov.methods.len() == 1 {
                                 self.start_login_method(provider_idx, 0);
                             } else {
-                                self.modal = Some(Modal::Login(LoginModal::SelectMethod {
+                                self.ui.modal = Some(Modal::Login(LoginModal::SelectMethod {
                                     provider_idx,
                                     selected: 0,
                                 }));
@@ -40,7 +40,7 @@ impl App {
                     }
                     _ => {}
                 }
-                self.modal = Some(Modal::Login(LoginModal::SelectProvider {
+                self.ui.modal = Some(Modal::Login(LoginModal::SelectProvider {
                     filter,
                     selected,
                 }));
@@ -53,7 +53,7 @@ impl App {
                 let len = prov.methods.len().max(1);
                 match key.code {
                     KeyCode::Left | KeyCode::Backspace => {
-                        self.modal = Some(Modal::Login(LoginModal::SelectProvider {
+                        self.ui.modal = Some(Modal::Login(LoginModal::SelectProvider {
                             filter: String::new(),
                             selected: provider_idx,
                         }));
@@ -67,7 +67,7 @@ impl App {
                     }
                     _ => {}
                 }
-                self.modal = Some(Modal::Login(LoginModal::SelectMethod {
+                self.ui.modal = Some(Modal::Login(LoginModal::SelectMethod {
                     provider_idx,
                     selected,
                 }));
@@ -121,6 +121,7 @@ impl App {
                                     key: api_key.trim().to_string(),
                                 },
                                 custom_models,
+                                fetched_models: Vec::new(),
                                 model_routes: std::collections::BTreeMap::new(),
                                 updated_ms: now_ms(),
                             };
@@ -149,7 +150,7 @@ impl App {
                     }
                     _ => {}
                 }
-                self.modal = Some(Modal::Login(LoginModal::ApiKeyForm {
+                self.ui.modal = Some(Modal::Login(LoginModal::ApiKeyForm {
                     provider_idx,
                     key: api_key,
                     base_url,
@@ -219,6 +220,7 @@ impl App {
                                     key: api_key.trim().to_string(),
                                 },
                                 custom_models: vec![model.trim().to_string()],
+                                fetched_models: Vec::new(),
                                 model_routes: std::collections::BTreeMap::new(),
                                 updated_ms: now_ms(),
                             };
@@ -229,7 +231,8 @@ impl App {
                                 Some(model.trim().to_string()),
                             ) {
                                 Ok(mref) => {
-                                    self.mode = InputMode::Agent;
+                                    self.ui.mode = InputMode::Agent;
+                                    self.inputs.invalidate_catalog();
                                     self.set_toast(
                                         format!("connected {pname} - {}", mref.display()),
                                         false,
@@ -260,7 +263,7 @@ impl App {
                     }
                     _ => {}
                 }
-                self.modal = Some(Modal::Login(LoginModal::CustomForm {
+                self.ui.modal = Some(Modal::Login(LoginModal::CustomForm {
                     protocol_idx,
                     name,
                     base_url,
@@ -293,9 +296,7 @@ impl App {
                             let (tx, rx) = mpsc::unbounded_channel();
                             self.cancel_login_bg();
                             let handle = tokio::spawn(async move {
-                                let http = reqwest::Client::new();
-                                match exchange_openai_code(
-                                    &http,
+                                match exchange_openai_code_default(
                                     &code,
                                     &redir,
                                     &ver,
@@ -311,8 +312,8 @@ impl App {
                                     }
                                 }
                             });
-                            self.login_rx = Some(rx);
-                            self.login_task = Some(handle);
+                            self.login.rx = Some(rx);
+                            self.login.task = Some(handle);
                             busy = true;
                             status = "Exchanging authorization code.".into();
                             error = None;
@@ -324,7 +325,7 @@ impl App {
                         _ => {}
                     }
                 }
-                self.modal = Some(Modal::Login(LoginModal::OAuthBrowser {
+                self.ui.modal = Some(Modal::Login(LoginModal::OAuthBrowser {
                     provider_name,
                     url,
                     redirect_uri,
@@ -356,8 +357,7 @@ impl App {
                             let st = state.clone();
                             let (tx, rx) = mpsc::unbounded_channel();
                             let handle = tokio::spawn(async move {
-                                let http = reqwest::Client::new();
-                                match exchange_anthropic_code(&http, &raw, &ver, &st, console).await
+                                match exchange_anthropic_code_default(&raw, &ver, &st, console).await
                                 {
                                     Ok(sp) => {
                                         let _ = tx.send(LoginEvent::Success(sp, None));
@@ -367,8 +367,8 @@ impl App {
                                     }
                                 }
                             });
-                            self.login_rx = Some(rx);
-                            self.login_task = Some(handle);
+                            self.login.rx = Some(rx);
+                            self.login.task = Some(handle);
                             busy = true;
                             error = None;
                         }
@@ -379,7 +379,7 @@ impl App {
                         _ => {}
                     }
                 }
-                self.modal = Some(Modal::Login(LoginModal::OAuthCodePaste {
+                self.ui.modal = Some(Modal::Login(LoginModal::OAuthCodePaste {
                     provider_name,
                     url,
                     verifier,
@@ -397,7 +397,7 @@ impl App {
                 status,
                 error,
             } => {
-                self.modal = Some(Modal::Login(LoginModal::OAuthDevice {
+                self.ui.modal = Some(Modal::Login(LoginModal::OAuthDevice {
                     provider_name,
                     verification_uri,
                     user_code,
@@ -469,6 +469,6 @@ impl App {
                 _ => {}
             }
         }
-        self.modal = Some(Modal::Login(login));
+        self.ui.modal = Some(Modal::Login(login));
     }
 }

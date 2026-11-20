@@ -3,8 +3,8 @@ use super::super::*;
 
 impl App {
     pub(super) fn reload_welcome_notes(&mut self) {
-        let notes = envoy_agent::memory::list(&self.data_dir);
-        if let Some(welcome) = self.welcome.as_mut() {
+        let notes = envoy_agent::memory::list_for(&self.data_dir, &self.session.current.cwd);
+        if let Some(welcome) = self.ui.welcome.as_mut() {
             let len = notes.len();
             if len == 0 {
                 welcome.list_selected = 0;
@@ -17,7 +17,7 @@ impl App {
     }
 
     pub(super) fn handle_welcome_memory(&mut self, key: KeyEvent) -> Action {
-        let len = self.welcome.as_ref().map(|w| w.notes.len()).unwrap_or(0);
+        let len = self.ui.welcome.as_ref().map(|w| w.notes.len()).unwrap_or(0);
         match key.code {
             KeyCode::Esc => {
                 self.leave_welcome_panel();
@@ -52,7 +52,7 @@ impl App {
 
     fn edit_selected_note(&mut self) -> Action {
         let path = self
-            .welcome
+            .ui.welcome
             .as_ref()
             .and_then(|w| w.notes.get(w.list_selected))
             .map(|note| note.path.clone());
@@ -64,43 +64,43 @@ impl App {
 
     fn toggle_selected_note(&mut self) {
         let Some(note) = self
-            .welcome
+            .ui.welcome
             .as_ref()
             .and_then(|w| w.notes.get(w.list_selected).cloned())
         else {
             return;
         };
-        let selected = self.welcome.as_ref().map(|w| w.list_selected).unwrap_or(0);
+        let selected = self.ui.welcome.as_ref().map(|w| w.list_selected).unwrap_or(0);
         if let Err(err) = envoy_agent::memory::set_enabled(&note, !note.enabled) {
-            if let Some(welcome) = self.welcome.as_mut() {
+            if let Some(welcome) = self.ui.welcome.as_mut() {
                 welcome.error = Some(err);
             }
             return;
         }
-        if let Some(welcome) = self.welcome.as_mut() {
+        if let Some(welcome) = self.ui.welcome.as_mut() {
             welcome.error = None;
         }
         self.reload_welcome_notes();
-        if let Some(welcome) = self.welcome.as_mut() {
+        if let Some(welcome) = self.ui.welcome.as_mut() {
             welcome.list_selected = selected.min(welcome.notes.len().saturating_sub(1));
         }
     }
 
     fn delete_selected_note(&mut self) {
         let Some(note) = self
-            .welcome
+            .ui.welcome
             .as_ref()
             .and_then(|w| w.notes.get(w.list_selected).cloned())
         else {
             return;
         };
         if let Err(err) = envoy_agent::memory::delete(&note) {
-            if let Some(welcome) = self.welcome.as_mut() {
+            if let Some(welcome) = self.ui.welcome.as_mut() {
                 welcome.error = Some(err);
             }
             return;
         }
-        if let Some(welcome) = self.welcome.as_mut() {
+        if let Some(welcome) = self.ui.welcome.as_mut() {
             welcome.error = None;
         }
         self.reload_welcome_notes();

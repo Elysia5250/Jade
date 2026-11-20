@@ -1,72 +1,13 @@
-//! Shell and detached-job tools.
-use super::resolve_path;
+//! Shell and detached-job tools backed by `crate::tools_core`.
 use crate::agent::events::AgentEvent;
+use crate::tools_core::{self, BoundedOutput};
 use anyhow::{bail, Context, Result};
-use envoy_proto::{LogRecord, SandboxPolicy, SubmitRequest, TaskSpec, DEFAULT_GROUP};
+use envoy_proto::{LogRecord, SandboxPolicy};
 use envoy_service::{AgentDialer, Remote};
 use serde_json::Value;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-
-/// Bytes of command output kept at each end of the tool result.
-const OUTPUT_SIDE: usize = 128 * 1024;
-
-/// Head-and-tail buffer so a long command cannot pin 16 MiB in the tool result.
-struct BoundedOutput {
-    head: Vec<u8>,
-    tail: Vec<u8>,
-    dropped: usize,
-}
-
-impl BoundedOutput {
-    fn new() -> Self {
-        Self {
-            head: Vec::new(),
-            tail: Vec::new(),
-            dropped: 0,
-        }
-    }
-
-    fn push(&mut self, data: &[u8]) {
-        if data.is_empty() {
-            return;
-        }
-        if self.head.len() >= OUTPUT_SIDE {
-            self.push_tail(data);
-            return;
-        }
-        let room = OUTPUT_SIDE - self.head.len();
-        if data.len() <= room {
-            self.head.extend_from_slice(data);
-            return;
-        }
-        self.head.extend_from_slice(&data[..room]);
-        self.push_tail(&data[room..]);
-    }
-
-    fn push_tail(&mut self, data: &[u8]) {
-        self.tail.extend_from_slice(data);
-        if self.tail.len() <= OUTPUT_SIDE {
-            return;
-        }
-        let overflow = self.tail.len() - OUTPUT_SIDE;
-        self.dropped += overflow;
-        self.tail.drain(..overflow);
-    }
-
-    fn render(&self) -> String {
-        if self.dropped == 0 && self.tail.is_empty() {
-            return String::from_utf8_lossy(&self.head).into_owned();
-        }
-        format!(
-            "{}\n[... {} bytes omitted ...]\n{}",
-            String::from_utf8_lossy(&self.head),
-            self.dropped,
-            String::from_utf8_lossy(&self.tail)
-        )
-    }
-}
 
 pub(crate) async fn exec_tool(
     remote: &Remote<Box<dyn AgentDialer>>,
@@ -77,26 +18,8 @@ pub(crate) async fn exec_tool(
     sandbox: SandboxPolicy,
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> Result<(String, Option<i32>)> {
-    let command = args["command"]
-        .as_str()
-        .filter(|c| !c.trim().is_empty())
-        .context("missing `command`")?
-        .to_string();
-    let job_cwd = args["cwd"]
-        .as_str()
-        .map(|s| resolve_path(cwd, s))
-        .unwrap_or_else(|| cwd.display().to_string());
-    let timeout_s = args["timeout_s"].as_u64().unwrap_or(120).min(3600);
-
-    let req = SubmitRequest {
-        spec: TaskSpec::Shell { command },
-        cwd: Some(job_cwd),
-        env: Vec::new(),
-        label: None,
-        group: DEFAULT_GROUP.to_string(),
-        timeout_s,
-        sandbox,
-    };
+    let req = tools_core::build_exec_request(args, cwd, sandbox, 120, false)?;
+    let timeout_s = req.timeout_s;
     let job = remote.submit(target, req).await?;
     let _ = tx.send(AgentEvent::ToolJob {
         call_id: call_id.to_string(),
@@ -181,28 +104,10 @@ pub(crate) async fn job_tool(
     cwd: &Path,
     args: &Value,
 ) -> Result<String> {
-    let is_local = target.is_empty() || target == "local";
-    let in_scope = |job_cwd: &str| -> bool {
-        !is_local
-            || (!job_cwd.is_empty()
-                && crate::permissions::paths::is_path_under_workspace(cwd, Path::new(job_cwd)))
-    };
-    let check_scope = |id: u64, job_cwd: &str| -> Result<()> {
-        if !in_scope(job_cwd) {
-            bail!("job #{id} belongs to another workspace ({job_cwd})");
-        }
-        Ok(())
-    };
-
     let action = args["action"].as_str().context("missing `action`")?;
     match action {
         "list" => {
-            let jobs: Vec<_> = remote
-                .jobs(target)
-                .await?
-                .into_iter()
-                .filter(|j| in_scope(&j.cwd))
-                .collect();
+            let jobs = tools_core::job_list_scoped(remote, target, cwd).await?;
             if jobs.is_empty() {
                 return Ok("no jobs".into());
             }
@@ -214,8 +119,7 @@ pub(crate) async fn job_tool(
         }
         "status" => {
             let id = args["id"].as_u64().context("missing `id`")?;
-            let j = remote.status(target, id).await?;
-            check_scope(id, &j.cwd)?;
+            let j = tools_core::job_status_scoped(remote, target, cwd, id).await?;
             Ok(format!(
                 "#{} {} cwd={} cmd={}",
                 j.id,
@@ -226,8 +130,7 @@ pub(crate) async fn job_tool(
         }
         "logs" => {
             let id = args["id"].as_u64().context("missing `id`")?;
-            let j = remote.status(target, id).await?;
-            check_scope(id, &j.cwd)?;
+            let _ = tools_core::job_status_scoped(remote, target, cwd, id).await?;
             let offset = args["offset"].as_u64().unwrap_or(0);
             let mut text = String::new();
             let (next, finished) = remote
@@ -242,8 +145,7 @@ pub(crate) async fn job_tool(
         }
         "wait" => {
             let id = args["id"].as_u64().context("missing `id`")?;
-            let j = remote.status(target, id).await?;
-            check_scope(id, &j.cwd)?;
+            let _ = tools_core::job_status_scoped(remote, target, cwd, id).await?;
             let timeout_s = args["timeout_s"].as_u64().unwrap_or(300).clamp(5, 3600);
             let deadline = Instant::now() + Duration::from_secs(timeout_s);
             let mut offset = 0u64;
@@ -270,8 +172,7 @@ pub(crate) async fn job_tool(
         }
         "cancel" => {
             let id = args["id"].as_u64().context("missing `id`")?;
-            let j = remote.status(target, id).await?;
-            check_scope(id, &j.cwd)?;
+            let _ = tools_core::job_status_scoped(remote, target, cwd, id).await?;
             remote.cancel(target, id).await?;
             Ok(format!("cancel requested for #{id}"))
         }
@@ -282,6 +183,7 @@ pub(crate) async fn job_tool(
 #[cfg(test)]
 mod tests {
     use super::BoundedOutput;
+    use crate::tools_core::EXEC_OUTPUT_SIDE;
 
     #[test]
     fn bounded_output_keeps_head_and_tail() {
@@ -290,13 +192,20 @@ mod tests {
         assert_eq!(buf.render(), "hello");
 
         let mut big = BoundedOutput::new();
-        big.push(&vec![b'a'; super::OUTPUT_SIDE]);
-        big.push(&vec![b'b'; super::OUTPUT_SIDE]);
+        big.push(&vec![b'a'; EXEC_OUTPUT_SIDE]);
+        big.push(&vec![b'b'; EXEC_OUTPUT_SIDE]);
         big.push(b"TAIL");
         let text = big.render();
         assert!(text.starts_with("aaa"), "{text}");
         assert!(text.contains("bytes omitted"), "{text}");
         assert!(text.ends_with("TAIL"), "{text}");
-        assert!(text.len() < super::OUTPUT_SIDE * 3);
+        assert!(text.len() < EXEC_OUTPUT_SIDE * 3);
+
+        let mut mid = BoundedOutput::new();
+        mid.push(&vec![b'a'; EXEC_OUTPUT_SIDE]);
+        mid.push(&vec![b'b'; 20_000]);
+        let mid_text = mid.render();
+        assert!(!mid_text.contains("omitted"), "{mid_text}");
+        assert_eq!(mid_text.len(), EXEC_OUTPUT_SIDE + 20_000);
     }
 }

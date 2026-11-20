@@ -3,7 +3,6 @@
 use serde::Serialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Serialize)]
 pub struct PermissionAuditEntry<'a> {
@@ -26,6 +25,7 @@ pub fn audit_log_path(data_dir: &Path) -> PathBuf {
 pub fn record_decision(data_dir: &Path, mut entry: PermissionAuditEntry<'_>) {
     entry.detail = redact_secrets(&entry.detail);
     let path = audit_log_path(data_dir);
+    envoy_core::audit::rotate_if_oversized(&path, envoy_core::audit::LOG_ROTATE_BYTES);
     if let Some(parent) = path.parent() {
         let _ = envoy_core::fs::ensure_private_dir(parent);
     }
@@ -38,10 +38,7 @@ pub fn record_decision(data_dir: &Path, mut entry: PermissionAuditEntry<'_>) {
 }
 
 pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    envoy_core::now_ms()
 }
 
 pub fn redact_secrets(raw: &str) -> String {

@@ -8,7 +8,7 @@ impl App {
     pub(in crate::tui) fn run_monitor_command(&mut self, arg: &str) {
         let trimmed = arg.trim();
         if trimmed.is_empty() || trimmed == "list" {
-            if self.active_monitors.is_empty() {
+            if self.agent.active_monitors.is_empty() {
                 self.push_notice(
                     "Monitors: none active in this session (start one via agent `monitor` tool).",
                     false,
@@ -16,7 +16,7 @@ impl App {
                 return;
             }
             let lines: Vec<String> = self
-                .active_monitors
+                .agent.active_monitors
                 .iter()
                 .map(|m| {
                     let state = if m.active { "active" } else { "stopped" };
@@ -37,7 +37,7 @@ impl App {
         if let Some(target) = trimmed.strip_prefix("stop ").map(str::trim) {
             if target == "all" {
                 let ids: Vec<u64> = self
-                    .active_monitors
+                    .agent.active_monitors
                     .iter()
                     .filter(|m| m.active)
                     .map(|m| m.id)
@@ -63,7 +63,7 @@ impl App {
     }
 
     pub(in crate::tui) fn stop_monitor_by_id(&mut self, monitor_id: u64) {
-        if self.agent_offline || self.agent_stream.is_none() || !self.agent_ready {
+        if self.agent.offline || self.agent.stream.is_none() || !self.agent.ready {
             self.set_toast("daemon offline - cannot stop monitor", true);
             return;
         }
@@ -71,22 +71,39 @@ impl App {
             return;
         }
         let data_dir = self.data_dir.clone();
-        let id = self.session.id.clone();
+        let id = self.session.current.id.clone();
         let notice = self.notice_tx.clone();
         self.set_toast(format!("stopping monitor #{monitor_id}..."), false);
         tokio::spawn(async move {
-            match runtime::request(&data_dir, &AgentReq::StopMonitor { id, monitor_id }).await {
+            match runtime::request(
+                &data_dir,
+                &AgentReq::StopMonitor {
+                    id: id.clone(),
+                    monitor_id,
+                },
+            )
+            .await
+            {
                 Ok(AgentResp::Ack) => {
-                    let _ = notice.send(UiNotice::Toast(
-                        format!("monitor #{monitor_id} stopped"),
-                        false,
-                    ));
+                    let _ = notice.send(UiNotice::Toast {
+                        session_id: Some(id),
+                        msg: format!("monitor #{monitor_id} stopped"),
+                        err: false,
+                    });
                 }
                 Ok(AgentResp::Error(e)) => {
-                    let _ = notice.send(UiNotice::Toast(e, true));
+                    let _ = notice.send(UiNotice::Toast {
+                        session_id: Some(id),
+                        msg: e,
+                        err: true,
+                    });
                 }
                 Err(e) => {
-                    let _ = notice.send(UiNotice::Toast(format!("{e:#}"), true));
+                    let _ = notice.send(UiNotice::Toast {
+                        session_id: Some(id),
+                        msg: format!("{e:#}"),
+                        err: true,
+                    });
                 }
                 _ => {}
             }
@@ -111,11 +128,11 @@ impl App {
     }
 
     pub(in crate::tui) fn open_rewind_modal(&mut self) {
-        if self.agent_offline || self.agent_stream.is_none() || !self.agent_ready {
+        if self.agent.offline || self.agent.stream.is_none() || !self.agent.ready {
             self.set_toast("daemon offline - cannot list checkpoints", true);
             return;
         }
-        if self.agent_running {
+        if self.agent.running {
             self.set_toast("turn in progress; wait or interrupt first", true);
             return;
         }
@@ -123,18 +140,29 @@ impl App {
             return;
         }
         let data_dir = self.data_dir.clone();
-        let id = self.session.id.clone();
+        let id = self.session.current.id.clone();
         let notice = self.notice_tx.clone();
         tokio::spawn(async move {
-            match runtime::request(&data_dir, &AgentReq::ListCheckpoints { id }).await {
+            match runtime::request(&data_dir, &AgentReq::ListCheckpoints { id: id.clone() }).await {
                 Ok(AgentResp::Checkpoints(list)) => {
-                    let _ = notice.send(UiNotice::Checkpoints(list));
+                    let _ = notice.send(UiNotice::Checkpoints {
+                        session_id: id,
+                        list,
+                    });
                 }
                 Ok(AgentResp::Error(e)) => {
-                    let _ = notice.send(UiNotice::Toast(e, true));
+                    let _ = notice.send(UiNotice::Toast {
+                        session_id: Some(id),
+                        msg: e,
+                        err: true,
+                    });
                 }
                 Err(e) => {
-                    let _ = notice.send(UiNotice::Toast(format!("{e:#}"), true));
+                    let _ = notice.send(UiNotice::Toast {
+                        session_id: Some(id),
+                        msg: format!("{e:#}"),
+                        err: true,
+                    });
                 }
                 _ => {}
             }
@@ -142,11 +170,11 @@ impl App {
     }
 
     pub(in crate::tui) fn request_rewind(&mut self, checkpoint_id: Option<u64>) {
-        if self.agent_offline || self.agent_stream.is_none() || !self.agent_ready {
+        if self.agent.offline || self.agent.stream.is_none() || !self.agent.ready {
             self.set_toast("daemon offline - cannot rewind", true);
             return;
         }
-        if self.agent_running {
+        if self.agent.running {
             self.set_toast("turn in progress; wait or interrupt first", true);
             return;
         }
@@ -154,17 +182,33 @@ impl App {
             return;
         }
         let data_dir = self.data_dir.clone();
-        let id = self.session.id.clone();
+        let id = self.session.current.id.clone();
         let notice = self.notice_tx.clone();
         self.set_toast("rewinding checkpoint...", false);
         tokio::spawn(async move {
-            match runtime::request(&data_dir, &AgentReq::Rewind { id, checkpoint_id }).await {
+            match runtime::request(
+                &data_dir,
+                &AgentReq::Rewind {
+                    id: id.clone(),
+                    checkpoint_id,
+                },
+            )
+            .await
+            {
                 Ok(AgentResp::Ack) => {}
                 Ok(AgentResp::Error(e)) => {
-                    let _ = notice.send(UiNotice::Toast(e, true));
+                    let _ = notice.send(UiNotice::Toast {
+                        session_id: Some(id),
+                        msg: e,
+                        err: true,
+                    });
                 }
                 Err(e) => {
-                    let _ = notice.send(UiNotice::Toast(format!("{e:#}"), true));
+                    let _ = notice.send(UiNotice::Toast {
+                        session_id: Some(id),
+                        msg: format!("{e:#}"),
+                        err: true,
+                    });
                 }
                 _ => {}
             }
@@ -182,14 +226,14 @@ impl App {
         deleted_files: Vec<String>,
         skipped_files: Vec<String>,
     ) {
-        self.session.messages = messages;
-        self.session.prompt_tokens = 0;
+        self.session.current.messages = messages;
+        self.session.current.prompt_tokens = 0;
 
         let mut seen_turns = 0usize;
-        let mut cut_at = self.session.items.len();
-        for (idx, item) in self.session.items.iter().enumerate() {
+        let mut cut_at = self.session.current.items.len();
+        for (idx, item) in self.session.current.items.iter().enumerate() {
             if let TranscriptItem::User { mode, .. } = item {
-                if mode != "steer" {
+                if mode != "steer" && mode != "Shell" {
                     if seen_turns == remaining_user_turns {
                         cut_at = idx;
                         break;
@@ -198,22 +242,22 @@ impl App {
                 }
             }
         }
-        self.session.items.truncate(cut_at);
+        self.session.current.items.truncate(cut_at);
 
         self.reconcile_changed_files_after_rewind(&restored_files, &deleted_files);
 
-        self.agent_running = false;
-        self.active_assistant_id = None;
-        self.active_tool_items.clear();
-        self.pending_ask = None;
-        self.queued.clear();
-        self.selected_card = None;
-        self.transcript_cache.clear();
-        self.workspace_index.invalidate();
-        self.inspector.selected_diff = self
-            .inspector
+        self.agent.running = false;
+        self.agent.active_assistant_id = None;
+        self.agent.active_tool_items.clear();
+        self.agent.pending_ask = None;
+        self.agent.queued.clear();
+        self.ui.selected_card = None;
+        self.session.transcript_cache.clear();
+        self.session.workspace_index.invalidate();
+        self.ui.inspector.selected_diff = self
+            .ui.inspector
             .selected_diff
-            .min(self.session.changed_files.len().saturating_sub(1));
+            .min(self.session.current.changed_files.len().saturating_sub(1));
 
         let mut summary = format!(
             "rewound to #{checkpoint_id} `{label}`: {} restored, {} removed",
@@ -228,7 +272,7 @@ impl App {
             format!("rewound to #{checkpoint_id}"),
             !skipped_files.is_empty(),
         );
-        self.session.touch();
+        self.session.current.touch();
         self.persist_session();
     }
 
@@ -237,18 +281,18 @@ impl App {
         restored_files: &[String],
         deleted_files: &[String],
     ) {
-        let local = self.target.is_empty() || self.target == "local";
+        let local = self.jobs.target.is_empty() || self.jobs.target == "local";
         let deleted_norm: HashSet<String> = deleted_files
             .iter()
-            .map(|p| links::normalize_display_path(&self.session.cwd, Path::new(p)))
+            .map(|p| links::normalize_display_path(&self.session.current.cwd, Path::new(p)))
             .collect();
         let restored_norm: HashSet<String> = restored_files
             .iter()
-            .map(|p| links::normalize_display_path(&self.session.cwd, Path::new(p)))
+            .map(|p| links::normalize_display_path(&self.session.current.cwd, Path::new(p)))
             .collect();
 
-        let cwd = self.session.cwd.clone();
-        self.session.changed_files.retain_mut(|fc| {
+        let cwd = self.session.current.cwd.clone();
+        self.session.current.changed_files.retain_mut(|fc| {
             let norm = links::normalize_display_path(&cwd, Path::new(&fc.path));
             if deleted_norm.contains(&norm) || deleted_files.contains(&fc.path) {
                 return false;

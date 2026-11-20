@@ -26,6 +26,7 @@ pub(crate) struct SubagentHost {
     pub(crate) data_dir: PathBuf,
     pub(crate) conduit: Option<PathBuf>,
     pub(crate) local_socket: Option<PathBuf>,
+    pub(crate) local_server: Option<envoy_service::AgentServer>,
     pub(crate) target: String,
     pub(crate) cwd: PathBuf,
     pub(crate) provider: StoredProvider,
@@ -350,6 +351,7 @@ mod tests {
                 key: "sk-test".into(),
             },
             custom_models: vec!["fast-mini".into()],
+            fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
             updated_ms: 0,
         };
@@ -357,6 +359,7 @@ mod tests {
             data_dir: dir.clone(),
             conduit: None,
             local_socket: None,
+            local_server: None,
             target: "local".into(),
             cwd: dir.clone(),
             provider,

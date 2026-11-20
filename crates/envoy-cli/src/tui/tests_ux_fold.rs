@@ -4,8 +4,8 @@ use ratatui::crossterm::event::MouseEvent;
 
 fn test_app(dir: &std::path::Path) -> App {
     let mut app = App::new(dir.to_path_buf(), "local".into(), None, dir.to_path_buf());
-    app.connected = true;
-    app.show_sidebar = false;
+    app.jobs.connected = true;
+    app.ui.show_sidebar = false;
     app
 }
 
@@ -50,10 +50,10 @@ fn click_at(app: &mut App, col: u16, row: u16) {
 fn consecutive_failed_commands_and_non_edit_tools_fold_into_one_line() {
     let dir = temp_workspace();
     let mut app = test_app(&dir);
-    app.agent_running = true;
+    app.agent.running = true;
 
-    let uid = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::User {
+    let uid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::User {
         id: uid,
         text: "run all tools".into(),
         mode: "Agent".into(),
@@ -62,8 +62,8 @@ fn consecutive_failed_commands_and_non_edit_tools_fold_into_one_line() {
     });
 
     let push_tool = |app: &mut App, name: &str, title: &str, status: CardStatus| {
-        let id = app.session.alloc_id();
-        app.session.items.push(TranscriptItem::Tool {
+        let id = app.session.current.alloc_id();
+        app.session.current.items.push(TranscriptItem::Tool {
             id,
             call_id: format!("c-{id}"),
             name: name.into(),
@@ -88,8 +88,8 @@ fn consecutive_failed_commands_and_non_edit_tools_fold_into_one_line() {
         "skill nonexistent-skill",
         CardStatus::Error,
     );
-    let mid_thought = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::Assistant {
+    let mid_thought = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Assistant {
         id: mid_thought,
         text: String::new(),
         reasoning: "internal step note".into(),
@@ -122,7 +122,7 @@ fn consecutive_failed_commands_and_non_edit_tools_fold_into_one_line() {
     );
 
     let hit = app
-        .hit_regions
+        .ui.hit_regions
         .iter()
         .find(|hr| matches!(hr.target, HitTarget::ToggleToolGroup(_)))
         .expect("folded tool group hit region")
@@ -141,18 +141,18 @@ fn consecutive_failed_commands_and_non_edit_tools_fold_into_one_line() {
 fn thinking_wording_is_unified_collapsed_and_coalesces_consecutive_steps() {
     let dir = temp_workspace();
     let mut app = test_app(&dir);
-    app.agent_running = true;
+    app.agent.running = true;
 
-    let uid = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::User {
+    let uid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::User {
         id: uid,
         text: "inspect".into(),
         mode: "Agent".into(),
         cwd: dir.display().to_string(),
         ts_ms: now_ms(),
     });
-    let r1 = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::Assistant {
+    let r1 = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Assistant {
         id: r1,
         text: String::new(),
         reasoning: "first hidden chain of thought".into(),
@@ -161,8 +161,8 @@ fn thinking_wording_is_unified_collapsed_and_coalesces_consecutive_steps() {
         done: true,
         error: None,
     });
-    let r2 = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::Assistant {
+    let r2 = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Assistant {
         id: r2,
         text: String::new(),
         reasoning: "live streaming secret reasoning snippet".into(),
@@ -182,18 +182,18 @@ fn thinking_wording_is_unified_collapsed_and_coalesces_consecutive_steps() {
         "streaming collapsed thinking must use Decrypt Effect without spinners:\n{live_text}"
     );
     assert!(
-        app.hit_regions
+        app.ui.hit_regions
             .iter()
             .any(|hr| matches!(hr.target, HitTarget::ToggleReasoning(_))),
         "live thinking row should keep ToggleReasoning hit target"
     );
 
     if let Some(TranscriptItem::Assistant { done, .. }) =
-        app.session.items.iter_mut().find(|i| i.id() == r2)
+        app.session.current.items.iter_mut().find(|i| i.id() == r2)
     {
         *done = true;
     }
-    app.agent_running = false;
+    app.agent.running = false;
 
     let settled = draw_rows(&mut app, 100, 28).join("\n");
     let count = settled.matches("> Thinking").count();
@@ -204,7 +204,7 @@ fn thinking_wording_is_unified_collapsed_and_coalesces_consecutive_steps() {
     assert!(!settled.contains("> Thought"));
 
     let hit = app
-        .hit_regions
+        .ui.hit_regions
         .iter()
         .find(|hr| matches!(hr.target, HitTarget::ToggleReasoning(_)))
         .expect("thinking toggle hit region")
@@ -254,16 +254,16 @@ fn markdown_blocks_and_transcript_phases_have_vertical_breathing_room() {
     );
 
     let mut app = test_app(&dir);
-    let uid = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::User {
+    let uid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::User {
         id: uid,
         text: "go".into(),
         mode: "Agent".into(),
         cwd: dir.display().to_string(),
         ts_ms: now_ms(),
     });
-    let t1 = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::Tool {
+    let t1 = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Tool {
         id: t1,
         call_id: "c1".into(),
         name: "write".into(),
@@ -278,14 +278,14 @@ fn markdown_blocks_and_transcript_phases_have_vertical_breathing_room() {
         exit_code: Some(0),
         started_ms: now_ms(),
     });
-    let s1 = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::Say {
+    let s1 = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Say {
         id: s1,
         text: "phase update".into(),
         level: "info".into(),
     });
-    let t2 = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::Tool {
+    let t2 = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Tool {
         id: t2,
         call_id: "c2".into(),
         name: "edit".into(),
@@ -300,7 +300,7 @@ fn markdown_blocks_and_transcript_phases_have_vertical_breathing_room() {
         exit_code: Some(0),
         started_ms: now_ms(),
     });
-    app.agent_running = true;
+    app.agent.running = true;
 
     let rows = draw_rows(&mut app, 100, 24);
     let say_row = rows
@@ -324,10 +324,10 @@ fn running_tools_and_groups_render_progressive_phrases_with_decrypt_effect() {
 
     let dir = temp_workspace();
     let mut app = test_app(&dir);
-    app.agent_running = true;
+    app.agent.running = true;
 
-    let uid = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::User {
+    let uid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::User {
         id: uid,
         text: "run checks".into(),
         mode: "Agent".into(),
@@ -335,8 +335,8 @@ fn running_tools_and_groups_render_progressive_phrases_with_decrypt_effect() {
         ts_ms: now_ms(),
     });
     for (idx, cmd) in ["$ cargo check", "$ cargo test"].iter().enumerate() {
-        let id = app.session.alloc_id();
-        app.session.items.push(TranscriptItem::Tool {
+        let id = app.session.current.alloc_id();
+        app.session.current.items.push(TranscriptItem::Tool {
             id,
             call_id: format!("exec-{idx}"),
             name: "exec".into(),
@@ -352,14 +352,14 @@ fn running_tools_and_groups_render_progressive_phrases_with_decrypt_effect() {
             started_ms: now_ms(),
         });
     }
-    let sep_id = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::Say {
+    let sep_id = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Say {
         id: sep_id,
         text: "editing file".into(),
         level: "info".into(),
     });
-    let edit_id = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::Tool {
+    let edit_id = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Tool {
         id: edit_id,
         call_id: "edit-1".into(),
         name: "edit".into(),
@@ -376,7 +376,7 @@ fn running_tools_and_groups_render_progressive_phrases_with_decrypt_effect() {
     });
 
     assert_eq!(
-        running_group_phrase(&app.session.items[1..3]),
+        running_group_phrase(&app.session.current.items[1..3]),
         "Running commands"
     );
 
@@ -392,14 +392,14 @@ fn running_tools_and_groups_render_progressive_phrases_with_decrypt_effect() {
         "collapsed running tools must hide concrete paths and commands:\n{rendered}"
     );
     assert!(
-        app.hit_regions
+        app.ui.hit_regions
             .iter()
             .any(|hr| matches!(hr.target, HitTarget::ToggleToolGroup(_))),
         "running command group should remain expandable"
     );
 
     let card_hit = app
-        .hit_regions
+        .ui.hit_regions
         .iter()
         .find(|hr| matches!(hr.target, HitTarget::ToggleToolCard(_)))
         .expect("single running edit hit region")
@@ -418,10 +418,10 @@ fn running_tools_and_groups_render_progressive_phrases_with_decrypt_effect() {
 fn done_and_failed_single_tools_fold_without_check_or_cross_badges() {
     let dir = temp_workspace();
     let mut app = test_app(&dir);
-    app.agent_running = true;
+    app.agent.running = true;
 
-    let uid = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::User {
+    let uid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::User {
         id: uid,
         text: "verify".into(),
         mode: "Agent".into(),
@@ -433,8 +433,8 @@ fn done_and_failed_single_tools_fold_without_check_or_cross_badges() {
         ("edit", "edit src/a.rs", CardStatus::Done),
         ("exec", "$ false", CardStatus::Error),
     ] {
-        let tid = app.session.alloc_id();
-        app.session.items.push(TranscriptItem::Tool {
+        let tid = app.session.current.alloc_id();
+        app.session.current.items.push(TranscriptItem::Tool {
             id: tid,
             call_id: format!("t-{tid}"),
             name: name.into(),
@@ -449,8 +449,8 @@ fn done_and_failed_single_tools_fold_without_check_or_cross_badges() {
             exit_code: (status == CardStatus::Error).then_some(1),
             started_ms: now_ms(),
         });
-        let sid = app.session.alloc_id();
-        app.session.items.push(TranscriptItem::Say {
+        let sid = app.session.current.alloc_id();
+        app.session.current.items.push(TranscriptItem::Say {
             id: sid,
             text: format!("step {sid}"),
             level: "info".into(),

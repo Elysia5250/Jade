@@ -11,8 +11,6 @@ use crate::agent::context::reasoning::{self, ReasoningSpec};
 use crate::auth::ProviderProtocol;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_LEVEL: &str = "medium";
@@ -58,19 +56,8 @@ pub fn set(data_dir: &Path, level: &str) -> Result<(), String> {
         return Err("usage: /effort [level]".into());
     };
     let text = serde_json::to_string_pretty(&Pref { level }).map_err(|err| err.to_string())?;
-    if let Some(parent) = prefs_path(data_dir).parent() {
-        std::fs::create_dir_all(parent).map_err(|err| format!("cannot create: {err}"))?;
-    }
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(prefs_path(data_dir))
-        .map_err(|err| format!("cannot create: {err}"))?;
-    file.write_all(text.as_bytes())
-        .map_err(|err| format!("cannot create: {err}"))?;
-    Ok(())
+    envoy_core::fs::write_atomic_sync(&prefs_path(data_dir), text.as_bytes(), 0o600)
+        .map_err(|err| format!("cannot create: {err:#}"))
 }
 
 pub fn advertised(data_dir: &Path, provider_id: &str, model_id: &str) -> Option<ReasoningSpec> {
@@ -87,7 +74,11 @@ pub fn accepts(spec: &ReasoningSpec, protocol: ProviderProtocol, level: &str) ->
 
 fn can_disable(spec: &ReasoningSpec, protocol: ProviderProtocol) -> bool {
     spec.efforts.iter().any(|level| level == "none")
-        || (spec.toggle && protocol == ProviderProtocol::OpenAiChat)
+        || (spec.toggle
+            && matches!(
+                protocol,
+                ProviderProtocol::OpenAiChat | ProviderProtocol::Anthropic
+            ))
 }
 
 pub fn describe(spec: Option<&ReasoningSpec>) -> String {
@@ -138,11 +129,18 @@ pub fn apply(
                 body["reasoning"] = json!({ "effort": level });
             }
         }
-        ProviderProtocol::Anthropic => {
-            if let Some(level) = effort {
-                body["output_config"] = json!({ "effort": level });
+        ProviderProtocol::Anthropic => match effort.as_deref() {
+            None | Some("none") if spec.toggle => {
+                body["thinking"] = json!({ "type": "disabled" });
             }
-        }
+            Some(level) => {
+                body["output_config"] = json!({ "effort": level });
+                if spec.toggle {
+                    body["thinking"] = json!({ "type": "adaptive" });
+                }
+            }
+            None => {}
+        },
     }
 }
 
@@ -296,11 +294,23 @@ mod tests {
             &dir,
         );
         assert_eq!(claude["output_config"]["effort"], "xhigh");
-        assert!(!accepts(
+        assert_eq!(claude["thinking"]["type"], "adaptive");
+        assert!(accepts(
             &advertised(&dir, "anthropic", "claude-sonnet-5").unwrap(),
             ProviderProtocol::Anthropic,
             "off"
         ));
+        set(&dir, "off").unwrap();
+        let mut claude_off = json!({});
+        apply(
+            &mut claude_off,
+            ProviderProtocol::Anthropic,
+            "anthropic",
+            "claude-sonnet-5",
+            &dir,
+        );
+        assert_eq!(claude_off["thinking"]["type"], "disabled");
+        assert!(claude_off.get("output_config").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 /// Agent control protocol. Bumped with the job-socket [`envoy_proto::AGENT_VERSION`]
 /// when the framed handshake or these enums change incompatibly.
-pub const AGENT_PROTOCOL_VERSION: u32 = 4;
+pub const AGENT_PROTOCOL_VERSION: u32 = 5;
 
 /// First frame on `agent.sock`, both directions, before any [`AgentReq`].
 ///
@@ -129,6 +129,12 @@ pub enum AgentReq {
     Clear {
         id: String,
     },
+    /// Probe configured MCP servers from the daemon and return human-readable status lines.
+    ProbeMcp {
+        cwd: PathBuf,
+    },
+    /// Refresh models.dev cache if stale and fetch models for the active provider.
+    RefreshModels,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +166,13 @@ pub enum AgentResp {
     Recalled(Option<String>),
     /// Checkpoints recorded for a session.
     Checkpoints(Vec<CheckpointSummary>),
+    /// Human-readable MCP server probe lines.
+    McpProbe(Vec<String>),
+    /// Live models fetched for the active provider.
+    ModelsRefreshed {
+        provider_id: String,
+        models: Vec<crate::agent::context::ListedModel>,
+    },
     Ack,
     Error(String),
 }
@@ -282,6 +295,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn agent_req_and_resp_mcp_and_models_round_trip_postcard() {
+        for req in [
+            AgentReq::ProbeMcp {
+                cwd: PathBuf::from("/tmp/work"),
+            },
+            AgentReq::RefreshModels,
+        ] {
+            assert_postcard(&req);
+        }
+        assert_postcard(&AgentResp::McpProbe(vec![
+            "srv [project - stdio] connected (8 tools)".into(),
+        ]));
+        assert_postcard(&AgentResp::ModelsRefreshed {
+            provider_id: "openai".into(),
+            models: vec![crate::agent::context::ListedModel {
+                id: "gpt-5.4".into(),
+                route: Some(crate::auth::ModelRoute {
+                    protocol: crate::auth::ProviderProtocol::OpenAiChat,
+                    base_url: "https://example.com/v1".into(),
+                }),
+            }],
+        });
+    }
+
     fn assert_postcard<T>(value: &T)
     where
         T: serde::Serialize + serde::de::DeserializeOwned + std::fmt::Debug,
@@ -389,6 +427,10 @@ mod tests {
                 target: "peer-9".into(),
             },
             AgentReq::Clear { id: "s-clear".into() },
+            AgentReq::ProbeMcp {
+                cwd: PathBuf::from("/work/mcp"),
+            },
+            AgentReq::RefreshModels,
         ]
     }
 
@@ -412,6 +454,8 @@ mod tests {
             AgentReq::SetCwd { .. } => 15,
             AgentReq::SetTarget { .. } => 16,
             AgentReq::Clear { .. } => 17,
+            AgentReq::ProbeMcp { .. } => 18,
+            AgentReq::RefreshModels => 19,
         }
     }
 
@@ -451,6 +495,11 @@ mod tests {
                 remaining_user_turns: 1,
                 files_touched: 3,
             }]),
+            AgentResp::McpProbe(vec!["srv ok".into()]),
+            AgentResp::ModelsRefreshed {
+                provider_id: "openai".into(),
+                models: Vec::new(),
+            },
             AgentResp::Ack,
             AgentResp::Error("no such session: s9".into()),
         ]
@@ -466,8 +515,10 @@ mod tests {
             AgentResp::Sessions(_) => 5,
             AgentResp::Recalled(_) => 6,
             AgentResp::Checkpoints(_) => 7,
-            AgentResp::Ack => 8,
-            AgentResp::Error(_) => 9,
+            AgentResp::McpProbe(_) => 8,
+            AgentResp::ModelsRefreshed { .. } => 9,
+            AgentResp::Ack => 10,
+            AgentResp::Error(_) => 11,
         }
     }
 
@@ -489,8 +540,8 @@ mod tests {
     fn every_agent_req_and_resp_round_trips_postcard() {
         let mut reqs = sample_reqs_open();
         reqs.extend(sample_reqs_edit());
-        assert_each(reqs, req_index, 18);
-        assert_each(sample_resps(), resp_index, 10);
+        assert_each(reqs, req_index, 20);
+        assert_each(sample_resps(), resp_index, 12);
         assert_postcard(&AgentHello {
             protocol_version: AGENT_PROTOCOL_VERSION,
             incarnation_id: 7,

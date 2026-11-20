@@ -14,8 +14,11 @@ use crate::tui::links::{inline_spans_linked, LinkedSpan};
 use crate::tui::*;
 
 pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
-    app.transcript_height = area.height;
-    app.transcript_area = area;
+    app.ui.transcript_height = area.height;
+    app.ui.transcript_area = area;
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
 
     let inner = Rect {
         x: area.x + 1,
@@ -27,44 +30,44 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
         return;
     }
 
-    if app.session.items.is_empty() {
-        app.transcript_max_scroll = 0;
-        app.transcript_scroll = 0;
+    if app.session.current.items.is_empty() {
+        app.ui.transcript_max_scroll = 0;
+        app.ui.transcript_scroll = 0;
         draw_welcome(frame, app, theme, inner);
         return;
     }
 
     let width = inner.width.max(16) as usize;
     let mut lines: Vec<LinkedLine> = Vec::new();
-    let items_len = app.session.items.len();
-    let folds = settled_activity_folds(&app.session.items, app.agent_running);
+    let items_len = app.session.current.items.len();
+    let folds = settled_activity_folds(&app.session.current.items, app.agent.running);
     let mut idx = 0usize;
     let mut last_notice: Option<String> = None;
 
     while idx < items_len {
         if let Some((start, end)) = folds.iter().copied().find(|(s, e)| idx >= *s && idx < *e) {
-            let first_id = first_tool_id(&app.session.items[start..end]);
-            let expanded = app.expanded_explore_groups.contains(&first_id);
-            let selected = app.focus == Focus::Transcript
+            let first_id = first_tool_id(&app.session.current.items[start..end]);
+            let expanded = app.session.expanded_explore_groups.contains(&first_id);
+            let selected = app.ui.focus == Focus::Transcript
                 && app
-                    .selected_card
+                    .ui.selected_card
                     .is_some_and(|sel| (start..end).contains(&sel));
             push_blank_linked(&mut lines);
             if expanded {
                 lines.push(render_turn_summary(
-                    &app.session.items[start..end],
-                    &app.session.changed_files,
+                    &app.session.current.items[start..end],
+                    &app.session.current.changed_files,
                     width,
                     theme,
                     selected,
                     true,
                 ));
                 for sub_idx in start..end {
-                    if is_folded_filler(&app.session.items[sub_idx]) {
+                    if is_folded_filler(&app.session.current.items[sub_idx]) {
                         continue;
                     }
                     let sub_selected =
-                        app.focus == Focus::Transcript && app.selected_card == Some(sub_idx);
+                        app.ui.focus == Focus::Transcript && app.ui.selected_card == Some(sub_idx);
                     render_single_item(
                         app,
                         sub_idx,
@@ -77,8 +80,8 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
                 }
             } else {
                 lines.push(render_turn_summary(
-                    &app.session.items[start..end],
-                    &app.session.changed_files,
+                    &app.session.current.items[start..end],
+                    &app.session.current.changed_files,
                     width,
                     theme,
                     selected,
@@ -91,7 +94,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
             continue;
         }
 
-        let item = &app.session.items[idx];
+        let item = &app.session.current.items[idx];
         if matches!(item, TranscriptItem::Tool { name, .. } if name == "say") {
             idx += 1;
             continue;
@@ -108,18 +111,18 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
             }
         }
 
-        let is_selected = app.focus == Focus::Transcript && app.selected_card == Some(idx);
+        let is_selected = app.ui.focus == Focus::Transcript && app.ui.selected_card == Some(idx);
 
         // Merge consecutive reasoning-only Assistant turns into a single Thinking toggle.
         if is_reasoning_only(item) {
             let mut end = idx + 1;
             while end < items_len
-                && (is_reasoning_only(&app.session.items[end])
-                    || is_transparent_notice(&app.session.items[end]))
+                && (is_reasoning_only(&app.session.current.items[end])
+                    || is_transparent_notice(&app.session.current.items[end]))
             {
                 end += 1;
             }
-            if render_thinking_run(&app.session.items[idx..end], width, theme, &mut lines) {
+            if render_thinking_run(&app.session.current.items[idx..end], width, theme, &mut lines) {
                 last_notice = None;
             }
             idx = end;
@@ -131,12 +134,12 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
             let start = idx;
             let mut end = idx + 1;
             while end < items_len
-                && (is_groupable_tool(&app.session.items[end])
-                    || is_transparent_separator(&app.session.items[end]))
+                && (is_groupable_tool(&app.session.current.items[end])
+                    || is_transparent_separator(&app.session.current.items[end]))
             {
                 end += 1;
             }
-            while end > start + 1 && is_transparent_separator(&app.session.items[end - 1]) {
+            while end > start + 1 && is_transparent_separator(&app.session.current.items[end - 1]) {
                 end -= 1;
             }
 
@@ -144,7 +147,7 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
             let mut first_id = 0u64;
             let mut all_collapsed = true;
             let mut any_running = false;
-            for entry in &app.session.items[start..end] {
+            for entry in &app.session.current.items[start..end] {
                 if let TranscriptItem::Tool {
                     id,
                     name,
@@ -172,27 +175,27 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
             if all_collapsed && (tool_count >= 2 || (tool_count == 1 && !any_running)) {
                 last_notice = None;
                 push_blank_linked(&mut lines);
-                if !app.expanded_explore_groups.contains(&first_id) {
+                if !app.session.expanded_explore_groups.contains(&first_id) {
                     lines.push(render_explore_group(
-                        &app.session.items[start..end],
+                        &app.session.current.items[start..end],
                         width,
                         theme,
                         is_selected,
                     ));
                 } else {
                     lines.push(render_explore_expanded_header(
-                        &app.session.items[start..end],
+                        &app.session.current.items[start..end],
                         width,
                         theme,
                     ));
                     for sub_idx in start..end {
-                        if is_transparent_separator(&app.session.items[sub_idx])
-                            || matches!(&app.session.items[sub_idx], TranscriptItem::Tool { name, .. } if name == "say")
+                        if is_transparent_separator(&app.session.current.items[sub_idx])
+                            || matches!(&app.session.current.items[sub_idx], TranscriptItem::Tool { name, .. } if name == "say")
                         {
                             continue;
                         }
                         let sub_selected =
-                            app.focus == Focus::Transcript && app.selected_card == Some(sub_idx);
+                            app.ui.focus == Focus::Transcript && app.ui.selected_card == Some(sub_idx);
                         render_single_item(
                             app,
                             sub_idx,
@@ -230,15 +233,28 @@ pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, a
     }
 
     lines.push(LinkedLine::from_line(Line::from("")));
-    let max_scroll = (lines.len() as u16).saturating_sub(inner.height);
-    app.transcript_max_scroll = max_scroll;
-    if app.follow {
-        app.transcript_scroll = max_scroll;
+    let max_scroll = lines.len().saturating_sub(inner.height as usize);
+    app.ui.transcript_max_scroll = max_scroll;
+    if app.ui.follow {
+        app.ui.transcript_scroll = max_scroll;
     } else {
-        app.transcript_scroll = app.transcript_scroll.min(max_scroll);
+        app.ui.transcript_scroll = app.ui.transcript_scroll.min(max_scroll);
     }
 
-    super::inspector::push_linked_rows(frame, app, &lines, app.transcript_scroll, inner);
+    super::inspector::push_linked_rows(frame, app, &lines, app.ui.transcript_scroll, inner);
+}
+
+fn cache_transcript_entry(
+    cache: &mut HashMap<(u64, usize, usize), (usize, Vec<LinkedLine>)>,
+    key: (u64, usize, usize),
+    fp: usize,
+    rendered: &[LinkedLine],
+) {
+    const TRANSCRIPT_CACHE_CAP: usize = 256;
+    if !cache.contains_key(&key) && cache.len() >= TRANSCRIPT_CACHE_CAP {
+        cache.clear();
+    }
+    cache.insert(key, (fp, rendered.to_vec()));
 }
 
 fn render_single_item(
@@ -250,7 +266,7 @@ fn render_single_item(
     lines: &mut Vec<LinkedLine>,
     last_notice: &mut Option<String>,
 ) {
-    let item = app.session.items[idx].clone();
+    let item = app.session.current.items[idx].clone();
     match &item {
         TranscriptItem::User { text, .. } => {
             *last_notice = None;
@@ -335,9 +351,9 @@ fn render_single_item(
             } else {
                 let body_w = width.saturating_sub(1).max(10);
                 let rendered = if *done {
-                    let key = (*id, body_w, app.theme);
-                    let fp = trimmed.len() ^ (app.session.changed_files.len() << 24);
-                    if let Some((cached_fp, cached)) = app.transcript_cache.get(&key) {
+                    let key = (*id, body_w, app.ui.theme);
+                    let fp = trimmed.len() ^ (app.session.current.changed_files.len() << 24);
+                    if let Some((cached_fp, cached)) = app.session.transcript_cache.get(&key) {
                         if *cached_fp == fp {
                             cached.clone()
                         } else {
@@ -345,11 +361,11 @@ fn render_single_item(
                                 trimmed,
                                 body_w,
                                 theme,
-                                &app.session.cwd,
-                                &app.session.changed_files,
-                                &app.workspace_index,
+                                &app.session.current.cwd,
+                                &app.session.current.changed_files,
+                                &app.session.workspace_index,
                             );
-                            app.transcript_cache.insert(key, (fp, r.clone()));
+                            cache_transcript_entry(&mut app.session.transcript_cache, key, fp, &r);
                             r
                         }
                     } else {
@@ -357,11 +373,11 @@ fn render_single_item(
                             trimmed,
                             body_w,
                             theme,
-                            &app.session.cwd,
-                            &app.session.changed_files,
-                            &app.workspace_index,
+                            &app.session.current.cwd,
+                            &app.session.current.changed_files,
+                            &app.session.workspace_index,
                         );
-                        app.transcript_cache.insert(key, (fp, r.clone()));
+                        cache_transcript_entry(&mut app.session.transcript_cache, key, fp, &r);
                         r
                     }
                 } else {
@@ -369,9 +385,9 @@ fn render_single_item(
                         trimmed,
                         body_w,
                         theme,
-                        &app.session.cwd,
-                        &app.session.changed_files,
-                        &app.workspace_index,
+                        &app.session.current.cwd,
+                        &app.session.current.changed_files,
+                        &app.session.workspace_index,
                     )
                 };
 
@@ -486,9 +502,9 @@ fn render_single_item(
                 let linked = inline_spans_linked(
                     raw,
                     theme,
-                    &app.session.cwd,
-                    &app.session.changed_files,
-                    &app.workspace_index,
+                    &app.session.current.cwd,
+                    &app.session.current.changed_files,
+                    &app.session.workspace_index,
                 );
                 let wrapped = wrap_linked_spans(
                     LinkedSpan {

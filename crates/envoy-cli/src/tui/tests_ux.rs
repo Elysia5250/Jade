@@ -16,47 +16,47 @@ fn tmpdir(tag: &str) -> PathBuf {
 fn bracketed_paste_preserves_newlines_in_composer_and_strips_in_single_line_fields() {
     let dir = tmpdir("paste");
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    app.focus = Focus::Transcript;
+    app.ui.focus = Focus::Transcript;
 
     // Main composer: focuses Input and normalizes CRLF/CR to LF without submitting
     app.handle_paste("line1\r\nline2\rline3");
-    assert_eq!(app.focus, Focus::Input);
-    assert_eq!(app.input, "line1\nline2\nline3");
-    assert_eq!(app.input_cursor, "line1\nline2\nline3".chars().count());
+    assert_eq!(app.ui.focus, Focus::Input);
+    assert_eq!(app.ui.input, "line1\nline2\nline3");
+    assert_eq!(app.ui.input_cursor, "line1\nline2\nline3".chars().count());
 
     // Login API key form: strips trailing newline from pasted API key
     app.open_login_modal();
     app.handle_paste("deepseek\n");
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(matches!(
-        app.modal,
+        app.ui.modal,
         Some(Modal::Login(LoginModal::ApiKeyForm { .. }))
     ));
     app.handle_paste("sk-pasted-secret\r\n");
-    if let Some(Modal::Login(LoginModal::ApiKeyForm { key, .. })) = app.modal.as_ref() {
+    if let Some(Modal::Login(LoginModal::ApiKeyForm { key, .. })) = app.ui.modal.as_ref() {
         assert_eq!(key, "sk-pasted-secret");
     } else {
         panic!("expected ApiKeyForm");
     }
-    app.modal = None;
+    app.ui.modal = None;
 
     // Picker modal: strips newlines from search query
     app.open_picker("test", vec![("alpha".into(), Command::Quit)]);
     app.handle_paste("al\npha");
-    if let Some(Modal::Picker(p)) = app.modal.as_ref() {
+    if let Some(Modal::Picker(p)) = app.ui.modal.as_ref() {
         assert_eq!(p.query, "alpha");
     } else {
         panic!("expected Picker");
     }
-    app.modal = None;
+    app.ui.modal = None;
 
     // Welcome path mode: strips newlines from pasted path
     app.open_welcome();
-    if let Some(w) = app.welcome.as_mut() {
-        w.path_mode = true;
+    if let Some(w) = app.ui.welcome.as_mut() {
+        w.mode = WelcomeMode::OpenPath;
     }
     app.handle_paste("/tmp/my-dir\n");
-    assert_eq!(app.welcome.as_ref().unwrap().path, "/tmp/my-dir");
+    assert_eq!(app.ui.welcome.as_ref().unwrap().path, "/tmp/my-dir");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -65,7 +65,7 @@ fn bracketed_paste_preserves_newlines_in_composer_and_strips_in_single_line_fiel
 fn unauthenticated_agent_submit_keeps_input_and_opens_login() {
     let dir = tmpdir("authguard");
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    assert_eq!(app.mode, InputMode::Agent);
+    assert_eq!(app.ui.mode, InputMode::Agent);
 
     for ch in "explain main.rs".chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
@@ -76,14 +76,14 @@ fn unauthenticated_agent_submit_keeps_input_and_opens_login() {
         _ => panic!("unauthenticated Enter should yield SubmitAgent, not SubmitShell"),
     };
     app.submit_agent(prompt);
-    assert!(matches!(app.modal, Some(Modal::Login(_))));
-    assert_eq!(app.input, "explain main.rs");
-    assert_eq!(app.focus, Focus::Input);
-    app.modal = None;
+    assert!(matches!(app.ui.modal, Some(Modal::Login(_))));
+    assert_eq!(app.ui.input, "explain main.rs");
+    assert_eq!(app.ui.focus, Focus::Input);
+    app.ui.modal = None;
 
     // Explicit `!cmd` shell escape still works without a provider
-    app.input = "!echo ok".into();
-    app.input_cursor = app.input.chars().count();
+    app.ui.input = "!echo ok".into();
+    app.ui.input_cursor = app.ui.input.chars().count();
     match app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
         Action::SubmitShell(req) => assert_eq!(req.spec.display(), "echo ok"),
         _ => panic!("!cmd should still submit shell"),
@@ -96,30 +96,30 @@ fn unauthenticated_agent_submit_keeps_input_and_opens_login() {
 fn word_editing_shortcuts_delete_and_move_by_word() {
     let dir = tmpdir("wordedit");
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    app.input = "one two three".into();
-    app.input_cursor = app.input.chars().count();
+    app.ui.input = "one two three".into();
+    app.ui.input_cursor = app.ui.input.chars().count();
 
     // Ctrl+Left jumps to start of "three"
     app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL));
-    assert_eq!(app.input_cursor, 8);
+    assert_eq!(app.ui.input_cursor, 8);
 
     // Alt+B jumps to start of "two"
     app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::ALT));
-    assert_eq!(app.input_cursor, 4);
+    assert_eq!(app.ui.input_cursor, 4);
 
     // Alt+F jumps past "two" to index 7
     app.handle_key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT));
-    assert_eq!(app.input_cursor, 7);
+    assert_eq!(app.ui.input_cursor, 7);
 
     // Ctrl+W deletes "two"
     app.handle_key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
-    assert_eq!(app.input, "one  three");
-    assert_eq!(app.input_cursor, 4);
+    assert_eq!(app.ui.input, "one  three");
+    assert_eq!(app.ui.input_cursor, 4);
 
     // Alt+Backspace at end deletes "three"
-    app.input_cursor = app.input.chars().count();
+    app.ui.input_cursor = app.ui.input.chars().count();
     app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
-    assert_eq!(app.input, "one  ");
+    assert_eq!(app.ui.input, "one  ");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -141,24 +141,24 @@ fn at_file_completion_searches_completes_and_dismisses_cleanly() {
     assert_eq!(hits.first().map(String::as_str), Some("src/main.rs"));
 
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    assert_eq!(app.input, "check @src/main.rs ");
+    assert_eq!(app.ui.input, "check @src/main.rs ");
     assert!(app.file_completions().is_empty());
 
     // Email-like token must not trigger @ completion
-    app.input = "mail@example".into();
-    app.input_cursor = app.input.chars().count();
+    app.ui.input = "mail@example".into();
+    app.ui.input_cursor = app.ui.input.chars().count();
     assert!(app.file_completions().is_empty());
 
     // Esc dismisses popup without erasing user's text, then Enter submits
-    app.input = "see ".into();
-    app.input_cursor = app.input.chars().count();
+    app.ui.input = "see ".into();
+    app.ui.input_cursor = app.ui.input.chars().count();
     for ch in "@lib".chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
     }
     assert!(!app.file_completions().is_empty());
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(app.file_completions().is_empty());
-    assert_eq!(app.input, "see @lib");
+    assert_eq!(app.ui.input, "see @lib");
     match app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)) {
         Action::SubmitAgent(p) => assert_eq!(p, "see @lib"),
         _ => panic!("expected SubmitAgent after Esc dismissed @ menu"),
@@ -202,9 +202,9 @@ async fn welcome_shows_resumes_tag_and_n_starts_fresh_session() {
 
     // Pressing `n` starts a fresh session rather than resuming `saved.id`
     app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
-    assert!(app.welcome.is_none());
-    assert_ne!(app.session.id, saved.id);
-    assert!(app.session.items.is_empty());
+    assert!(app.ui.welcome.is_none());
+    assert_ne!(app.session.current.id, saved.id);
+    assert!(app.session.current.items.is_empty());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -213,18 +213,18 @@ async fn welcome_shows_resumes_tag_and_n_starts_fresh_session() {
 fn clicking_status_sign_in_opens_login_modal() {
     let dir = tmpdir("statusclick");
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    app.connected = true;
+    app.jobs.connected = true;
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal.draw(|frame| paint(frame, &mut app)).unwrap();
 
     let region = app
-        .hit_regions
+        .ui.hit_regions
         .iter()
         .find(|hr| hr.target == HitTarget::OpenLogin)
         .cloned()
         .expect("OpenLogin hit region should be registered");
     app.dispatch_click(region.rect.x, region.rect.y);
-    assert!(matches!(app.modal, Some(Modal::Login(_))));
+    assert!(matches!(app.ui.modal, Some(Modal::Login(_))));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -258,22 +258,22 @@ async fn welcome_path_mode_supports_arrow_selection_and_enter() {
 
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
     app.open_welcome();
-    if let Some(w) = app.welcome.as_mut() {
-        w.path_mode = true;
+    if let Some(w) = app.ui.welcome.as_mut() {
+        w.mode = WelcomeMode::OpenPath;
     }
 
     // Move Down from Alpha (0) to Beta (1), then Tab completes "Beta/"
     app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(app.welcome.as_ref().unwrap().path_selected, 1);
+    assert_eq!(app.ui.welcome.as_ref().unwrap().path_selected, 1);
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    assert_eq!(app.welcome.as_ref().unwrap().path, "Beta/");
-    assert_eq!(app.welcome.as_ref().unwrap().path_selected, 0);
+    assert_eq!(app.ui.welcome.as_ref().unwrap().path, "Beta/");
+    assert_eq!(app.ui.welcome.as_ref().unwrap().path_selected, 0);
 
     // Clear, type partial lowercase "al", Down/Up stays clamped, Enter opens Alpha
-    app.welcome.as_mut().unwrap().path = "al".to_string();
+    app.ui.welcome.as_mut().unwrap().path = "al".to_string();
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.welcome.is_none());
-    assert_eq!(app.session.cwd, std::fs::canonicalize(&a).unwrap());
+    assert!(app.ui.welcome.is_none());
+    assert_eq!(app.session.current.cwd, std::fs::canonicalize(&a).unwrap());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -282,10 +282,10 @@ async fn welcome_path_mode_supports_arrow_selection_and_enter() {
 fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice() {
     let dir = tmpdir("fold");
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    app.connected = true;
+    app.jobs.connected = true;
 
-    let uid = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::User {
+    let uid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::User {
         id: uid,
         text: "run checks".into(),
         mode: "Agent".into(),
@@ -294,8 +294,8 @@ fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice
     });
 
     // Cross-step tools separated by an empty collapsed-thought Assistant turn
-    let t1 = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::Tool {
+    let t1 = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Tool {
         id: t1,
         call_id: "c1".into(),
         name: "read".into(),
@@ -310,8 +310,8 @@ fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice
         exit_code: Some(0),
         started_ms: now_ms(),
     });
-    let aid = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::Assistant {
+    let aid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Assistant {
         id: aid,
         text: String::new(),
         reasoning: "internal step".into(),
@@ -320,8 +320,8 @@ fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice
         done: true,
         error: None,
     });
-    let t2 = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::Tool {
+    let t2 = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Tool {
         id: t2,
         call_id: "c2".into(),
         name: "monitor".into(),
@@ -339,7 +339,7 @@ fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice
 
     // MonitorFired appends onto monitor tool output instead of pushing top-level Notice
     let notice_before = app
-        .session
+        .session.current
         .items
         .iter()
         .filter(|i| matches!(i, TranscriptItem::Notice { .. }))
@@ -357,15 +357,15 @@ fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice
         },
     );
     let notice_after = app
-        .session
+        .session.current
         .items
         .iter()
         .filter(|i| matches!(i, TranscriptItem::Notice { .. }))
         .count();
     assert_eq!(notice_before, notice_after);
 
-    let rid = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::Assistant {
+    let rid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Assistant {
         id: rid,
         text: "Final summary ready.".into(),
         reasoning: String::new(),
@@ -399,7 +399,7 @@ fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice
 
     // Click group -> expands with [collapse]; click [collapse] -> folds again
     let grp = app
-        .hit_regions
+        .ui.hit_regions
         .iter()
         .find(|hr| matches!(hr.target, HitTarget::ToggleToolGroup(_)))
         .unwrap()
@@ -420,13 +420,13 @@ fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice
     );
 
     let col_btn = app
-        .hit_regions
+        .ui.hit_regions
         .iter()
         .find(|hr| matches!(hr.target, HitTarget::ToggleToolGroup(_)))
         .unwrap()
         .rect;
     app.dispatch_click(col_btn.x, col_btn.y);
-    assert!(app.expanded_explore_groups.is_empty());
+    assert!(app.session.expanded_explore_groups.is_empty());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -472,7 +472,7 @@ fn lists_keep_nesting_and_code_fences_share_a_column() {
 fn settled_turn_folds_edits_explores_and_commands() {
     let dir = tmpdir("foldsum");
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
-    app.connected = true;
+    app.jobs.connected = true;
     app.apply_event(
         1,
         AgentEvent::FileChanged {
@@ -485,8 +485,8 @@ fn settled_turn_folds_edits_explores_and_commands() {
             restorable_before: true,
         },
     );
-    let uid = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::User {
+    let uid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::User {
         id: uid,
         text: "fix it".into(),
         mode: "Agent".into(),
@@ -498,8 +498,8 @@ fn settled_turn_folds_edits_explores_and_commands() {
         ("read", "read src/a.rs"),
         ("exec", "$ cargo test"),
     ] {
-        let id = app.session.alloc_id();
-        app.session.items.push(TranscriptItem::Tool {
+        let id = app.session.current.alloc_id();
+        app.session.current.items.push(TranscriptItem::Tool {
             id,
             call_id: id.to_string(),
             name: name.into(),
@@ -515,8 +515,8 @@ fn settled_turn_folds_edits_explores_and_commands() {
             started_ms: now_ms(),
         });
     }
-    let aid = app.session.alloc_id();
-    app.session.items.push(TranscriptItem::Assistant {
+    let aid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Assistant {
         id: aid,
         text: "Done.".into(),
         reasoning: "looking".into(),
@@ -538,7 +538,7 @@ fn settled_turn_folds_edits_explores_and_commands() {
             .collect::<String>()
     };
 
-    app.agent_running = true;
+    app.agent.running = true;
     let live = draw(&mut app, &mut terminal);
     assert!(
         !live.contains("Edited src/a.rs") && !live.contains('✓'),
@@ -550,8 +550,8 @@ fn settled_turn_folds_edits_explores_and_commands() {
     );
     assert!(!live.contains("● ▍"), "no stray caret:\n{live}");
 
-    let thinking = app.session.alloc_id();
-    app.session.items.insert(
+    let thinking = app.session.current.alloc_id();
+    app.session.current.items.insert(
         1,
         TranscriptItem::Assistant {
             id: thinking,
@@ -572,10 +572,10 @@ fn settled_turn_folds_edits_explores_and_commands() {
         !with_caret.contains("● ▍"),
         "caret stays gone:\n{with_caret}"
     );
-    app.session.items.remove(1);
+    app.session.current.items.remove(1);
 
-    app.agent_running = false;
-    if let Some(TranscriptItem::Assistant { done, .. }) = app.session.items.last_mut() {
+    app.agent.running = false;
+    if let Some(TranscriptItem::Assistant { done, .. }) = app.session.current.items.last_mut() {
         *done = true;
     }
     let settled = draw(&mut app, &mut terminal);

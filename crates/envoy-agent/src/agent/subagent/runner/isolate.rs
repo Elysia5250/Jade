@@ -60,7 +60,9 @@ pub(super) async fn run_tasks(
     let mut jobs = Vec::new();
     let mut pending = Vec::new();
     let mut cleanup = WorktreeCleanup {
-        paths: Vec::new(),
+        session: session.clone(),
+        data_dir: data_dir.clone(),
+        entries: Vec::new(),
         armed: true,
     };
     for task in runnable {
@@ -78,7 +80,9 @@ pub(super) async fn run_tasks(
                 child.cwd = created.path.clone();
                 let mut task = task;
                 task.input.prompt.push_str(&isolation_note(&created.path));
-                cleanup.paths.push(created.path.clone());
+                cleanup
+                    .entries
+                    .push((created.path.clone(), created.branch.clone()));
                 pending.push(PendingTree {
                     index: task.index,
                     path: created.path,
@@ -247,7 +251,9 @@ async fn refuse_writers(
 }
 
 struct WorktreeCleanup {
-    paths: Vec<std::path::PathBuf>,
+    session: std::path::PathBuf,
+    data_dir: std::path::PathBuf,
+    entries: Vec<(std::path::PathBuf, String)>,
     armed: bool,
 }
 
@@ -256,8 +262,10 @@ impl Drop for WorktreeCleanup {
         if !self.armed {
             return;
         }
-        for path in &self.paths {
+        for (path, branch) in &self.entries {
             let _ = task::remove_tree_at(path);
+            let _ = task::delete_branch(&self.session, branch);
+            let _ = set_workspace_trusted(&self.data_dir, path, false);
         }
     }
 }

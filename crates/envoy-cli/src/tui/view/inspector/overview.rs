@@ -11,17 +11,17 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
     push_section_header(
         &mut rows,
         "CHANGED FILES",
-        &format!("{}", app.session.changed_files.len()),
+        &format!("{}", app.session.current.changed_files.len()),
         theme,
     );
-    if app.session.changed_files.is_empty() {
+    if app.session.current.changed_files.is_empty() {
         rows.push(LinkedLine::from_line(Line::styled(
             "  none yet (click any path to preview)",
             Style::default().fg(theme.dim),
         )));
     } else {
-        for (idx, fc) in app.session.changed_files.iter().enumerate().rev().take(12) {
-            let rel = links::display_rel(&app.session.cwd, std::path::Path::new(&fc.path));
+        for (idx, fc) in app.session.current.changed_files.iter().enumerate().rev().take(12) {
+            let rel = links::display_rel(&app.session.current.cwd, std::path::Path::new(&fc.path));
             let stats = format!(" +{} -{}", fc.added, fc.removed);
             let name_budget = w.saturating_sub(display_width(&stats) + 4).max(8);
             let shown = truncate_width(&rel, name_budget);
@@ -99,7 +99,7 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
     // 3. Context & Session
     push_section_header(&mut rows, "SESSION & CONTEXT", "", theme);
     if app.inputs.catalog.signed_in {
-        let (used, est) = context_used(&app.session);
+        let (used, est) = context_used(&app.session.current);
         let window = app.inputs.catalog.compact_at;
         let tier = app.inputs.catalog.tier.clone();
         let model_id = app.inputs.catalog.model_id.clone();
@@ -131,8 +131,8 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
             Span::styled(
                 format!(
                     "in {} - out {}",
-                    fmt_tokens(app.session.input_tokens),
-                    fmt_tokens(app.session.output_tokens)
+                    fmt_tokens(app.session.current.input_tokens),
+                    fmt_tokens(app.session.current.output_tokens)
                 ),
                 Style::default().fg(theme.text),
             ),
@@ -205,10 +205,10 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
     rows.push(LinkedLine::from_line(Line::from("")));
 
     // 5. Active & Recent Monitors
-    if !app.active_monitors.is_empty() {
-        let active_n = app.active_monitors.iter().filter(|m| m.active).count();
+    if !app.agent.active_monitors.is_empty() {
+        let active_n = app.agent.active_monitors.iter().filter(|m| m.active).count();
         push_section_header(&mut rows, "MONITORS", &format!("{active_n} active"), theme);
-        for m in app.active_monitors.iter().take(8) {
+        for m in app.agent.active_monitors.iter().take(8) {
             let (glyph, color) = if m.active {
                 ("*", theme.ok)
             } else {
@@ -253,21 +253,21 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
     }
 
     // 6. Detached Jobs
-    push_section_header(&mut rows, "jobs", &format!("{}", app.jobs.len()), theme);
-    if app.jobs.is_empty() {
+    push_section_header(&mut rows, "jobs", &format!("{}", app.jobs.list.len()), theme);
+    if app.jobs.list.is_empty() {
         rows.push(LinkedLine::from_line(Line::styled(
             "  none",
             Style::default().fg(theme.dim),
         )));
     } else {
-        for (idx, job) in app.jobs.iter().enumerate() {
+        for (idx, job) in app.jobs.list.iter().enumerate() {
             let (glyph, color) = match &job.state {
-                JobState::Queued { .. } => ("o", theme.warn),
-                JobState::Running { .. } => ("*", theme.ok),
-                JobState::Done { result, .. } if result.ok() => ("✓", theme.dim),
-                JobState::Done { .. } => ("✗", theme.bad),
+                ProtoJobState::Queued { .. } => ("o", theme.warn),
+                ProtoJobState::Running { .. } => ("*", theme.ok),
+                ProtoJobState::Done { result, .. } if result.ok() => ("✓", theme.dim),
+                ProtoJobState::Done { .. } => ("✗", theme.bad),
             };
-            let selected = app.focus == Focus::Sidebar && idx == app.job_selected;
+            let selected = app.ui.focus == Focus::Sidebar && idx == app.jobs.selected;
             let cmd = truncate_width(&job.command(), w.saturating_sub(8));
             let mut line = LinkedLine::from_linked(vec![
                 LinkedSpan {
@@ -286,10 +286,10 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
         }
     }
 
-    let max_scroll = (rows.len() as u16).saturating_sub(area.height);
-    app.inspector.max_scroll = max_scroll;
-    app.inspector.scroll = app.inspector.scroll.min(max_scroll);
-    push_linked_rows(frame, app, &rows, app.inspector.scroll, area);
+    let max_scroll = rows.len().saturating_sub(area.height as usize);
+    app.ui.inspector.max_scroll = max_scroll;
+    app.ui.inspector.scroll = app.ui.inspector.scroll.min(max_scroll);
+    push_linked_rows(frame, app, &rows, app.ui.inspector.scroll, area);
 }
 
 fn push_section_header(rows: &mut Vec<LinkedLine>, title: &str, meta: &str, theme: &Theme) {

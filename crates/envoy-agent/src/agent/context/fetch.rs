@@ -11,6 +11,18 @@ use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
 
+pub async fn refresh_active_provider_models(data_dir: &Path) -> Option<(String, Vec<ListedModel>)> {
+    let (prov, _) = crate::auth::resolve_provider_with_overrides(data_dir, None)?;
+    let http = crate::agent::shared_http_client().ok()?;
+    let bg_http = http.clone();
+    let bg_dir = data_dir.to_path_buf();
+    tokio::spawn(async move {
+        super::refresh_models_dev_if_stale(&bg_http, &bg_dir).await;
+    });
+    let list = fetch_provider_models(&http, Some(data_dir), &prov).await;
+    Some((prov.id, list))
+}
+
 pub async fn fetch_provider_models(
     http: &reqwest::Client,
     data_dir: Option<&Path>,
@@ -221,6 +233,7 @@ mod tests {
             base_url: "https://api.deepseek.com/v1".into(),
             credential: Credential::ApiKey { key: "sk".into() },
             custom_models: Vec::new(),
+            fetched_models: Vec::new(),
             model_routes: std::collections::BTreeMap::new(),
             updated_ms: 0,
         };
@@ -233,6 +246,7 @@ mod tests {
                 key: "sk-ant".into(),
             },
             custom_models: vec!["claude-test".into()],
+            fetched_models: Vec::new(),
             model_routes: std::collections::BTreeMap::new(),
             updated_ms: 0,
         };

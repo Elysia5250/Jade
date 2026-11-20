@@ -6,18 +6,18 @@ pub(super) fn draw_output_view(frame: &mut Frame, app: &mut App, theme: &Theme, 
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     let tool_item = app
-        .inspector
+        .ui.inspector
         .output_item_id
-        .and_then(|id| app.session.items.iter().find(|i| i.id() == id))
+        .and_then(|id| app.session.current.items.iter().find(|i| i.id() == id))
         .or_else(|| {
-            app.inspector.output_job_id.and_then(|jid| {
-                app.session.items.iter().find(
+            app.ui.inspector.output_job_id.and_then(|jid| {
+                app.session.current.items.iter().find(
                     |i| matches!(i, TranscriptItem::Tool { job_id: Some(j), .. } if *j == jid),
                 )
             })
         })
         .or_else(|| {
-            app.session
+            app.session.current
                 .items
                 .iter()
                 .rev()
@@ -100,11 +100,11 @@ pub(super) fn draw_output_view(frame: &mut Frame, app: &mut App, theme: &Theme, 
         ));
     }
 
-    let max_scroll = (lines.len() as u16).saturating_sub(area.height);
-    app.inspector.max_scroll = max_scroll;
-    app.inspector.scroll = app.inspector.scroll.min(max_scroll);
-    frame.render_widget(
-        Paragraph::new(lines).scroll((app.inspector.scroll, 0)),
+    super::render_scrolled_lines(
+        frame,
+        lines,
+        &mut app.ui.inspector.scroll,
+        &mut app.ui.inspector.max_scroll,
         area,
     );
 }
@@ -114,10 +114,10 @@ pub(super) fn draw_inspect_view(frame: &mut Frame, app: &mut App, theme: &Theme,
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     let item = app
-        .inspector
+        .ui.inspector
         .inspect_item_id
-        .and_then(|id| app.session.items.iter().find(|i| i.id() == id))
-        .or_else(|| app.selected_card.and_then(|idx| app.session.items.get(idx)));
+        .and_then(|id| app.session.current.items.iter().find(|i| i.id() == id))
+        .or_else(|| app.ui.selected_card.and_then(|idx| app.session.current.items.get(idx)));
 
     if let Some(TranscriptItem::Tool {
         call_id,
@@ -248,11 +248,11 @@ pub(super) fn draw_inspect_view(frame: &mut Frame, app: &mut App, theme: &Theme,
         }
     }
 
-    let max_scroll = (lines.len() as u16).saturating_sub(area.height);
-    app.inspector.max_scroll = max_scroll;
-    app.inspector.scroll = app.inspector.scroll.min(max_scroll);
-    frame.render_widget(
-        Paragraph::new(lines).scroll((app.inspector.scroll, 0)),
+    super::render_scrolled_lines(
+        frame,
+        lines,
+        &mut app.ui.inspector.scroll,
+        &mut app.ui.inspector.max_scroll,
         area,
     );
 }

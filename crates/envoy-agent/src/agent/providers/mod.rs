@@ -17,7 +17,7 @@ mod sse;
 #[cfg(test)]
 pub(crate) use anthropic_body::{anthropic_messages, mark_last_tool, system_blocks};
 #[cfg(test)]
-pub(crate) use openai_chat_body::chat_messages;
+pub(crate) use openai_chat_body::{chat_body, chat_messages};
 #[cfg(test)]
 pub(crate) use openai_codex::codex_request_body;
 

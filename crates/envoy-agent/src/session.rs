@@ -8,7 +8,6 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_OUTPUT_LINES_PER_CARD: usize = 2000;
 
@@ -556,10 +555,7 @@ fn new_session_id(now_ms: u64) -> String {
 }
 
 pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+    envoy_core::now_ms()
 }
 
 #[cfg(test)]

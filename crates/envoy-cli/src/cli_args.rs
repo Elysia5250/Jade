@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 use envoy_proto::{SandboxPolicy, SubmitRequest, TaskSpec, DEFAULT_GROUP};
 use std::path::PathBuf;
 
-use envoy_agent::mcp;
+use crate::mcp_cli;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Commands {
@@ -101,7 +101,7 @@ pub(crate) enum Commands {
     /// Model Context Protocol (MCP) server over stdio.
     Mcp {
         #[command(subcommand)]
-        cmd: mcp::McpCmd,
+        cmd: mcp_cli::McpCmd,
     },
 }
 

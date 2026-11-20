@@ -7,7 +7,7 @@ mod methods;
 impl App {
     pub(in crate::tui) fn open_login_modal(&mut self) {
         self.cancel_login_bg();
-        self.modal = Some(Modal::Login(LoginModal::SelectProvider {
+        self.ui.modal = Some(Modal::Login(LoginModal::SelectProvider {
             filter: String::new(),
             selected: 0,
         }));
@@ -31,18 +31,18 @@ impl App {
     }
 
     pub(in crate::tui) fn cancel_login_bg(&mut self) {
-        if let Some(tx) = self.login_cancel.take() {
+        if let Some(tx) = self.login.cancel.take() {
             let _ = tx.send(());
         }
-        if let Some(h) = self.login_task.take() {
+        if let Some(h) = self.login.task.take() {
             h.abort();
         }
-        self.login_rx = None;
+        self.login.rx = None;
     }
 
     pub(in crate::tui) fn finish_login(&mut self, pname: &str, kind: &str, mref: &ModelRef) {
-        self.mode = InputMode::Agent;
-        self.modal = None;
+        self.ui.mode = InputMode::Agent;
+        self.ui.modal = None;
         let fetching = mref.model_id.is_empty() && self.spawn_model_refresh();
         let toast = if fetching {
             format!("connected {pname} ({kind}) - fetching models")
@@ -71,7 +71,7 @@ impl App {
     }
 
     pub(in crate::tui) fn drain_login_from(&mut self, first: Option<LoginEvent>) -> bool {
-        let mut rx = self.login_rx.take();
+        let mut rx = self.login.rx.take();
         let mut queued = Vec::new();
         if let Some(ev) = first {
             queued.push(ev);
@@ -91,13 +91,27 @@ impl App {
         }
         if queued.is_empty() {
             if alive {
-                self.login_rx = rx;
+                self.login.rx = rx;
             }
             return false;
         }
         let mut keep = true;
         for ev in queued {
             match ev {
+                LoginEvent::OpenAiBrowserBound {
+                    url: next_url,
+                    redirect_uri: next_redirect,
+                } => {
+                    if let Some(Modal::Login(LoginModal::OAuthBrowser {
+                        url,
+                        redirect_uri,
+                        ..
+                    })) = self.ui.modal.as_mut()
+                    {
+                        *url = next_url;
+                        *redirect_uri = next_redirect;
+                    }
+                }
                 LoginEvent::OpenAiDeviceStarted {
                     verification_url,
                     user_code,
@@ -107,7 +121,7 @@ impl App {
                         user_code: uc,
                         status,
                         ..
-                    })) = self.modal.as_mut()
+                    })) = self.ui.modal.as_mut()
                     {
                         *verification_uri = verification_url;
                         *uc = user_code;
@@ -124,7 +138,7 @@ impl App {
                         user_code: uc,
                         status,
                         ..
-                    })) = self.modal.as_mut()
+                    })) = self.ui.modal.as_mut()
                     {
                         *vu = verification_uri;
                         *uc = user_code;
@@ -138,15 +152,15 @@ impl App {
                         Ok(mref) => self.finish_login(&pname, kind, &mref),
                         Err(e) => {
                             self.set_toast(format!("{e:#}"), true);
-                            self.modal = None;
+                            self.ui.modal = None;
                         }
                     }
-                    self.login_task = None;
-                    self.login_cancel = None;
+                    self.login.task = None;
+                    self.login.cancel = None;
                     keep = false;
                 }
                 LoginEvent::Error(err) => {
-                    match self.modal.as_mut() {
+                    match self.ui.modal.as_mut() {
                         Some(Modal::Login(LoginModal::OAuthDevice { error, .. })) => {
                             *error = Some(err);
                         }
@@ -160,14 +174,14 @@ impl App {
                         }
                         _ => self.set_toast(err, true),
                     }
-                    self.login_task = None;
-                    self.login_cancel = None;
+                    self.login.task = None;
+                    self.login.cancel = None;
                     keep = false;
                 }
             }
         }
         if keep && alive {
-            self.login_rx = rx;
+            self.login.rx = rx;
         }
         true
     }
