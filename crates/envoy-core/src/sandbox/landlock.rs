@@ -4,25 +4,45 @@ use super::{create_scratch_dir, LandlockPlan, PreparedCommand};
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 
-#[allow(dead_code)]
+/// Bit masks used by the Linux enforcer and by tests. On macOS the library
+/// build never calls them, so they stay out of that build and Clippy does not
+/// flag them as dead.
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const LANDLOCK_ACCESS_FS_EXECUTE: u64 = 1 << 0;
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const LANDLOCK_ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const LANDLOCK_ACCESS_FS_READ_FILE: u64 = 1 << 2;
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const LANDLOCK_ACCESS_FS_READ_DIR: u64 = 1 << 3;
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const LANDLOCK_ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const LANDLOCK_ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const LANDLOCK_ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const LANDLOCK_ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const LANDLOCK_ACCESS_FS_MAKE_REG: u64 = 1 << 8;
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const LANDLOCK_ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const LANDLOCK_ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const LANDLOCK_ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const LANDLOCK_ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const LANDLOCK_ACCESS_FS_REFER: u64 = 1 << 13;
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const LANDLOCK_ACCESS_FS_TRUNCATE: u64 = 1 << 14;
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const LANDLOCK_ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
 
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const FS_READ: u64 = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) const FS_WRITE: u64 = LANDLOCK_ACCESS_FS_WRITE_FILE
     | LANDLOCK_ACCESS_FS_REMOVE_DIR
     | LANDLOCK_ACCESS_FS_REMOVE_FILE
@@ -36,7 +56,8 @@ pub(crate) const FS_WRITE: u64 = LANDLOCK_ACCESS_FS_WRITE_FILE
     | LANDLOCK_ACCESS_FS_REFER
     | LANDLOCK_ACCESS_FS_TRUNCATE
     | LANDLOCK_ACCESS_FS_IOCTL_DEV;
-#[allow(dead_code)]
+
+#[cfg(target_os = "linux")]
 pub(crate) const FS_FILE_ALLOWED: u64 = LANDLOCK_ACCESS_FS_EXECUTE
     | LANDLOCK_ACCESS_FS_WRITE_FILE
     | LANDLOCK_ACCESS_FS_READ_FILE
@@ -59,6 +80,7 @@ const SYSTEM_RO_ROOTS: &[&str] = &[
     "/run/systemd/resolve",
 ];
 
+#[cfg(any(test, target_os = "linux"))]
 pub(crate) fn handled_fs_mask(abi: u32) -> u64 {
     let mut fs_mask = FS_READ | FS_WRITE | LANDLOCK_ACCESS_FS_EXECUTE;
     if abi < 2 {
