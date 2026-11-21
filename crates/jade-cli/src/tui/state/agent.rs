@@ -475,9 +475,15 @@ impl App {
             self.persist_session();
         }
         // The daemon is authoritative: a console that missed a TurnDone must
-        // not stay stuck in "running".
-        self.agent.running = running;
-        if running {
+        // not stay stuck in "running". Keep running armed when a pending prompt
+        // in the outbox is about to be flushed right below.
+        let flushing_prompt = self
+            .agent
+            .outbox
+            .iter()
+            .any(|(_, _, mode)| matches!(mode, SendMode::Prompt));
+        self.agent.running = running || flushing_prompt;
+        if self.agent.running {
             self.agent.turn_started_at.get_or_insert_with(Instant::now);
         } else {
             self.agent.turn_started_at = None;

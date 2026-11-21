@@ -55,6 +55,9 @@ impl App {
 
     pub(in crate::tui) fn handle_side_key(&mut self, key: KeyEvent) -> Action {
         if key.code == KeyCode::Esc {
+            if self.has_interruptible_work() {
+                return self.esc_interrupt();
+            }
             self.ui.focus = Focus::Input;
             return Action::None;
         }

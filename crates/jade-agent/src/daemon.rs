@@ -59,10 +59,40 @@ fn xml_escape(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+fn launchd_path_env(exe: &Path) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut push = |entry: String| {
+        if !entry.is_empty() && !parts.iter().any(|p| p == &entry) {
+            parts.push(entry);
+        }
+    };
+    if let Some(parent) = exe.parent().and_then(|p| p.to_str()) {
+        push(parent.to_string());
+    }
+    if let Ok(current) = std::env::var("PATH") {
+        for seg in current.split(':') {
+            push(seg.to_string());
+        }
+    }
+    for fallback in [
+        "/opt/homebrew/bin",
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ] {
+        push(fallback.to_string());
+    }
+    parts.join(":")
+}
+
 pub fn launchd_plist(exe: &Path, data_dir: &Path) -> String {
-    let exe = xml_escape(&exe.display().to_string());
+    let exe_str = xml_escape(&exe.display().to_string());
     let dir = xml_escape(&data_dir.display().to_string());
     let log = xml_escape(&log_path(data_dir).display().to_string());
+    let path_env = xml_escape(&launchd_path_env(exe));
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
@@ -71,13 +101,20 @@ pub fn launchd_plist(exe: &Path, data_dir: &Path) -> String {
          \x20 <key>Label</key><string>{LAUNCHD_LABEL}</string>\n\
          \x20 <key>ProgramArguments</key>\n\
          \x20 <array>\n\
-         \x20   <string>{exe}</string>\n\
+         \x20   <string>{exe_str}</string>\n\
          \x20   <string>--data-dir</string>\n\
          \x20   <string>{dir}</string>\n\
          \x20   <string>serve</string>\n\
          \x20 </array>\n\
+         \x20 <key>EnvironmentVariables</key>\n\
+         \x20 <dict>\n\
+         \x20   <key>PATH</key><string>{path_env}</string>\n\
+         \x20 </dict>\n\
          \x20 <key>RunAtLoad</key><true/>\n\
-         \x20 <key>KeepAlive</key><true/>\n\
+         \x20 <key>KeepAlive</key>\n\
+         \x20 <dict>\n\
+         \x20   <key>SuccessfulExit</key><false/>\n\
+         \x20 </dict>\n\
          \x20 <key>ProcessType</key><string>Background</string>\n\
          \x20 <key>StandardOutPath</key><string>{log}</string>\n\
          \x20 <key>StandardErrorPath</key><string>{log}</string>\n\
@@ -112,32 +149,55 @@ fn run(cmd: &mut std::process::Command) -> Result<()> {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn launchd_domain() -> String {
+    format!("gui/{}", unsafe { libc::getuid() })
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl_install(path: &Path) -> Result<()> {
+    let domain = launchd_domain();
+    let service = format!("{domain}/{LAUNCHD_LABEL}");
+    let plist = path.display().to_string();
+    let _ = run(std::process::Command::new("launchctl").args(["bootout", &service]));
+    if run(std::process::Command::new("launchctl").args(["bootstrap", &domain, &plist])).is_ok() {
+        return Ok(());
+    }
+    let _ = run(std::process::Command::new("launchctl").args(["unload", &plist]));
+    run(std::process::Command::new("launchctl").args(["load", "-w", &plist]))
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl_uninstall(path: &Path) {
+    let service = format!("{}/{LAUNCHD_LABEL}", launchd_domain());
+    let plist = path.display().to_string();
+    if run(std::process::Command::new("launchctl").args(["bootout", &service])).is_err() {
+        let _ = run(std::process::Command::new("launchctl").args(["unload", "-w", &plist]));
+    }
+}
+
 /// Install a user-level autostart unit for `jade serve`.
 ///
 /// The daemon keeps the local socket and the conduit accept pool; launching it
 /// through the OS is what makes it survive logout/reboot.
 pub fn install(exe: &Path, data_dir: &Path) -> Result<String> {
     std::fs::create_dir_all(data_dir)?;
-    if cfg!(target_os = "macos") {
+    #[cfg(target_os = "macos")]
+    {
         let path = launchd_plist_path()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(&path, launchd_plist(exe, data_dir))?;
-        let _ =
-            run(std::process::Command::new("launchctl")
-                .args(["unload", &path.display().to_string()]));
-        run(std::process::Command::new("launchctl").args([
-            "load",
-            "-w",
-            &path.display().to_string(),
-        ]))?;
+        launchctl_install(&path)?;
         Ok(format!(
             "installed and loaded {} (logs: {})",
             path.display(),
             log_path(data_dir).display()
         ))
-    } else {
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
         let path = systemd_unit_path()?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -158,18 +218,17 @@ pub fn install(exe: &Path, data_dir: &Path) -> Result<String> {
 }
 
 pub fn uninstall() -> Result<String> {
-    if cfg!(target_os = "macos") {
+    #[cfg(target_os = "macos")]
+    {
         let path = launchd_plist_path()?;
         if path.exists() {
-            let _ = run(std::process::Command::new("launchctl").args([
-                "unload",
-                "-w",
-                &path.display().to_string(),
-            ]));
+            launchctl_uninstall(&path);
             std::fs::remove_file(&path)?;
         }
         Ok(format!("uninstalled {}", path.display()))
-    } else {
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
         let path = systemd_unit_path()?;
         if path.exists() {
             let _ = run(std::process::Command::new("systemctl").args([
@@ -518,6 +577,11 @@ mod tests {
         assert!(plist.contains("<string>/Users/u/.local/bin/jade</string>"));
         assert!(plist.contains("<string>/Users/u/.jade</string>"));
         assert!(plist.contains("<string>serve</string>"));
+        assert!(plist.contains("<key>EnvironmentVariables</key>"));
+        assert!(plist.contains("<key>PATH</key>"));
+        assert!(plist.contains("/opt/homebrew/bin"));
+        assert!(plist.contains("<key>SuccessfulExit</key><false/>"));
+        assert!(!plist.contains("<key>KeepAlive</key><true/>"));
         assert!(plist.contains("StandardErrorPath"));
 
         let unit = systemd_unit(exe, dir);

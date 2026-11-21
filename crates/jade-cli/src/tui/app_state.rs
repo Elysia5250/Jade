@@ -82,6 +82,8 @@ pub(crate) struct UiState {
     pub(crate) modal_rect: Option<Rect>,
     pub(crate) modal_cursor: usize,
     pub(crate) theme: usize,
+    pub(crate) truecolor: bool,
+    pub(crate) last_scroll_at: Option<Instant>,
     pub(crate) leader_at: Option<Instant>,
     /// Set by the first `Esc` of a double-`Esc` interrupt.
     pub(crate) interrupt_at: Option<Instant>,

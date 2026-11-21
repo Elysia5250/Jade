@@ -105,6 +105,8 @@ impl App {
                 modal_rect: None,
                 modal_cursor: 0,
                 theme: prefs.theme % THEMES.len(),
+                truecolor: true,
+                last_scroll_at: None,
                 leader_at: None,
                 interrupt_at: None,
                 toast: None,
@@ -128,7 +130,12 @@ impl App {
     }
 
     pub(in crate::tui) fn theme(&self) -> Theme {
-        THEMES[self.ui.theme].1
+        let base = THEMES[self.ui.theme].1;
+        if self.ui.truecolor {
+            base
+        } else {
+            base.to_ansi256()
+        }
     }
 
     pub(in crate::tui) fn load_existing_session(&mut self, mut loaded: Session) {

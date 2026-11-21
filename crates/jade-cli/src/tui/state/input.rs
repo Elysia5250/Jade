@@ -30,27 +30,27 @@ impl App {
             return self.handle_ask_key(key);
         }
         if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Up {
-            if let Some(last) = self.agent.queued.pop_back() {
-                // A queued item can be in two places: the local outbox while
-                // offline, or the daemon's follow-up queue. Remove it from
-                // both before putting it back in the editor.
-                self.remove_outbox(&last);
-                self.recall_queued();
-                self.ui.input = last;
-                self.ui.input_cursor = self.ui.input.chars().count();
-                self.ui.focus = Focus::Input;
-            } else {
-                // The console may have restarted while the daemon still had
-                // follow-ups queued; ask it for the last one.
-                self.recall_queued();
-            }
-            return Action::None;
+            return self.recall_last_queued();
         }
 
         // Leader prefix (`ctrl+x`)
         if let Some(at) = self.ui.leader_at.take() {
             if at.elapsed() <= LEADER_TIMEOUT {
                 if let KeyCode::Char(c) = key.code {
+                    match c {
+                        '1' => return self.focus_inspector_tab(InspectorTab::Overview),
+                        '2' => return self.focus_inspector_tab(InspectorTab::Diff),
+                        '3' => return self.focus_inspector_tab(InspectorTab::File),
+                        '4' => return self.focus_inspector_tab(InspectorTab::Output),
+                        '5' => return self.focus_inspector_tab(InspectorTab::Inspect),
+                        'M' => return Action::ToggleMouseCapture,
+                        'r' => return self.recall_last_queued(),
+                        'v' => {
+                            self.paste_from_clipboard();
+                            return Action::None;
+                        }
+                        _ => {}
+                    }
                     let cmd = match c {
                         'q' => Some(Command::Quit),
                         'n' => Some(Command::NewSession),
@@ -86,7 +86,7 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('c') => {
-                    if self.agent.running {
+                    if self.has_interruptible_work() {
                         return Action::Cancel;
                     }
                     return Action::Quit;
@@ -215,7 +215,7 @@ impl App {
                 Action::None
             }
             KeyCode::Esc => {
-                if self.agent.running {
+                if self.has_interruptible_work() {
                     return self.esc_interrupt();
                 }
                 self.ui.focus = Focus::Input;
@@ -361,6 +361,31 @@ impl App {
             KeyCode::Char('r') => Action::Refresh,
             _ => Action::None,
         }
+    }
+
+    pub(in crate::tui) fn has_interruptible_work(&self) -> bool {
+        self.agent.running
+            || self.subagent_running()
+            || !self.jobs.shell_watches.is_empty()
+            || !self.agent.outbox.is_empty()
+    }
+
+    pub(in crate::tui) fn recall_last_queued(&mut self) -> Action {
+        if let Some(last) = self.agent.queued.pop_back() {
+            // A queued item can be in two places: the local outbox while
+            // offline, or the daemon's follow-up queue. Remove it from
+            // both before putting it back in the editor.
+            self.remove_outbox(&last);
+            self.recall_queued();
+            self.ui.input = last;
+            self.ui.input_cursor = self.ui.input.chars().count();
+            self.ui.focus = Focus::Input;
+        } else {
+            // The console may have restarted while the daemon still had
+            // follow-ups queued; ask it for the last one.
+            self.recall_queued();
+        }
+        Action::None
     }
 
     /// Interrupting a running turn takes two `Esc` presses. The first arms it

@@ -26,10 +26,70 @@ pub(crate) const MODE_ENHANCED: u8 = 1 << 4;
 static MODE_MASK: AtomicU8 = AtomicU8::new(0);
 static PANIC_HOOK_ONCE: Once = Once::new();
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TerminalCaps {
+    pub(crate) csi_u: bool,
+    pub(crate) truecolor: bool,
+    pub(crate) sync_update: bool,
+}
+
+impl TerminalCaps {
+    pub(crate) fn detect() -> Self {
+        detect_caps_from(|key| std::env::var(key).ok())
+    }
+}
+
+pub(crate) fn detect_caps_from<F>(get: F) -> TerminalCaps
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let term = get("TERM").unwrap_or_default();
+    let term_program = get("TERM_PROGRAM").unwrap_or_default();
+    let colorterm = get("COLORTERM").unwrap_or_default();
+    let has_env = |key: &str| get(key).is_some_and(|v| !v.is_empty());
+
+    let in_mux =
+        has_env("TMUX") || has_env("STY") || term.starts_with("tmux") || term.starts_with("screen");
+    let is_apple_terminal = term_program == "Apple_Terminal";
+
+    let csi_u = !in_mux
+        && !is_apple_terminal
+        && (has_env("KITTY_WINDOW_ID")
+            || has_env("WEZTERM_EXECUTABLE")
+            || has_env("GHOSTTY_RESOURCES_DIR")
+            || matches!(
+                term_program.as_str(),
+                "iTerm.app" | "WezTerm" | "ghostty" | "vscode" | "WarpTerminal" | "rio"
+            )
+            || matches!(
+                term.as_str(),
+                "xterm-kitty" | "xterm-ghostty" | "alacritty" | "foot" | "foot-extra"
+            ));
+
+    let colorterm_lower = colorterm.to_ascii_lowercase();
+    let explicit_truecolor =
+        colorterm_lower.contains("truecolor") || colorterm_lower.contains("24bit");
+    let truecolor = explicit_truecolor
+        || (!is_apple_terminal
+            && !matches!(
+                term.as_str(),
+                "dumb" | "vt100" | "xterm" | "xterm-color" | "ansi"
+            ));
+
+    let sync_update = !is_apple_terminal && term != "dumb";
+
+    TerminalCaps {
+        csi_u,
+        truecolor,
+        sync_update,
+    }
+}
+
 pub(crate) struct Tui {
     pub(super) terminal: Terminal<CrosstermBackend<Stdout>>,
     pub(super) enhanced_keys: bool,
     pub(super) mouse_capture: bool,
+    pub(super) caps: TerminalCaps,
 }
 
 fn install_panic_hook() {
@@ -100,25 +160,6 @@ impl Drop for EntryRollback {
     }
 }
 
-fn terminal_supports_csi_u() -> bool {
-    if std::env::var_os("KITTY_WINDOW_ID").is_some()
-        || std::env::var_os("WEZTERM_EXECUTABLE").is_some()
-        || std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some()
-    {
-        return true;
-    }
-    if matches!(
-        std::env::var("TERM_PROGRAM").as_deref(),
-        Ok("iTerm.app" | "WezTerm" | "ghostty" | "vscode" | "WarpTerminal" | "rio")
-    ) {
-        return true;
-    }
-    matches!(
-        std::env::var("TERM").as_deref(),
-        Ok("xterm-kitty" | "xterm-ghostty" | "alacritty" | "foot" | "foot-extra")
-    )
-}
-
 impl Tui {
     pub(super) fn enter() -> Result<Self> {
         install_panic_hook();
@@ -131,8 +172,9 @@ impl Tui {
         MODE_MASK.fetch_or(MODE_MOUSE, Ordering::AcqRel);
         execute!(stdout(), EnableBracketedPaste)?;
         MODE_MASK.fetch_or(MODE_PASTE, Ordering::AcqRel);
-        let enhanced_keys = terminal_supports_csi_u();
-        if enhanced_keys
+        let caps = TerminalCaps::detect();
+        let mut enhanced_keys = false;
+        if caps.csi_u
             && execute!(
                 stdout(),
                 PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
@@ -140,6 +182,7 @@ impl Tui {
             .is_ok()
         {
             MODE_MASK.fetch_or(MODE_ENHANCED, Ordering::AcqRel);
+            enhanced_keys = true;
         }
         let terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
         rollback.0 = false;
@@ -147,6 +190,7 @@ impl Tui {
             terminal,
             enhanced_keys,
             mouse_capture: true,
+            caps,
         })
     }
 
@@ -165,5 +209,55 @@ impl Tui {
 impl Drop for Tui {
     fn drop(&mut self) {
         restore_terminal_modes();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn caps(pairs: &[(&str, &str)]) -> TerminalCaps {
+        detect_caps_from(|k| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == k)
+                .map(|(_, val)| (*val).to_string())
+        })
+    }
+
+    #[test]
+    fn apple_terminal_disables_csi_u_truecolor_and_sync_update() {
+        let c = caps(&[
+            ("TERM", "xterm-256color"),
+            ("TERM_PROGRAM", "Apple_Terminal"),
+        ]);
+        assert!(!c.csi_u);
+        assert!(!c.truecolor);
+        assert!(!c.sync_update);
+    }
+
+    #[test]
+    fn tmux_suppresses_leaked_outer_csi_u() {
+        let c = caps(&[
+            ("TERM", "tmux-256color"),
+            ("TERM_PROGRAM", "ghostty"),
+            ("TMUX", "/tmp/tmux-501/default,123,0"),
+            ("COLORTERM", "truecolor"),
+        ]);
+        assert!(!c.csi_u, "must not push CSI-u through tmux");
+        assert!(c.truecolor);
+        assert!(c.sync_update);
+    }
+
+    #[test]
+    fn modern_terminals_enable_csi_u_and_truecolor() {
+        let ghostty = caps(&[("TERM", "xterm-ghostty"), ("TERM_PROGRAM", "ghostty")]);
+        assert!(ghostty.csi_u);
+        assert!(ghostty.truecolor);
+        assert!(ghostty.sync_update);
+
+        let iterm = caps(&[("TERM", "xterm-256color"), ("TERM_PROGRAM", "iTerm.app")]);
+        assert!(iterm.csi_u);
+        assert!(iterm.truecolor);
     }
 }

@@ -134,6 +134,13 @@ pub(crate) fn handle_key(text: &mut String, cursor: &mut usize, key: KeyEvent) -
     clamp_cursor(text, cursor);
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let non_text = key.modifiers.intersects(
+        KeyModifiers::CONTROL
+            | KeyModifiers::ALT
+            | KeyModifiers::SUPER
+            | KeyModifiers::META
+            | KeyModifiers::HYPER,
+    );
 
     match key.code {
         KeyCode::Left if ctrl || alt => {
@@ -221,7 +228,7 @@ pub(crate) fn handle_key(text: &mut String, cursor: &mut usize, key: KeyEvent) -
             move_word(text, cursor, 1);
             EditOutcome::Moved
         }
-        KeyCode::Char(c) if !ctrl && !alt => {
+        KeyCode::Char(c) if !non_text => {
             insert_char(text, cursor, c);
             EditOutcome::Changed
         }

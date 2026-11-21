@@ -33,6 +33,84 @@ pub(crate) struct Theme {
     pub(crate) syntax_type: Color,
 }
 
+impl Theme {
+    /// Downgrade 24-bit RGB tokens to the closest xterm 256-color palette index
+    /// for terminals without truecolor support (e.g. macOS Terminal.app).
+    pub(crate) fn to_ansi256(self) -> Self {
+        Self {
+            accent: color_to_ansi256(self.accent),
+            secondary: color_to_ansi256(self.secondary),
+            dim: color_to_ansi256(self.dim),
+            text: color_to_ansi256(self.text),
+            ok: color_to_ansi256(self.ok),
+            warn: color_to_ansi256(self.warn),
+            bad: color_to_ansi256(self.bad),
+            border: color_to_ansi256(self.border),
+            selection: color_to_ansi256(self.selection),
+            hover: color_to_ansi256(self.hover),
+            surface: color_to_ansi256(self.surface),
+            bg: color_to_ansi256(self.bg),
+            panel: color_to_ansi256(self.panel),
+            link: color_to_ansi256(self.link),
+            diff_add_bg: color_to_ansi256(self.diff_add_bg),
+            diff_add_fg: color_to_ansi256(self.diff_add_fg),
+            diff_del_bg: color_to_ansi256(self.diff_del_bg),
+            diff_del_fg: color_to_ansi256(self.diff_del_fg),
+            diff_word_add: color_to_ansi256(self.diff_word_add),
+            diff_word_del: color_to_ansi256(self.diff_word_del),
+            syntax_kw: color_to_ansi256(self.syntax_kw),
+            syntax_str: color_to_ansi256(self.syntax_str),
+            syntax_num: color_to_ansi256(self.syntax_num),
+            syntax_comment: color_to_ansi256(self.syntax_comment),
+            syntax_type: color_to_ansi256(self.syntax_type),
+        }
+    }
+}
+
+fn color_to_ansi256(color: Color) -> Color {
+    let Color::Rgb(r, g, b) = color else {
+        return color;
+    };
+    const LEVELS: [u8; 6] = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
+    let nearest_level = |v: u8| -> usize {
+        LEVELS
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, &lv)| v.abs_diff(lv))
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    };
+    let ri = nearest_level(r);
+    let gi = nearest_level(g);
+    let bi = nearest_level(b);
+    let cube_idx = (16 + 36 * ri + 6 * gi + bi) as u8;
+    let dist_sq = |a: (u8, u8, u8), c: (u8, u8, u8)| -> u32 {
+        let dr = a.0 as i32 - c.0 as i32;
+        let dg = a.1 as i32 - c.1 as i32;
+        let db = a.2 as i32 - c.2 as i32;
+        (dr * dr + dg * dg + db * db) as u32
+    };
+    let cube_dist = dist_sq((r, g, b), (LEVELS[ri], LEVELS[gi], LEVELS[bi]));
+
+    let avg = ((r as u16 + g as u16 + b as u16) / 3) as u8;
+    let gray_step = if avg < 8 {
+        0
+    } else if avg > 238 {
+        23
+    } else {
+        ((avg - 8) as usize + 5) / 10
+    }
+    .min(23);
+    let gray_val = (8 + gray_step * 10) as u8;
+    let gray_dist = dist_sq((r, g, b), (gray_val, gray_val, gray_val));
+
+    if gray_dist < cube_dist {
+        Color::Indexed((232 + gray_step) as u8)
+    } else {
+        Color::Indexed(cube_idx)
+    }
+}
+
 pub(crate) const THEMES: [(&str, Theme); 3] = [
     (
         "ink",
@@ -125,3 +203,23 @@ pub(crate) const THEMES: [(&str, Theme); 3] = [
         },
     ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ansi256_converts_all_themes_to_indexed_colors() {
+        for (_, theme) in THEMES {
+            let down = theme.to_ansi256();
+            for c in [down.bg, down.panel, down.text, down.accent, down.border] {
+                assert!(matches!(c, Color::Indexed(_)), "expected indexed: {c:?}");
+            }
+        }
+        assert_eq!(color_to_ansi256(Color::Rgb(0, 0, 0)), Color::Indexed(16));
+        assert_eq!(
+            color_to_ansi256(Color::Rgb(255, 255, 255)),
+            Color::Indexed(231)
+        );
+    }
+}

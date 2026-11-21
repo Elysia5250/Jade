@@ -224,7 +224,7 @@ impl App {
                 Action::None
             }
             KeyCode::Esc => {
-                if self.agent.running {
+                if self.has_interruptible_work() {
                     return self.esc_interrupt();
                 }
                 self.ui.focus = Focus::Transcript;
@@ -300,14 +300,24 @@ impl App {
                 self.ui.input_cursor = self.line_end_char(self.ui.input_cursor);
                 Action::None
             }
-            // Plain arrows move inside the draft like any text editor; the
-            // send history sits behind `ctrl+↑` / `ctrl+↓`.
+            // Plain arrows move inside a non-empty draft; when the composer is
+            // empty or already walking history, Up/Down also walk send history
+            // (so macOS users whose Mission Control intercepts Ctrl+Up/Down can
+            // recall history cleanly).
             KeyCode::Up => {
-                self.move_cursor_vertical(-1);
+                if self.ui.input.is_empty() || self.ui.history_pos.is_some() {
+                    self.recall_history(-1);
+                } else {
+                    self.move_cursor_vertical(-1);
+                }
                 Action::None
             }
             KeyCode::Down => {
-                self.move_cursor_vertical(1);
+                if self.ui.history_pos.is_some() {
+                    self.recall_history(1);
+                } else {
+                    self.move_cursor_vertical(1);
+                }
                 Action::None
             }
             KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -346,7 +356,14 @@ impl App {
                 self.paste_from_clipboard();
                 Action::None
             }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::ALT) => {
+            KeyCode::Char(c)
+                if !key.modifiers.intersects(
+                    KeyModifiers::ALT
+                        | KeyModifiers::SUPER
+                        | KeyModifiers::META
+                        | KeyModifiers::HYPER,
+                ) =>
+            {
                 self.insert_char(c);
                 Action::None
             }
@@ -467,6 +484,8 @@ impl App {
         let at = self.byte_index(self.ui.input_cursor);
         self.ui.input.insert(at, c);
         self.ui.input_cursor += 1;
+        self.ui.history_pos = None;
+        self.ui.history_draft = None;
         self.ui.menu_selected = 0;
         self.ui.cd_navigated = false;
         self.ui.cd_dismissed = false;
@@ -485,6 +504,8 @@ impl App {
         let at = self.byte_index(self.ui.input_cursor - 1);
         self.ui.input.remove(at);
         self.ui.input_cursor -= 1;
+        self.ui.history_pos = None;
+        self.ui.history_draft = None;
         self.ui.menu_selected = 0;
         self.ui.cd_navigated = false;
         self.ui.cd_dismissed = false;
@@ -497,6 +518,8 @@ impl App {
         }
         let at = self.byte_index(self.ui.input_cursor);
         self.ui.input.remove(at);
+        self.ui.history_pos = None;
+        self.ui.history_draft = None;
         self.ui.menu_selected = 0;
         self.ui.cd_navigated = false;
         self.ui.cd_dismissed = false;

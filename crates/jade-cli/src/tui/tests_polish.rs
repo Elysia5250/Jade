@@ -502,3 +502,123 @@ fn ask_supports_ctrl_c_double_esc_jk_and_number_keys() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn double_esc_and_ctrl_c_interrupt_shell_subagent_sidechat_and_outbox() {
+    let dir = tmpdir("esc-work");
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+
+    // 1. Running shell watch: Esc arms + cancels instead of toggling focus; Ctrl+C cancels instead of quitting.
+    app.jobs.shell_watches.push(ShellWatch {
+        item_id: 1,
+        job_id: 7,
+        cursor: 0,
+        partial_out: Vec::new(),
+        partial_err: Vec::new(),
+        started: Instant::now(),
+    });
+    assert!(matches!(app.handle_key(key(KeyCode::Esc)), Action::None));
+    assert_eq!(
+        app.ui.focus,
+        Focus::Input,
+        "must not toggle focus while shell runs"
+    );
+    assert!(matches!(app.handle_key(key(KeyCode::Esc)), Action::Cancel));
+    assert!(matches!(app.handle_key(ctrl('c')), Action::Cancel));
+    app.jobs.shell_watches.clear();
+
+    // 2. Running subagent even if main agent.running is false.
+    app.session.current.subagents.insert(
+        "call-1".into(),
+        vec![SubagentLane {
+            index: 0,
+            name: "explore".into(),
+            description: "scan".into(),
+            status: CardStatus::Running,
+            items: Vec::new(),
+        }],
+    );
+    assert!(matches!(app.handle_key(key(KeyCode::Esc)), Action::None));
+    assert_eq!(app.ui.focus, Focus::Input);
+    assert!(matches!(app.handle_key(key(KeyCode::Esc)), Action::Cancel));
+    app.session.current.subagents.clear();
+
+    // 3. Focus::Side while a turn is running arms + interrupts rather than bouncing focus.
+    app.open_side_pane();
+    app.agent.running = true;
+    assert_eq!(app.ui.focus, Focus::Side);
+    assert!(matches!(app.handle_key(key(KeyCode::Esc)), Action::None));
+    assert_eq!(app.ui.focus, Focus::Side);
+    assert!(matches!(app.handle_key(key(KeyCode::Esc)), Action::Cancel));
+    app.agent.running = false;
+    app.ui.focus = Focus::Input;
+
+    // 4. SnapshotEnd with running=false while an outbox prompt is waiting to flush keeps running=true.
+    app.agent
+        .outbox
+        .push_back(("queued prompt".into(), Vec::new(), SendMode::Prompt));
+    app.drain_agent_batch(Some(AgentResp::SnapshotStart {
+        session_id: app.session.current.id.clone(),
+        running: false,
+        incarnation_id: 1,
+        seq: 0,
+        total_items: 0,
+    }));
+    app.drain_agent_batch(Some(AgentResp::SnapshotEnd));
+    assert!(
+        app.agent.running,
+        "outbox prompt flush must keep running armed"
+    );
+    assert!(matches!(app.handle_key(key(KeyCode::Esc)), Action::None));
+    assert_eq!(app.ui.focus, Focus::Input);
+    assert!(matches!(app.handle_key(key(KeyCode::Esc)), Action::Cancel));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn macos_friendly_history_leader_and_super_modifier_guards() {
+    let dir = tmpdir("macos-keys");
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.ui.history = vec!["first".into(), "second".into()];
+
+    // Empty composer: plain Up/Down walks history without needing Ctrl+Up (stolen by Mission Control).
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(app.ui.input, "second");
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(app.ui.input, "first");
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.ui.input, "second");
+    // Editing recalled entry leaves history mode.
+    app.handle_key(key(KeyCode::Char('!')));
+    assert_eq!(app.ui.input, "second!");
+    assert_eq!(app.ui.history_pos, None);
+
+    // SUPER/META modifiers must not insert stray characters in composer or line_edit.
+    app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::SUPER));
+    app.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::META));
+    assert_eq!(app.ui.input, "second!");
+    let mut line = "abc".to_string();
+    let mut cur = 3;
+    assert_eq!(
+        line_edit::handle_key(
+            &mut line,
+            &mut cur,
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::SUPER)
+        ),
+        line_edit::EditOutcome::Ignored
+    );
+    assert_eq!(line, "abc");
+
+    // Ctrl+X leader fallbacks for Alt+1..5 and Alt+M.
+    app.handle_key(ctrl('x'));
+    app.handle_key(key(KeyCode::Char('2')));
+    assert!(app.ui.show_sidebar);
+    assert_eq!(app.ui.inspector.tab, InspectorTab::Diff);
+
+    app.handle_key(ctrl('x'));
+    let toggle = app.handle_key(key(KeyCode::Char('M')));
+    assert!(matches!(toggle, Action::ToggleMouseCapture));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

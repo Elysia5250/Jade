@@ -236,10 +236,16 @@ impl App {
     }
 
     pub(in crate::tui) async fn cancel_active(&mut self, remote: &Remote<AnyDialer>) {
-        if self.agent.running {
+        if self.agent.running || self.subagent_running() {
             self.interrupt_agent();
             self.agent.pending_ask = None;
+            self.agent.outbox.clear();
             self.set_toast("interrupting turn...", false);
+            return;
+        }
+        if !self.agent.outbox.is_empty() {
+            self.agent.outbox.clear();
+            self.set_toast("cancelled queued prompt", false);
             return;
         }
         if let Some(w) = self.jobs.shell_watches.last() {

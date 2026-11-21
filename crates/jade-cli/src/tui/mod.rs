@@ -172,14 +172,19 @@ pub async fn run(
 
     // Enter alternate screen immediately before daemon/conduit startup so frame 1 is instant.
     let mut tui = Tui::enter()?;
+    app.ui.truecolor = tui.caps.truecolor;
     app.agent.retry_at = Instant::now() + Duration::from_millis(800);
     app.jobs.last_refresh = Instant::now();
     {
         let app_ref = &mut app;
         inputs::sync(app_ref);
-        let _ = execute!(stdout(), BeginSynchronizedUpdate);
+        if tui.caps.sync_update {
+            let _ = execute!(stdout(), BeginSynchronizedUpdate);
+        }
         tui.terminal.draw(|frame| view::draw(frame, app_ref))?;
-        let _ = execute!(stdout(), EndSynchronizedUpdate);
+        if tui.caps.sync_update {
+            let _ = execute!(stdout(), EndSynchronizedUpdate);
+        }
     }
 
     let boot_data = data_dir.clone();

@@ -100,7 +100,15 @@ pub(crate) fn try_load_image_path(raw: &str, cwd: &Path) -> Option<(ImageAttachm
     } else {
         unquoted.to_string()
     };
-    let path = expand_path(&path_str, cwd)?;
+    let mut path = expand_path(&path_str, cwd)?;
+    if !path.is_file() && unquoted.len() == trimmed.len() && path_str.contains('\\') {
+        let unescaped = unescape_posix_path(&path_str);
+        if let Some(alt) = expand_path(&unescaped, cwd) {
+            if alt.is_file() {
+                path = alt;
+            }
+        }
+    }
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -134,6 +142,23 @@ fn strip_quotes(s: &str) -> &str {
     }
 }
 
+fn unescape_posix_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(next) = chars.next() {
+                out.push(next);
+            } else {
+                out.push('\\');
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn expand_path(raw: &str, cwd: &Path) -> Option<PathBuf> {
     if raw == "~" {
         return std::env::var_os("HOME").map(PathBuf::from);
@@ -150,19 +175,17 @@ fn expand_path(raw: &str, cwd: &Path) -> Option<PathBuf> {
 }
 
 pub(crate) fn read_clipboard_image() -> Option<(ImageAttachment, usize)> {
-    if let Some(res) = try_wl_paste_image() {
-        return Some(res);
-    }
-    if let Some(res) = try_xclip_image() {
-        return Some(res);
-    }
     #[cfg(target_os = "macos")]
-    if let Some(res) = try_macos_image() {
-        return Some(res);
+    {
+        try_macos_image()
     }
-    None
+    #[cfg(not(target_os = "macos"))]
+    {
+        try_wl_paste_image().or_else(try_xclip_image)
+    }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn try_wl_paste_image() -> Option<(ImageAttachment, usize)> {
     let list = run_cmd_timeout("wl-paste", &["--list-types"], CLIPBOARD_CMD_TIMEOUT)?;
     let types = String::from_utf8_lossy(&list);
@@ -178,6 +201,7 @@ fn try_wl_paste_image() -> Option<(ImageAttachment, usize)> {
     image_from_bytes(&bytes, Some(mime), Some("clipboard".into()))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn try_xclip_image() -> Option<(ImageAttachment, usize)> {
     let list = run_cmd_timeout(
         "xclip",
@@ -204,23 +228,31 @@ fn try_macos_image() -> Option<(ImageAttachment, usize)> {
             return Some(res);
         }
     }
-    let out = run_cmd_timeout(
-        "osascript",
-        &[
-            "-e",
-            "set d to the clipboard as «class PNGf»",
-            "-e",
-            "return d",
-        ],
-        CLIPBOARD_CMD_TIMEOUT,
-    )?;
-    let hex_str = String::from_utf8_lossy(&out);
-    let hex = hex_str
-        .trim()
-        .strip_prefix("«data PNGf")
-        .and_then(|s| s.strip_suffix('»'))?;
-    let bytes = decode_hex(hex)?;
-    image_from_bytes(&bytes, Some("image/png"), Some("clipboard".into()))
+    for (class_tag, mime) in [("PNGf", "image/png"), ("JPEG", "image/jpeg")] {
+        let script = format!("set d to the clipboard as «class {class_tag}»");
+        let Some(out) = run_cmd_timeout(
+            "osascript",
+            &["-e", &script, "-e", "return d"],
+            CLIPBOARD_CMD_TIMEOUT,
+        ) else {
+            continue;
+        };
+        let hex_str = String::from_utf8_lossy(&out);
+        let prefix = format!("«data {class_tag}");
+        let Some(hex) = hex_str
+            .trim()
+            .strip_prefix(&prefix)
+            .and_then(|s| s.strip_suffix('»'))
+        else {
+            continue;
+        };
+        if let Some(bytes) = decode_hex(hex) {
+            if let Some(res) = image_from_bytes(&bytes, Some(mime), Some("clipboard".into())) {
+                return Some(res);
+            }
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "macos")]
@@ -235,11 +267,13 @@ fn decode_hex(hex: &str) -> Option<Vec<u8>> {
 }
 
 pub(crate) fn read_clipboard_text() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    let cmds: &[(&str, &[&str])] = &[("pbpaste", &[])];
+    #[cfg(not(target_os = "macos"))]
     let cmds: &[(&str, &[&str])] = &[
         ("wl-paste", &["--no-newline"]),
         ("xclip", &["-selection", "clipboard", "-o"]),
         ("xsel", &["--clipboard", "--output"]),
-        ("pbpaste", &[]),
     ];
     for (bin, args) in cmds {
         if let Some(bytes) = run_cmd_timeout(bin, args, CLIPBOARD_CMD_TIMEOUT) {
@@ -296,6 +330,20 @@ mod tests {
         assert_eq!(size, png.len());
 
         assert!(try_load_image_path("not an image.txt", &dir).is_none());
+
+        let spaced = dir.join("Screenshot 2026 (1).png");
+        std::fs::write(&spaced, &png).unwrap();
+        let escaped = spaced
+            .display()
+            .to_string()
+            .replace(' ', "\\ ")
+            .replace('(', "\\(")
+            .replace(')', "\\)");
+        let (att2, size2) = try_load_image_path(&escaped, &dir).unwrap();
+        assert_eq!(att2.mime, "image/png");
+        assert_eq!(att2.name.as_deref(), Some("Screenshot 2026 (1).png"));
+        assert_eq!(size2, png.len());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

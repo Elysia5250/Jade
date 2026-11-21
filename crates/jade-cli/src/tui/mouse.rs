@@ -93,6 +93,7 @@ impl App {
                 }
             }
             MouseEventKind::ScrollUp => {
+                let step = self.scroll_step();
                 if self.ui.modal.is_some() {
                     self.scroll_modal(-1);
                     return None;
@@ -102,13 +103,14 @@ impl App {
                     return None;
                 }
                 if self.is_over_inspector(col, row) {
-                    self.ui.inspector.scroll = self.ui.inspector.scroll.saturating_sub(3);
+                    self.ui.inspector.scroll = self.ui.inspector.scroll.saturating_sub(step);
                 } else {
                     self.ui.follow = false;
-                    self.ui.transcript_scroll = self.ui.transcript_scroll.saturating_sub(3);
+                    self.ui.transcript_scroll = self.ui.transcript_scroll.saturating_sub(step);
                 }
             }
             MouseEventKind::ScrollDown => {
+                let step = self.scroll_step();
                 if self.ui.modal.is_some() {
                     self.scroll_modal(1);
                     return None;
@@ -122,13 +124,13 @@ impl App {
                         .ui
                         .inspector
                         .scroll
-                        .saturating_add(3)
+                        .saturating_add(step)
                         .min(self.ui.inspector.max_scroll);
                 } else {
                     self.ui.transcript_scroll = self
                         .ui
                         .transcript_scroll
-                        .saturating_add(3)
+                        .saturating_add(step)
                         .min(self.ui.transcript_max_scroll);
                     if self.ui.transcript_scroll >= self.ui.transcript_max_scroll {
                         self.ui.follow = true;
@@ -138,6 +140,22 @@ impl App {
             _ => {}
         }
         None
+    }
+
+    fn scroll_step(&mut self) -> usize {
+        let now = Instant::now();
+        let rapid = self
+            .ui
+            .last_scroll_at
+            .is_some_and(|prev| now.saturating_duration_since(prev) < Duration::from_millis(55));
+        self.ui.last_scroll_at = Some(now);
+        if rapid {
+            1
+        } else if cfg!(target_os = "macos") {
+            2
+        } else {
+            3
+        }
     }
 
     fn update_hover(&mut self, col: u16, row: u16) {
@@ -500,12 +518,15 @@ fn copy_to_clipboard(text: &str) {
 }
 
 fn clipboard_process(text: &str) {
-    for (cmd, args) in [
-        ("wl-copy", &[][..]),
-        ("xclip", &["-selection", "clipboard"][..]),
-        ("xsel", &["--clipboard", "--input"][..]),
-        ("pbcopy", &[][..]),
-    ] {
+    #[cfg(target_os = "macos")]
+    let cmds: &[(&str, &[&str])] = &[("pbcopy", &[])];
+    #[cfg(not(target_os = "macos"))]
+    let cmds: &[(&str, &[&str])] = &[
+        ("wl-copy", &[]),
+        ("xclip", &["-selection", "clipboard"]),
+        ("xsel", &["--clipboard", "--input"]),
+    ];
+    for &(cmd, args) in cmds {
         let Ok(mut child) = std::process::Command::new(cmd)
             .args(args)
             .stdin(std::process::Stdio::piped())

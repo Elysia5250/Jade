@@ -152,9 +152,13 @@ fn tty_reader(tx: mpsc::UnboundedSender<Event>, stop: Arc<AtomicBool>) {
 }
 
 fn paint_now(tui: &mut Tui, app: &mut App) -> Result<()> {
-    let _ = execute!(stdout(), BeginSynchronizedUpdate);
+    if tui.caps.sync_update {
+        let _ = execute!(stdout(), BeginSynchronizedUpdate);
+    }
     tui.terminal.draw(|frame| view::draw(frame, app))?;
-    let _ = execute!(stdout(), EndSynchronizedUpdate);
+    if tui.caps.sync_update {
+        let _ = execute!(stdout(), EndSynchronizedUpdate);
+    }
     Ok(())
 }
 
@@ -410,7 +414,7 @@ async fn on_terminal(
 ) -> Result<TermOutcome> {
     match ev {
         Event::Key(key) => {
-            if key.kind != KeyEventKind::Press {
+            if key.kind == KeyEventKind::Release {
                 return Ok(TermOutcome::Stay);
             }
             app.ui.selection = None;

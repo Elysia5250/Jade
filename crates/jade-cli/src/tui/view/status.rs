@@ -93,7 +93,7 @@ fn build_right_segments(app: &App, theme: &Theme) -> Vec<BarSegment> {
     {
         right.push(BarSegment::plain(
             vec![Span::styled(
-                "Ctrl+X …  h hub · n new · m models · b panel · t theme",
+                "Ctrl+X …  h hub · n new · m models · 1-5 tab · M mouse · b panel",
                 Style::default()
                     .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
