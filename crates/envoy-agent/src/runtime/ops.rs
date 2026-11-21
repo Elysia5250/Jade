@@ -66,6 +66,7 @@ impl Runtime {
                     tool_name: None,
 
                     reasoning_blocks: Vec::new(),
+                    images: Vec::new(),
                 });
                 true
             } else {
@@ -241,6 +242,52 @@ pub(crate) fn record_turn_checkpoint(live: &Arc<Mutex<Live>>, prompt: Option<&st
     }
 }
 
+pub(crate) struct SessionSnapshot {
+    pub(crate) cwd: PathBuf,
+    pub(crate) target: String,
+    pub(crate) messages: Vec<ChatMessage>,
+    pub(crate) usage: crate::agent::TurnUsage,
+}
+
+pub(crate) fn persist_daemon_session(data_dir: &std::path::Path, id: &str, snap: SessionSnapshot) {
+    if crate::session::checked_session_id(id).is_err() {
+        return;
+    }
+    let mut session = crate::session::load_session(data_dir, id).unwrap_or_else(|_| {
+        let mut created = crate::session::Session::new(snap.cwd.clone(), snap.target.clone());
+        created.id = id.to_string();
+        created
+    });
+    session.id = id.to_string();
+    session.cwd = snap.cwd;
+    session.target = snap.target;
+    session.messages = snap.messages;
+    session.input_tokens += snap.usage.input_tokens;
+    session.output_tokens += snap.usage.output_tokens;
+    if snap.usage.context_tokens > 0 {
+        session.prompt_tokens = snap.usage.context_tokens;
+    }
+    session.cache_read_tokens += snap.usage.cache_read_tokens;
+    session.cache_create_tokens += snap.usage.cache_create_tokens;
+    if (0.65..=1.65).contains(&snap.usage.calibration_factor) {
+        session.calibration_factor = snap.usage.calibration_factor;
+    }
+    session.touch();
+    let _ = crate::session::save_session(data_dir, &session);
+}
+
+pub(crate) async fn cancel_active_job(
+    data_dir: &std::path::Path,
+    target: &str,
+    local_socket: Option<PathBuf>,
+    conduit: Option<PathBuf>,
+    local_server: Option<envoy_service::AgentServer>,
+    job_id: u64,
+) {
+    let remote = super::remote_for(data_dir, target, conduit, local_socket, local_server);
+    let _ = remote.cancel(target, job_id).await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +346,7 @@ mod tests {
                 tool_name: None,
 
                 reasoning_blocks: Vec::new(),
+                images: Vec::new(),
             });
             st.active_checkpoint_id = None;
         }

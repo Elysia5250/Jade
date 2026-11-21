@@ -10,6 +10,7 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::Moved => {
+                self.ui.inspector.dragging_divider = false;
                 self.ui.inspector.hover_divider = self
                     .ui
                     .inspector
@@ -18,6 +19,7 @@ impl App {
                     .unwrap_or(false);
             }
             MouseEventKind::Down(MouseButton::Left) => {
+                self.ui.inspector.dragging_divider = false;
                 if self.ui.modal.is_some() {
                     return None;
                 }
@@ -89,6 +91,10 @@ impl App {
                 if self.ui.modal.is_some() {
                     return None;
                 }
+                if self.ui.welcome.is_some() {
+                    self.scroll_hub(-1);
+                    return None;
+                }
                 if self.is_over_inspector(col, row) {
                     self.ui.inspector.scroll = self.ui.inspector.scroll.saturating_sub(3);
                 } else {
@@ -98,6 +104,10 @@ impl App {
             }
             MouseEventKind::ScrollDown => {
                 if self.ui.modal.is_some() {
+                    return None;
+                }
+                if self.ui.welcome.is_some() {
+                    self.scroll_hub(1);
                     return None;
                 }
                 if self.is_over_inspector(col, row) {
@@ -248,15 +258,69 @@ impl App {
                 HitTarget::OpenLogin => {
                     self.open_login_modal();
                 }
+                HitTarget::OpenModels => {
+                    self.open_models_modal();
+                }
+                HitTarget::CycleEffort => {
+                    self.cycle_effort(1);
+                }
+                HitTarget::OpenBudget => {
+                    self.open_budget_picker();
+                }
+                HitTarget::OpenTrustPicker => {
+                    self.open_trust_picker();
+                }
+                HitTarget::JumpToBottom => {
+                    self.ui.follow = true;
+                    self.ui.transcript_scroll = self.ui.transcript_max_scroll;
+                }
+                HitTarget::ToggleFileMarkdown => {
+                    self.ui.inspector.markdown_raw = !self.ui.inspector.markdown_raw;
+                    self.ui.inspector.scroll = 0;
+                }
+                HitTarget::OpenSubagent { call_id, index } => {
+                    self.open_subagent(call_id, index);
+                }
+                HitTarget::OpenHub => {
+                    self.return_to_hub();
+                }
+                HitTarget::HubReturn => {
+                    self.close_hub_to_current();
+                }
+                HitTarget::HubSelectTab(tab) => {
+                    self.hub_select_tab(tab);
+                }
+                HitTarget::HubSelectFocus(focus) => {
+                    if let Some(w) = self.ui.welcome.as_mut() {
+                        w.focus = focus;
+                    }
+                }
+                HitTarget::HubSession(idx) => {
+                    return self.hub_click_session(idx);
+                }
+                HitTarget::HubWorkspace(idx) => {
+                    self.hub_click_workspace(idx);
+                }
+                HitTarget::HubControl(ctrl) => {
+                    return self.hub_click_control(ctrl);
+                }
+                HitTarget::HubOpenPath => {
+                    self.hub_open_path_panel();
+                }
+                HitTarget::HubNewFolder => {
+                    self.hub_open_new_folder_panel();
+                }
             }
             return None;
         }
 
         if self.is_over_inspector(col, row) {
             self.ui.focus = Focus::Sidebar;
-        } else if row < self.ui.transcript_area.y + self.ui.transcript_area.height {
+        } else if row >= self.ui.transcript_area.y
+            && row < self.ui.transcript_area.y + self.ui.transcript_area.height
+        {
             self.ui.focus = Focus::Transcript;
-        } else {
+        } else if row >= self.ui.transcript_area.y + self.ui.transcript_area.height {
             self.ui.focus = Focus::Input;
         }
         None

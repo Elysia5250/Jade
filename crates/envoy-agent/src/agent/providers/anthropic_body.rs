@@ -12,6 +12,16 @@ pub(crate) fn anthropic_messages(history: &[ChatMessage]) -> Vec<Value> {
             ChatRole::System => {}
             ChatRole::User => {
                 let mut blocks = std::mem::take(&mut tool_results);
+                for img in &message.images {
+                    blocks.push(json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": img.mime,
+                            "data": img.data_base64,
+                        }
+                    }));
+                }
                 push_text(&mut blocks, &message.content);
                 push_user(&mut msgs, blocks);
             }

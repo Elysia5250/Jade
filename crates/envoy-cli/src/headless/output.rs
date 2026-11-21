@@ -58,8 +58,12 @@ where
     while let Some(seq_ev) = rx.pull().await {
         if fmt == OutputFormat::StreamJson {
             if let Ok(line) = serde_json::to_string(&seq_ev) {
-                let _ = writeln!(out, "{line}");
-                let _ = out.flush();
+                if let Err(e) = writeln!(out, "{line}").and_then(|()| out.flush()) {
+                    return Err(TurnFailure {
+                        message: format!("stdout write failed: {e}"),
+                        tool_calls,
+                    });
+                }
             }
         }
 
@@ -67,7 +71,12 @@ where
             AgentEvent::AssistantStart { .. } => {
                 if fmt == OutputFormat::Text && wrote_text && need_step_sep {
                     if !last_char_nl {
-                        let _ = writeln!(out);
+                        if let Err(e) = writeln!(out) {
+                            return Err(TurnFailure {
+                                message: format!("stdout write failed: {e}"),
+                                tool_calls,
+                            });
+                        }
                     }
                     need_step_sep = false;
                 }
@@ -75,8 +84,12 @@ where
             AgentEvent::TextDelta(chunk) => {
                 accumulated_text.push_str(&chunk);
                 if fmt == OutputFormat::Text && !chunk.is_empty() {
-                    let _ = write!(out, "{chunk}");
-                    let _ = out.flush();
+                    if let Err(e) = write!(out, "{chunk}").and_then(|()| out.flush()) {
+                        return Err(TurnFailure {
+                            message: format!("stdout write failed: {e}"),
+                            tool_calls,
+                        });
+                    }
                     wrote_text = true;
                     last_char_nl = chunk.ends_with('\n');
                 }
@@ -96,7 +109,7 @@ where
                     saw_approval_denial = true;
                     let _ = writeln!(
                         err,
-                        "[hint] tool approval required in headless mode; re-run with --permission-mode accept-edits / auto or --dangerously-skip-permissions"
+                        "[hint] tool approval required in headless mode; re-run with --permission-mode accept-edits / auto / turbo or --dangerously-skip-permissions"
                     );
                     let _ = err.flush();
                 }
@@ -131,8 +144,12 @@ where
                     );
                 }
                 if fmt == OutputFormat::Text && wrote_text && !last_char_nl {
-                    let _ = writeln!(out);
-                    let _ = out.flush();
+                    if let Err(e) = writeln!(out).and_then(|()| out.flush()) {
+                        return Err(TurnFailure {
+                            message: format!("stdout write failed: {e}"),
+                            tool_calls,
+                        });
+                    }
                 }
                 return Ok(TurnStreamDone {
                     messages,
@@ -145,8 +162,12 @@ where
             }
             AgentEvent::TurnError(msg) => {
                 if fmt == OutputFormat::Text && wrote_text && !last_char_nl {
-                    let _ = writeln!(out);
-                    let _ = out.flush();
+                    if let Err(e) = writeln!(out).and_then(|()| out.flush()) {
+                        return Err(TurnFailure {
+                            message: format!("stdout write failed: {e}"),
+                            tool_calls,
+                        });
+                    }
                 }
                 return Err(TurnFailure {
                     message: msg,

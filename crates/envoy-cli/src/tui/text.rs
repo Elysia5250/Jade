@@ -5,6 +5,49 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+pub(crate) fn collapse_middle_path(path: &str, max_width: usize) -> String {
+    if display_width(path) <= max_width {
+        return path.to_string();
+    }
+    if max_width <= 6 {
+        return truncate_width(path, max_width);
+    }
+    let (prefix, rest) = if let Some(tail) = path.strip_prefix("~/") {
+        ("~/…/", tail)
+    } else if let Some(tail) = path.strip_prefix('/') {
+        ("/…/", tail)
+    } else {
+        ("…/", path)
+    };
+    let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.len() <= 1 {
+        return truncate_width(path, max_width);
+    }
+    let prefix_w = display_width(prefix);
+    let last = parts[parts.len() - 1];
+    if prefix_w + display_width(last) > max_width {
+        let avail = max_width.saturating_sub(prefix_w);
+        if avail >= 3 {
+            return format!("{prefix}{}", truncate_width(last, avail));
+        }
+        return truncate_width(path, max_width);
+    }
+    let mut tail = last.to_string();
+    for seg in parts[..parts.len() - 1].iter().rev() {
+        let candidate = format!("{seg}/{tail}");
+        if prefix_w + display_width(&candidate) > max_width {
+            break;
+        }
+        tail = candidate;
+    }
+    let candidate = format!("{prefix}{tail}");
+    if display_width(&candidate) >= display_width(path) {
+        path.to_string()
+    } else {
+        candidate
+    }
+}
+
 pub(crate) fn collapse_home(path: &Path) -> String {
     let home = std::env::var("HOME").ok();
     let text = path.display().to_string();
@@ -273,7 +316,7 @@ pub(crate) fn context_bar(used: u64, window: u64) -> (String, String) {
     } else {
         ((ratio * CELLS as f64).ceil() as usize).clamp(1, CELLS)
     };
-    ("#".repeat(filled), "-".repeat(CELLS - filled))
+    ("━".repeat(filled), "─".repeat(CELLS - filled))
 }
 
 pub(crate) fn fmt_tokens(n: u64) -> String {
@@ -301,7 +344,7 @@ pub(crate) fn fmt_duration(ms: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{context_bar, fmt_tokens};
+    use super::{collapse_middle_path, context_bar, display_width, fmt_tokens};
 
     #[test]
     fn token_labels_and_bar() {
@@ -309,15 +352,33 @@ mod tests {
         assert_eq!(fmt_tokens(12_400), "12.4k");
         assert_eq!(fmt_tokens(50_000), "50k");
         assert_eq!(fmt_tokens(1_048_576), "1.0m");
-        assert_eq!(context_bar(0, 200_000), (String::new(), "-".repeat(8)));
+        assert_eq!(context_bar(0, 200_000), (String::new(), "─".repeat(8)));
         let (filled, empty) = context_bar(50_000, 200_000);
         assert_eq!(filled.chars().count() + empty.chars().count(), 8);
         assert!(!filled.is_empty());
+        assert!(filled.chars().all(|c| c == '━'));
+        assert!(empty.chars().all(|c| c == '─'));
         let bar = format!("{filled}{empty}");
-        assert!(bar.is_ascii());
-        assert_eq!(super::display_width(&bar), 8);
+        assert_eq!(display_width(&bar), 8);
         let row = super::pad_to_width("> current   /tmp/project", 40);
-        assert_eq!(super::display_width(&row), 40);
+        assert_eq!(display_width(&row), 40);
         assert!(row.is_ascii());
+    }
+
+    #[test]
+    fn middle_path_collapses_intermediate_segments_and_keeps_tail() {
+        assert_eq!(collapse_middle_path("~/项目/envoy", 24), "~/项目/envoy");
+        assert_eq!(
+            collapse_middle_path("~/work/org/team/project/envoy", 16),
+            "~/…/envoy"
+        );
+        assert_eq!(
+            collapse_middle_path("~/work/org/deep/项目/envoy", 16),
+            "~/…/项目/envoy"
+        );
+        assert_eq!(
+            collapse_middle_path("/var/lib/build/workspace/envoy", 14),
+            "/…/envoy"
+        );
     }
 }

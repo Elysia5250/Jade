@@ -71,10 +71,16 @@ on the TUI or on a concrete provider.
 - The rule engine decides `allow` / `ask` / `deny`; the OS sandbox is the real
   boundary. Never treat shell string matching as a security boundary.
 - Precedence is explicit: deny > ask > allow, with managed policy above local
-  settings. Do not add implicit "more specific wins" behavior.
+  settings. Do not add implicit "more specific wins" behavior. In relaxed modes
+  (`turbo` always, `auto` when the active OS sandbox enforces the workspace
+  boundary, mutating/`exec` targets stay inside the workspace or temp dir, and
+  the call does not request non-allowlisted outbound network), non-protected
+  calls short-circuit to `allow` right after deny rules.
 - Canonicalize paths, resolve symlinks, protect `.git`, `.ssh`, `.env`,
-  `.envoy`, `.codex`, `.agents`, and `.aws`.
-- Shell checks split compound commands and wrappers; parse failure means `ask`.
+  `.envoy`, `.codex`, `.agents`, and `.aws` (protected paths always `ask` even
+  in `auto`/`turbo`).
+- Shell checks split compound commands and wrappers; parse failure means `ask`
+  (outside the relaxed-mode short-circuit above).
 - Plan mode is read-only except for its own plan files.
 - Every approval decision is audit-logged. Saved approvals are scoped; they
   never override a deny.
@@ -85,6 +91,9 @@ on the TUI or on a concrete provider.
 - `docs/architecture.md`: current module map and invariants.
 - `docs/decisions/`: one short ADR per irreversible choice.
 - `docs/plans/`: active execution plans with progress and next steps.
+- `docs/achieved/`: finished, frozen documents kept for reference only. Never
+  update them for semantic changes; treat `architecture.md`, `decisions/`, and
+  `MANUAL-TEST.md` as authoritative instead.
 - Nested `AGENTS.md` files may add crate-specific rules; the nearest file wins.
 - Generated code is never hand-edited; document the generator command.
 

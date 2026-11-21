@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+mod forward;
 mod isolate;
 mod run;
 
@@ -151,6 +152,7 @@ pub(crate) fn execute_delegate<'a>(
         let mut reports: Vec<SubagentTaskReport> = Vec::with_capacity(total);
         let mut runnable = Vec::new();
         for task in prepared {
+            forward::announce_task(parent_tx, parent_call_id, total, &task);
             if let Some(reason) = task.blocked_reason {
                 reports.push(SubagentTaskReport {
                     index: task.index,

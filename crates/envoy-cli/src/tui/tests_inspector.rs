@@ -285,6 +285,8 @@ async fn inline_ask_keeps_inspector_visible_and_accepts_click() {
         recommended: 0,
         selected: 0,
         deadline: Instant::now() + Duration::from_secs(30),
+        touched: false,
+        paused_left: None,
     });
 
     let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
@@ -436,6 +438,205 @@ fn monitors_and_checkpoint_rewind_update_overview_status_and_transcript() {
         it,
         TranscriptItem::Notice { text, .. } if text.contains("rewound to #2")
     )));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn long_ask_question_keeps_all_options_visible_and_clickable() {
+    let dir = tmpdir();
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.jobs.connected = true;
+    let long_cmd =
+        "Permission required for `exec` (shell command syntax could not be parsed cleanly): "
+            .to_string()
+            + &"cd /home/elysia/project && cat >> file.rs <<'EOF' let x = 1; ".repeat(14);
+    app.agent.pending_ask = Some(PendingAsk {
+        id: 8,
+        question: long_cmd,
+        options: vec![
+            AskOption {
+                label: "Allow once".into(),
+                description: Some("Run this command once".into()),
+                recommended: false,
+            },
+            AskOption {
+                label: "Allow for session".into(),
+                description: None,
+                recommended: false,
+            },
+            AskOption {
+                label: "Deny".into(),
+                description: None,
+                recommended: true,
+            },
+        ],
+        recommended: 2,
+        selected: 0,
+        deadline: Instant::now() + Duration::from_secs(60),
+        touched: false,
+        paused_left: None,
+    });
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    let text = render_text(&mut terminal, &mut app);
+    assert!(
+        text.contains("…"),
+        "truncated long question should end with ellipsis:\n{text}"
+    );
+    assert!(text.contains("Allow once"), "option 0 missing:\n{text}");
+    assert!(
+        text.contains("Allow for session"),
+        "option 1 missing:\n{text}"
+    );
+    assert!(text.contains("Deny"), "option 2 missing:\n{text}");
+    for idx in 0..3 {
+        assert!(
+            app.ui
+                .hit_regions
+                .iter()
+                .any(|hr| matches!(hr.target, HitTarget::SelectAskOption(i) if i == idx)),
+            "missing hit region for option {idx}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn close_button_survives_tab_bar_overflow() {
+    let dir = tmpdir();
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.jobs.connected = true;
+
+    for width in [76u16, 90, 104, 112, 124, 140] {
+        for extra_tabs in [false, true] {
+            app.ui.show_sidebar = true;
+            app.ui.inspector.force_open = true;
+            app.ui.inspector.tab = InspectorTab::Diff;
+            app.ui.side_open = extra_tabs;
+
+            let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+            let _screen = render_text(&mut terminal, &mut app);
+
+            let area = app.ui.inspector.last_area;
+            let hit = app
+                .ui
+                .hit_regions
+                .iter()
+                .find(|hr| {
+                    matches!(hr.target, HitTarget::ToggleSidebar)
+                        && hr.rect.x >= area.x
+                        && hr.rect.x < area.x + area.width
+                })
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!("close button missing at width {width} (extra tabs: {extra_tabs})")
+                });
+
+            // A hit region is not enough: the glyph must actually be drawn.
+            let buf = terminal.backend().buffer();
+            let row: String = (hit.rect.x..hit.rect.x + hit.rect.width)
+                .map(|x| buf[(x, hit.rect.y)].symbol())
+                .collect();
+            assert_eq!(
+                row, "[x]",
+                "close button must render at width {width} (extra tabs: {extra_tabs})"
+            );
+
+            // The button is pinned to the drawer's inner right edge on row 0.
+            assert_eq!(
+                hit.rect.x + hit.rect.width,
+                area.x + area.width - 1,
+                "close button must sit flush with the drawer's inner right edge"
+            );
+
+            // Tabs must never overrun the reserved close button, with a gap.
+            for hr in &app.ui.hit_regions {
+                if matches!(hr.target, HitTarget::SelectInspectorTab(_)) {
+                    assert!(
+                        hr.rect.x + hr.rect.width < hit.rect.x,
+                        "tab {:?} overruns the close button at width {width}",
+                        hr.target
+                    );
+                }
+            }
+
+            click_at(&mut app, hit.rect.x, hit.rect.y);
+            assert!(
+                !app.ui.show_sidebar,
+                "click must close at width {width} (extra tabs: {extra_tabs})"
+            );
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn markdown_file_preview_renders_rich_markdown_and_toggles_raw() {
+    let dir = tmpdir();
+    let src_dir = dir.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(src_dir.join("lib.rs"), "pub fn lib() {}\n").unwrap();
+    std::fs::write(
+        dir.join("README.md"),
+        "# Heading One\n\n#### Heading Four\n\nSome **bold** text and `src/lib.rs`.\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n```rs\nfn demo() {}\n```\n",
+    )
+    .unwrap();
+
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.jobs.connected = true;
+    app.open_file_in_inspector("README.md", None);
+    assert_eq!(app.ui.inspector.tab, InspectorTab::File);
+    assert!(!app.ui.inspector.markdown_raw);
+
+    let mut terminal = Terminal::new(TestBackend::new(124, 34)).unwrap();
+    let rendered = render_text(&mut terminal, &mut app);
+    assert!(rendered.contains("Heading One"), "{rendered}");
+    assert!(rendered.contains("Heading Four"), "{rendered}");
+    assert!(rendered.contains("bold"), "{rendered}");
+    assert!(!rendered.contains("**bold**"), "raw ** leaked:\n{rendered}");
+    assert!(
+        !rendered.contains("#### Heading Four"),
+        "raw heading hashes leaked:\n{rendered}"
+    );
+    assert!(rendered.contains("┼"), "table rule missing:\n{rendered}");
+    assert!(rendered.contains("+-- rs"), "code fence missing:\n{rendered}");
+    assert!(rendered.contains("fn demo()"), "{rendered}");
+    assert!(rendered.contains("[Raw]"), "missing [Raw] toggle:\n{rendered}");
+
+    // Fenced code block inside the panel uses theme.bg for contrast against theme.panel.
+    let theme = app.theme();
+    let buf = terminal.backend().buffer();
+    let area = app.ui.inspector.last_area;
+    let code_row_has_bg = (area.y..area.y + area.height).any(|y| {
+        let row: String = (area.x..area.x + area.width)
+            .map(|x| buf[(x, y)].symbol())
+            .collect();
+        row.contains("fn demo()") && buf[(area.x + 2, y)].bg == theme.bg
+    });
+    assert!(code_row_has_bg, "code block should use theme.bg inside panel");
+
+    // Clicking [Raw] switches to line-numbered raw mode and shows [Preview].
+    let toggle = app
+        .ui
+        .hit_regions
+        .iter()
+        .find(|hr| hr.target == HitTarget::ToggleFileMarkdown)
+        .cloned()
+        .expect("ToggleFileMarkdown hit region");
+    click_at(&mut app, toggle.rect.x, toggle.rect.y);
+    assert!(app.ui.inspector.markdown_raw);
+    let raw = render_text(&mut terminal, &mut app);
+    assert!(raw.contains("# Heading One"), "{raw}");
+    assert!(raw.contains("**bold**"), "{raw}");
+    assert!(raw.contains(" | "), "missing line gutter in raw mode:\n{raw}");
+    assert!(raw.contains("[Preview]"), "{raw}");
+
+    // Opening with `:line` still starts in raw mode.
+    app.open_file_in_inspector("README.md", Some(3));
+    assert!(app.ui.inspector.markdown_raw);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

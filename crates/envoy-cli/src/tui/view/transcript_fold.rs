@@ -3,7 +3,7 @@
 use crate::tui::*;
 
 pub(super) fn is_groupable_tool(item: &TranscriptItem) -> bool {
-    matches!(item, TranscriptItem::Tool { .. })
+    matches!(item, TranscriptItem::Tool { name, .. } if name != "delegate")
 }
 
 pub(super) fn is_reasoning_only(item: &TranscriptItem) -> bool {
@@ -102,7 +102,8 @@ pub(super) fn settled_activity_folds(
 
 fn is_activity_item(item: &TranscriptItem) -> bool {
     match item {
-        TranscriptItem::Tool { .. } | TranscriptItem::Say { .. } => true,
+        TranscriptItem::Tool { name, .. } if name != "delegate" => true,
+        TranscriptItem::Say { .. } => true,
         TranscriptItem::Assistant {
             text,
             done: true,

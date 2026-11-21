@@ -1,7 +1,6 @@
 //! Structured JSONL permission audit log with secret redaction.
 
 use serde::Serialize;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize)]
@@ -15,26 +14,22 @@ pub struct PermissionAuditEntry<'a> {
     pub decision: &'a str,
     pub resolution: &'a str,
     pub reason: &'a str,
-    pub sandbox: &'a str,
+    pub sandbox: String,
 }
 
 pub fn audit_log_path(data_dir: &Path) -> PathBuf {
     data_dir.join("agent").join("permission_audit.jsonl")
 }
 
-pub fn record_decision(data_dir: &Path, mut entry: PermissionAuditEntry<'_>) {
+pub fn record_decision(data_dir: &Path, mut entry: PermissionAuditEntry<'_>) -> anyhow::Result<()> {
     entry.detail = redact_secrets(&entry.detail);
     let path = audit_log_path(data_dir);
-    envoy_core::audit::rotate_if_oversized(&path, envoy_core::audit::LOG_ROTATE_BYTES);
     if let Some(parent) = path.parent() {
-        let _ = envoy_core::fs::ensure_private_dir(parent);
+        envoy_core::fs::ensure_private_dir(parent)?;
     }
-    let Ok(line) = serde_json::to_string(&entry) else {
-        return;
-    };
-    if let Ok(mut f) = envoy_core::fs::open_append_private(&path) {
-        let _ = writeln!(f, "{line}");
-    }
+    let line = serde_json::to_string(&entry)?;
+    envoy_core::audit::append_line_with_rotate(&path, envoy_core::audit::LOG_ROTATE_BYTES, &line)?;
+    Ok(())
 }
 
 pub fn now_ms() -> u64 {

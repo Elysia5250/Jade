@@ -332,7 +332,6 @@ mod tests {
         let deep = crate::agent::prompt::environment_note_for_depth(&dir, &dir, "sess", 1);
         if let Some(text) = deep {
             assert!(!text.contains("Long-term memory"));
-            assert!(!text.contains("envoy-depth-marker"));
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

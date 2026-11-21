@@ -210,10 +210,20 @@ fn codex_input(history: &[ChatMessage]) -> Vec<Value> {
         match message.role {
             ChatRole::System => {}
             ChatRole::User => {
+                let mut parts = Vec::new();
+                if !message.content.is_empty() || message.images.is_empty() {
+                    parts.push(json!({ "type": "input_text", "text": message.content }));
+                }
+                for img in &message.images {
+                    parts.push(json!({
+                        "type": "input_image",
+                        "image_url": format!("data:{};base64,{}", img.mime, img.data_base64),
+                    }));
+                }
                 input.push(json!({
                     "type": "message",
                     "role": "user",
-                    "content": [{ "type": "input_text", "text": message.content }],
+                    "content": parts,
                 }));
             }
             ChatRole::Assistant => {

@@ -161,7 +161,8 @@ impl App {
                 "approve file edits",
             ),
             (PermissionMode::Plan, "plan", "read-only"),
-            (PermissionMode::Auto, "auto", "allow tools"),
+            (PermissionMode::Auto, "auto", "sandboxed allow"),
+            (PermissionMode::Turbo, "turbo", "allow everything"),
         ];
         let selected = rows
             .iter()
@@ -334,6 +335,10 @@ impl App {
             (
                 "Switch session (/sessions)".to_string(),
                 Command::OpenSessions,
+            ),
+            (
+                "Open Envoy Hub (/home, Ctrl+X h)".to_string(),
+                Command::OpenHub,
             ),
             (
                 "Rewind checkpoint (/rewind)".to_string(),

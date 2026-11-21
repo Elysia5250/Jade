@@ -12,6 +12,11 @@ pub enum PermissionMode {
     AcceptEdits,
     Plan,
     Auto,
+    /// Never prompt. Explicit deny rules still win; nothing else does.
+    ///
+    /// Appended last on purpose: postcard encodes the variant index, so new
+    /// modes must never be inserted in the middle.
+    Turbo,
 }
 
 impl PermissionMode {
@@ -20,7 +25,8 @@ impl PermissionMode {
             Self::Default => Self::AcceptEdits,
             Self::AcceptEdits => Self::Plan,
             Self::Plan => Self::Auto,
-            Self::Auto => Self::Default,
+            Self::Auto => Self::Turbo,
+            Self::Turbo => Self::Default,
         }
     }
 
@@ -30,6 +36,7 @@ impl PermissionMode {
             "accept-edits" | "acceptedits" | "edits" => Some(Self::AcceptEdits),
             "plan" | "readonly" | "read-only" => Some(Self::Plan),
             "auto" | "allow" => Some(Self::Auto),
+            "turbo" | "yolo" => Some(Self::Turbo),
             _ => None,
         }
     }
@@ -40,6 +47,7 @@ impl PermissionMode {
             Self::AcceptEdits => "accept-edits",
             Self::Plan => "plan",
             Self::Auto => "auto",
+            Self::Turbo => "turbo",
         }
     }
 
@@ -49,6 +57,7 @@ impl PermissionMode {
             Self::AcceptEdits => "perm:edits",
             Self::Plan => "perm:plan",
             Self::Auto => "perm:auto",
+            Self::Turbo => "perm:turbo",
         }
     }
 }
@@ -111,6 +120,9 @@ pub struct Decision {
 #[derive(Debug, Clone)]
 pub struct ToolAuth {
     pub sandbox: SandboxPolicy,
+    /// Canonical path authorized for `write`/`edit` calls, used to detect TOCTOU
+    /// symlink swaps before writing.
+    pub resolved_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

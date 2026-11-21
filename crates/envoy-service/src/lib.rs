@@ -11,6 +11,7 @@ mod local_direct;
 mod policy;
 pub mod remote;
 pub mod server;
+mod server_search;
 pub mod transport;
 
 pub use client::{

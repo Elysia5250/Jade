@@ -88,7 +88,7 @@ crates/envoy-cli/src/
 ## Permission lifecycle
 
 1. A tool call is normalized (tool, action, resource).
-2. Explicit rule precedence (`Managed Deny > Local Deny > Hard Protected Guard > Managed Ask > Local Ask > Managed Allow > Local Allow > Mode Baseline`) produces `allow`/`ask`/`deny`.
+2. Explicit rule precedence (`Managed Deny > Local Deny > Hard Protected Guard > Managed Ask > Local Ask > Managed Allow > Local Allow > Mode Baseline`) produces `allow`/`ask`/`deny`. `auto` and `turbo` short-circuit to `allow` right after the deny rules (turbo always, auto only when the sandbox enforces the workspace boundary), except for protected paths.
 3. A `deny` short-circuits; an `ask` creates an approval request (`AskBroker`) or fails cleanly on non-interactive MCP stdio.
 4. `envoy-core::sandbox` enforces filesystem and network limits after approval. Backends are `bwrap`, then Linux Landlock, then macOS Seatbelt (`sandbox-exec`). With no backend the command is refused. Local and remote agent `exec` default to an offline workspace write. Landlock cannot hide `~/.ssh`, `~/.aws`, or `.env`. Human shell and `envoy run` stay unsandboxed.
 5. The decision and sandbox mode are appended to `<data_dir>/agent/permission_audit.jsonl` (the data directory defaults to `~/.envoy`). Hook decisions go to `<data_dir>/agent/hook_audit.jsonl`, and agent invocations to `<data_dir>/agent/audit.log`. Each of those logs rotates at 10 MiB, keeping one previous generation named with a `.1` suffix.
@@ -97,11 +97,11 @@ crates/envoy-cli/src/
 ## Where to look
 
 - Protocol: `crates/envoy-proto/src/lib.rs`, `crates/envoy-agent/src/runtime/`
-- Sandbox & search: `crates/envoy-core/src/{sandbox.rs,seatbelt.rs,search.rs}`
+- Sandbox & search: `crates/envoy-core/src/{sandbox/,seatbelt.rs,search.rs}`
 - Agent loop & tools: `crates/envoy-agent/src/agent/{loop.rs,tools/}`
 - Compaction: `crates/envoy-agent/src/agent/context/`
 - Permissions: `crates/envoy-agent/src/permissions/`
 - Skills & MCP: `crates/envoy-agent/src/{skills,mcp}/`
 - Console: `crates/envoy-cli/src/tui/`
-- Research and rationale: `docs/HARNESS-RESEARCH.md`
+- Research and rationale: `docs/achieved/HARNESS-RESEARCH.md` (archived snapshot, 2026-11-16)
 - Cross-repo `conduit` / `grain` / `envoy` split archive: root `ARCHITECTURE.md` (kept in sync across the three repos; this file is the live internal map for `envoy`)

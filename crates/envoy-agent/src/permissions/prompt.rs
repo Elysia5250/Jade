@@ -84,7 +84,7 @@ pub(super) async fn prompt_user_approval(
     let timeout_s = 120u64;
     let _gate = asks.acquire_prompt().await;
     let id = asks.next_id();
-    let (send, recv) = oneshot::channel();
+    let (send, mut recv) = oneshot::channel();
     asks.register(id, send);
     let _ = tx.send(AgentEvent::Ask {
         id,
@@ -94,17 +94,16 @@ pub(super) async fn prompt_user_approval(
         timeout_ms: timeout_s * 1000,
     });
 
-    let answer = tokio::time::timeout(Duration::from_secs(timeout_s), recv).await;
+    let answer = asks
+        .wait_for_answer(id, Duration::from_secs(timeout_s), &mut recv)
+        .await;
     asks.forget(id);
-    let chosen = match answer {
-        Ok(Ok(label)) => label,
-        _ => {
-            let _ = tx.send(AgentEvent::AskClosed { id });
-            return Ok(ApprovalChoice::Deny);
-        }
+    let Some(label) = answer else {
+        let _ = tx.send(AgentEvent::AskClosed { id });
+        return Ok(ApprovalChoice::Deny);
     };
 
-    Ok(match chosen.as_str() {
+    Ok(match label.as_str() {
         "Allow once (with network)" => ApprovalChoice::OnceWithNet,
         "Allow once (with expanded path)" => ApprovalChoice::OnceExpanded,
         "Allow once (unsandboxed)" => ApprovalChoice::OnceOutsideSandbox,

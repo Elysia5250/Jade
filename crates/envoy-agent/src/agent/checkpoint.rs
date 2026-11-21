@@ -437,6 +437,7 @@ mod tests {
             tool_name: None,
 
             reasoning_blocks: Vec::new(),
+            images: Vec::new(),
         }];
         let c2 = store.begin_turn("second prompt", msg1, 1);
         store.record_file_change(c2, "/w/a.txt".into(), true, "v2".into(), true);

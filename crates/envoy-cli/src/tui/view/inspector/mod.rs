@@ -1,10 +1,12 @@
 //! Universal right-hand Inspector drawer (`Overview`, `Diff`, `File`, `Out`, `Info`).
 use crate::tui::*;
 
+mod agent_view;
 mod diff_view;
 mod file_view;
 mod output_view;
 mod overview;
+mod side_view;
 
 pub(in crate::tui) fn draw_inspector(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     app.ui.inspector.last_area = area;
@@ -52,15 +54,34 @@ pub(in crate::tui) fn draw_inspector(frame: &mut Frame, app: &mut App, theme: &T
         InspectorTab::File => file_view::draw_file_view(frame, app, theme, body),
         InspectorTab::Output => output_view::draw_output_view(frame, app, theme, body),
         InspectorTab::Inspect => output_view::draw_inspect_view(frame, app, theme, body),
+        InspectorTab::Agent => agent_view::draw_agent_view(frame, app, theme, body),
+        InspectorTab::Side => side_view::draw_side_view(frame, app, theme, body),
     }
 }
 
 fn draw_tab_bar(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
+    let close_label = "[x]";
+    let close_w = display_width(close_label) as u16;
+    if area.width < close_w {
+        return;
+    }
+    // Reserve the close button before laying out tabs, so a long tab row can
+    // never push `[x]` off the right edge of the drawer.
+    let close_x = (area.x + area.width).saturating_sub(close_w);
+    let tabs_right = close_x.saturating_sub(1);
+
     let mut spans: Vec<Span> = Vec::new();
     let mut cursor_x = area.x;
     let focused = app.ui.focus == Focus::Sidebar;
 
-    for tab in InspectorTab::ALL {
+    let mut tabs: Vec<InspectorTab> = InspectorTab::ALL.to_vec();
+    if app.ui.inspector.subagent.is_some() {
+        tabs.push(InspectorTab::Agent);
+    }
+    if app.ui.side_open {
+        tabs.push(InspectorTab::Side);
+    }
+    for tab in tabs {
         let active = app.ui.inspector.tab == tab;
         let label = if tab == InspectorTab::Diff && !app.session.current.changed_files.is_empty() {
             format!(" 2 Diff({}) ", app.session.current.changed_files.len())
@@ -68,7 +89,7 @@ fn draw_tab_bar(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
             format!(" {} ", tab.label())
         };
         let w = display_width(&label) as u16;
-        if cursor_x + w > area.x + area.width {
+        if cursor_x.saturating_add(w) > tabs_right {
             break;
         }
         let style = if active {
@@ -96,25 +117,20 @@ fn draw_tab_bar(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
         cursor_x += w;
     }
 
-    let close_label = "[x]";
-    let close_w = display_width(close_label) as u16;
-    if cursor_x + close_w < area.x + area.width {
-        let close_x = area.x + area.width - close_w;
-        let pad = close_x.saturating_sub(cursor_x) as usize;
-        if pad > 0 {
-            spans.push(Span::raw(" ".repeat(pad)));
-        }
-        app.ui.hit_regions.push(HitRegion {
-            rect: Rect {
-                x: close_x,
-                y: area.y,
-                width: close_w,
-                height: 1,
-            },
-            target: HitTarget::ToggleSidebar,
-        });
-        spans.push(Span::styled(close_label, Style::default().fg(theme.dim)));
+    let pad = close_x.saturating_sub(cursor_x) as usize;
+    if pad > 0 {
+        spans.push(Span::raw(" ".repeat(pad)));
     }
+    app.ui.hit_regions.push(HitRegion {
+        rect: Rect {
+            x: close_x,
+            y: area.y,
+            width: close_w,
+            height: 1,
+        },
+        target: HitTarget::ToggleSidebar,
+    });
+    spans.push(Span::styled(close_label, Style::default().fg(theme.dim)));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }

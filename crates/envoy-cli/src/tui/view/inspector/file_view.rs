@@ -39,6 +39,9 @@ pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
     };
 
     let (rel, body) = preview_text(app, &raw_path);
+    let lang = Lang::from_path(Path::new(&rel));
+    let is_md = lang == Lang::Markdown;
+    let render_md = is_md && !app.ui.inspector.markdown_raw;
     let has_diff = app.inputs.has_diff;
 
     let line_label = app
@@ -47,9 +50,19 @@ pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
         .file_line
         .map(|l| format!(":{l}"))
         .unwrap_or_default();
+    let md_label = if !is_md {
+        ""
+    } else if render_md {
+        "[Raw]"
+    } else {
+        "[Preview]"
+    };
+    let right_reserve = 2
+        + if is_md { md_label.len() + 2 } else { 0 }
+        + if has_diff { 8 } else { 0 };
     let header_title = truncate_width(
         &format!("{rel}{line_label}"),
-        header_area.width.saturating_sub(14) as usize,
+        header_area.width.saturating_sub(right_reserve as u16) as usize,
     );
 
     let mut header_spans = vec![LinkedSpan {
@@ -59,6 +72,21 @@ pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
         ),
         target: None,
     }];
+    if is_md {
+        header_spans.push(LinkedSpan {
+            span: Span::raw("  "),
+            target: None,
+        });
+        header_spans.push(LinkedSpan {
+            span: Span::styled(
+                md_label,
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+            target: Some(HitTarget::ToggleFileMarkdown),
+        });
+    }
     if has_diff {
         header_spans.push(LinkedSpan {
             span: Span::raw("  "),
@@ -103,7 +131,31 @@ pub(super) fn draw_file_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
         return;
     };
 
-    let lang = Lang::from_path(Path::new(&rel));
+    if render_md {
+        let md_w = body_area.width.saturating_sub(1).max(12) as usize;
+        let mut rows: Vec<LinkedLine> = Vec::new();
+        if app.inputs.truncated {
+            rows.push(LinkedLine::from_line(Line::styled(
+                "  [preview truncated at 512 KiB]",
+                Style::default().fg(theme.warn),
+            )));
+        }
+        rows.extend(render_markdown_linked_with_code_bg(
+            &text,
+            md_w,
+            theme,
+            &app.session.current.cwd,
+            &app.session.current.changed_files,
+            &app.session.workspace_index,
+            theme.bg,
+        ));
+        let max_scroll = rows.len().saturating_sub(body_area.height as usize);
+        app.ui.inspector.max_scroll = max_scroll;
+        app.ui.inspector.scroll = app.ui.inspector.scroll.min(max_scroll);
+        push_linked_rows(frame, app, &rows, app.ui.inspector.scroll, body_area);
+        return;
+    }
+
     let target_line = app.ui.inspector.file_line;
 
     let mut lines: Vec<Line<'static>> = Vec::new();

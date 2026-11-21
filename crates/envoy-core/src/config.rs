@@ -7,6 +7,7 @@ use std::path::PathBuf;
 /// Remote-tool policy for this device. Off by default: remote execution needs
 /// an explicit opt-in and an explicit caller allowlist.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AgentConfig {
     pub enabled: bool,
     /// Caller ids allowed to invoke tools here (`local` is always allowed in-process).
@@ -97,6 +98,9 @@ impl AgentConfigStore {
     }
 
     pub fn allow(&mut self, caller_id: String) -> Result<()> {
+        if caller_id.trim().is_empty() {
+            anyhow::bail!("caller id cannot be empty");
+        }
         if !self.config.allow.contains(&caller_id) {
             self.config.allow.push(caller_id);
         }
@@ -131,6 +135,9 @@ pub fn gate(cfg: &AgentConfig, caller: &Caller) -> Option<String> {
     match caller {
         Caller::Local => None,
         Caller::Remote(id) => {
+            if id.trim().is_empty() {
+                return Some("empty caller id is not allowed".into());
+            }
             if !cfg.enabled {
                 return Some("agent disabled on this device (envoy enable)".into());
             }
@@ -214,5 +221,30 @@ mod tests {
         store2.deny("peer-1").unwrap();
         assert!(store2.config.allow.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gate_and_allow_reject_empty_caller_id() {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("agent-cfg-empty-{n}"));
+        let mut store = AgentConfigStore::open(dir.clone()).unwrap();
+        assert!(store.allow(String::new()).is_err());
+        assert!(store.allow("   ".into()).is_err());
+
+        let c = cfg(true, &[""]);
+        assert!(gate(&c, &Caller::Remote(String::new())).is_some());
+        assert!(gate(&c, &Caller::Remote("  ".into())).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn partial_agent_config_uses_defaults() {
+        let parsed: AgentConfig = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert!(parsed.enabled);
+        assert!(parsed.allow.is_empty());
+        assert_eq!(parsed.max_jobs, 4);
     }
 }

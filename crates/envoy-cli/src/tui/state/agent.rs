@@ -55,15 +55,20 @@ impl App {
 
     /// Send while connected, otherwise hold the prompt until an attach
     /// succeeds so a daemon restart does not eat what the user typed.
-    pub(in crate::tui) fn send_agent(&mut self, text: String, mode: SendMode) {
+    pub(in crate::tui) fn send_agent(
+        &mut self,
+        text: String,
+        images: Vec<envoy_agent::session::ImageAttachment>,
+        mode: SendMode,
+    ) {
         if !self.agent.ready || self.agent.offline || self.agent.stream.is_none() {
-            self.agent.outbox.push_back((text, mode));
+            self.agent.outbox.push_back((text, images, mode));
             if self.agent.offline || self.agent.stream.is_none() {
                 self.set_toast("daemon offline - prompt queued", true);
             }
             return;
         }
-        self.dispatch_agent(vec![(text, mode)]);
+        self.dispatch_agent(vec![(text, images, mode)]);
     }
 
     fn daemon_sender(&self) -> Option<mpsc::UnboundedSender<DaemonCmd>> {
@@ -85,16 +90,22 @@ impl App {
                         session_id,
                         mut items,
                     } => {
-                        while let Some((text, mode)) = items.first().cloned() {
-                            let result = runtime::tell(
-                                &data_dir,
+                        while let Some((text, images, mode)) = items.first().cloned() {
+                            let req = if images.is_empty() {
                                 AgentReq::Send {
                                     id: session_id.clone(),
                                     text,
                                     mode,
-                                },
-                            )
-                            .await;
+                                }
+                            } else {
+                                AgentReq::SendImages {
+                                    id: session_id.clone(),
+                                    text,
+                                    images,
+                                    mode,
+                                }
+                            };
+                            let result = runtime::tell(&data_dir, req).await;
                             if result.is_err() {
                                 let _ = notice.send(UiNotice::Requeue { session_id, items });
                                 break;
@@ -119,7 +130,10 @@ impl App {
         Some(tx)
     }
 
-    pub(in crate::tui) fn dispatch_agent(&self, items: Vec<(String, SendMode)>) {
+    pub(in crate::tui) fn dispatch_agent(
+        &self,
+        items: Vec<(String, Vec<envoy_agent::session::ImageAttachment>, SendMode)>,
+    ) {
         if items.is_empty() {
             return;
         }
@@ -135,12 +149,12 @@ impl App {
         if self.agent.outbox.is_empty() {
             return;
         }
-        let items: Vec<(String, SendMode)> = self.agent.outbox.drain(..).collect();
+        let items: Vec<_> = self.agent.outbox.drain(..).collect();
         self.dispatch_agent(items);
     }
 
     pub(in crate::tui) fn remove_outbox(&mut self, text: &str) {
-        if let Some(pos) = self.agent.outbox.iter().rposition(|(t, _)| t == text) {
+        if let Some(pos) = self.agent.outbox.iter().rposition(|(t, _, _)| t == text) {
             self.agent.outbox.remove(pos);
         }
     }
@@ -258,6 +272,12 @@ impl App {
                 }
                 self.push_notice(msg, err);
             }
+            UiNotice::LiveSessions(list) => {
+                self.apply_hub_live_sessions(list);
+            }
+            UiNotice::McpProbeLines(lines) => {
+                self.apply_hub_mcp_probe(lines);
+            }
         }
     }
 
@@ -274,6 +294,14 @@ impl App {
         let id = self.session.current.id.clone();
         let focus = (!focus.trim().is_empty()).then(|| focus.trim().to_string());
         let notice = self.notice_tx.clone();
+        self.set_toast(
+            if handoff {
+                "handoff compacting..."
+            } else {
+                "compacting..."
+            },
+            false,
+        );
         let req = if handoff {
             AgentReq::Handoff {
                 id: id.clone(),
@@ -307,12 +335,16 @@ impl App {
         });
     }
 
-    pub(in crate::tui) fn start_agent_turn(&mut self, prompt: String) {
+    pub(in crate::tui) fn start_agent_turn(
+        &mut self,
+        prompt: String,
+        images: Vec<envoy_agent::session::ImageAttachment>,
+    ) {
         self.ui.follow = true;
         if !self.agent.offline && self.agent.stream.is_some() {
             self.agent.running = true;
         }
-        self.send_agent(prompt, SendMode::Prompt);
+        self.send_agent(prompt, images, SendMode::Prompt);
     }
 
     pub(in crate::tui) fn drain_agent_events(&mut self) -> bool {
@@ -392,6 +424,7 @@ impl App {
             self.agent.stream = None;
             self.agent.ready = false;
             self.agent.running = false;
+            self.agent.turn_started_at = None;
             self.agent.retry_at = Instant::now() + Duration::from_millis(750);
             if !self.agent.offline {
                 self.agent.offline = true;
@@ -444,6 +477,11 @@ impl App {
         // The daemon is authoritative: a console that missed a TurnDone must
         // not stay stuck in "running".
         self.agent.running = running;
+        if running {
+            self.agent.turn_started_at.get_or_insert_with(Instant::now);
+        } else {
+            self.agent.turn_started_at = None;
+        }
         self.agent.offline = false;
         self.agent.ready = true;
         if running {
@@ -472,28 +510,54 @@ impl App {
         false
     }
 
-    /// Enter while idle starts a turn; while running it steers the loop with
-    /// the user's exact words at the next tool boundary.
+    /// Enter while idle starts a worker turn. While a worker turn is running,
+    /// Enter opens the plan sidechat. The side composer only talks to that thread.
+    /// Ctrl+Enter is [`Self::submit_agent_steer`].
     pub(in crate::tui) fn submit_agent(&mut self, prompt: String) {
         if !self.ensure_provider_or_login(&prompt) {
             return;
         }
-        let was_running = self.agent.running;
-        // Always `Prompt`: the daemon starts a turn when idle and steers the
-        // live one otherwise. Keeping the decision on the server side means a
-        // stale console flag cannot swallow the next task.
-        self.start_agent_turn(prompt);
-        if was_running {
+        let images = std::mem::take(&mut self.ui.pending_images);
+        match self.send_mode_for_submit() {
+            SendMode::Side => {
+                self.send_agent(prompt, images, SendMode::Side);
+                self.open_side_pane();
+            }
+            SendMode::SideTalk => self.send_agent(prompt, images, SendMode::SideTalk),
+            _ => self.start_agent_turn(prompt, images),
+        }
+    }
+
+    /// Ctrl+Enter. Steers the worker from the main composer. From the side
+    /// composer it only steers the side thread.
+    pub(in crate::tui) fn submit_agent_steer(&mut self, prompt: String) {
+        if !self.ensure_provider_or_login(&prompt) {
+            return;
+        }
+        let images = std::mem::take(&mut self.ui.pending_images);
+        if self.ui.focus == Focus::Side {
+            self.send_agent(prompt, images, SendMode::SideTalk);
+            return;
+        }
+        self.send_agent(prompt, images, SendMode::Steer);
+        if self.agent.running {
             self.set_toast("steer queued for the next tool boundary", false);
         }
     }
 
     /// Alt+Enter: deliver after the current run finishes.
+    /// From the side composer this queues on the side thread only.
     pub(in crate::tui) fn queue_followup(&mut self, prompt: String) {
         if !self.ensure_provider_or_login(&prompt) {
             return;
         }
-        self.send_agent(prompt.clone(), SendMode::FollowUp);
+        let images = std::mem::take(&mut self.ui.pending_images);
+        if self.ui.focus == Focus::Side {
+            self.send_agent(prompt, images, SendMode::SideQueue);
+            self.set_toast("side follow-up queued", false);
+            return;
+        }
+        self.send_agent(prompt.clone(), images, SendMode::FollowUp);
         self.agent.queued.push_back(prompt);
         self.set_toast("follow-up queued", false);
     }
@@ -503,7 +567,27 @@ impl App {
         self.sync_agent(AgentReq::Answer { id, ask_id, label });
     }
 
+    /// Report the first interaction with a shown prompt, which stops the
+    /// daemon's answer clock so the recommended option is never taken out from
+    /// under a user who is still reading or moving the cursor.
+    pub(in crate::tui) fn engage_ask(&mut self) {
+        let Some(ask_id) = self.agent.pending_ask.as_mut().and_then(|ask| {
+            if ask.touched {
+                return None;
+            }
+            ask.touched = true;
+            ask.paused_left = Some(ask.deadline.saturating_duration_since(Instant::now()));
+            Some(ask.id)
+        }) else {
+            return;
+        };
+        let id = self.session.current.id.clone();
+        self.sync_agent(AgentReq::AskTouched { id, ask_id });
+    }
+
     pub(in crate::tui) fn handle_ask_key(&mut self, key: KeyEvent) -> Action {
+        // Any keypress is a reaction, so the countdown stops before it fires.
+        self.engage_ask();
         let Some(mut ask) = self.agent.pending_ask.take() else {
             return Action::None;
         };
@@ -547,6 +631,7 @@ fn req_session_id(req: &AgentReq) -> Option<&str> {
         AgentReq::Send { id, .. }
         | AgentReq::Interrupt { id }
         | AgentReq::Answer { id, .. }
+        | AgentReq::AskTouched { id, .. }
         | AgentReq::SetPermissionMode { id, .. }
         | AgentReq::SetCwd { id, .. }
         | AgentReq::SetTarget { id, .. }

@@ -2,6 +2,9 @@
 use super::*;
 
 mod ask;
+mod bar;
+mod composer_bar;
+mod delegate;
 mod editor;
 mod inspector;
 mod menus;
@@ -9,20 +12,22 @@ mod modals;
 mod queued;
 mod sidebar;
 mod status;
+mod top_bar;
 mod transcript;
 mod transcript_cards;
 mod transcript_fold;
 mod transcript_tool;
 mod welcome;
-mod welcome_panels;
 
 use ask::{ask_inline_height, draw_ask};
+use composer_bar::draw_composer_bar;
 use editor::draw_editor;
 use menus::{draw_at_menu, draw_cd_menu, draw_slash_menu};
 use modals::draw_modal;
 use queued::draw_queued;
 use sidebar::draw_sidebar;
 use status::draw_status;
+use top_bar::draw_top_bar;
 use transcript::draw_transcript;
 use welcome::draw_workspace_picker;
 
@@ -98,12 +103,33 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
         );
     }
 
-    let column = centered_column(main_area, 96);
+    let show_top_sep = main_area.height >= 18;
+    let top_h: u16 = if show_top_sep {
+        2
+    } else if main_area.height >= 6 {
+        1
+    } else {
+        0
+    };
+    let bottom_h: u16 = if main_area.height >= 4 { 1 } else { 0 };
+    let main_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(top_h),
+            Constraint::Min(1),
+            Constraint::Length(bottom_h),
+        ])
+        .split(main_area);
+    let top_bar_area = main_chunks[0];
+    let middle_area = main_chunks[1];
+    let bottom_bar_area = main_chunks[2];
+
+    let column = centered_column(middle_area, 96);
     let editor_inner_width = column.width.saturating_sub(8).max(10) as usize;
     let (visual_lines, cursor_row, cursor_col) =
         layout_editor_text(&app.ui.input, app.ui.input_cursor, editor_inner_width);
     let inner_rows = visual_lines.len().clamp(2, 8) as u16;
-    let v_pad: u16 = if main_area.height >= 16 { 1 } else { 0 };
+    let v_pad: u16 = if middle_area.height >= 14 { 1 } else { 0 };
     let editor_height = inner_rows + 2 + v_pad * 2;
     let max_rows = inner_rows as usize;
     let editor_skip = if cursor_row >= max_rows {
@@ -113,9 +139,13 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     };
 
     let ask_h = ask_inline_height(app, column.width);
-    // Keep the composer off the transcript and the status line. An ask card
-    // sits in that upper gap and keeps a single row on either side.
-    let (body_area, ask_area, editor_area, status_area) = if ask_h > 0 {
+    let comp_h: u16 = if middle_area.height >= editor_height + 4 {
+        1
+    } else {
+        0
+    };
+    // Keep the reading & composer column centered while top/bottom bars span `main_area`.
+    let (body_area, ask_area, composer_bar_area, editor_area) = if ask_h > 0 {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -123,44 +153,52 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
                 Constraint::Length(1),
                 Constraint::Length(ask_h),
                 Constraint::Length(1),
+                Constraint::Length(comp_h),
                 Constraint::Length(editor_height),
-                Constraint::Length(1),
                 Constraint::Length(1),
             ])
             .split(column);
-        (chunks[0], Some(chunks[2]), chunks[4], chunks[6])
+        (chunks[0], Some(chunks[2]), chunks[4], chunks[5])
     } else {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(3),
-                Constraint::Length(2),
-                Constraint::Length(editor_height),
                 Constraint::Length(1),
+                Constraint::Length(comp_h),
+                Constraint::Length(editor_height),
                 Constraint::Length(1),
             ])
             .split(column);
-        (chunks[0], None, chunks[2], chunks[4])
+        (chunks[0], None, chunks[2], chunks[3])
     };
 
+    draw_top_bar(frame, app, &theme, top_bar_area, show_top_sep);
     draw_transcript(frame, app, &theme, body_area);
     if let Some(sidebar) = sidebar_area {
         draw_sidebar(frame, app, &theme, sidebar);
     }
+    draw_composer_bar(frame, app, &theme, composer_bar_area);
     draw_editor(frame, app, &theme, editor_area, &visual_lines, editor_skip);
-    draw_status(frame, app, &theme, status_area);
-    draw_queued(frame, app, &theme, editor_area);
+    draw_status(frame, app, &theme, bottom_bar_area);
+
+    let overlay_anchor = if composer_bar_area.height > 0 && composer_bar_area.y >= 3 {
+        composer_bar_area
+    } else {
+        editor_area
+    };
+    draw_queued(frame, app, &theme, overlay_anchor);
 
     if let Some(ask_rect) = ask_area {
         draw_ask(frame, app, &theme, ask_rect);
     } else {
         if app.ui.focus == Focus::Input && app.ui.modal.is_none() {
             if !app.inputs.cd_comps.is_empty() {
-                draw_cd_menu(frame, app, &theme, editor_area);
+                draw_cd_menu(frame, app, &theme, overlay_anchor);
             } else if !app.filtered_slash().is_empty() {
-                draw_slash_menu(frame, app, &theme, editor_area);
+                draw_slash_menu(frame, app, &theme, overlay_anchor);
             } else if !app.file_completions().is_empty() {
-                draw_at_menu(frame, app, &theme, editor_area);
+                draw_at_menu(frame, app, &theme, overlay_anchor);
             }
         }
         if app.ui.modal.is_some() {
@@ -234,11 +272,16 @@ pub(in crate::tui) fn snapshot_screen_lines(
     let area = buf.area;
     let total_rows = (area.y + area.height) as usize;
     let total_cols = (area.x + area.width) as usize;
-    out.clear();
-    out.resize_with(total_rows, || vec![String::new(); total_cols]);
+    out.resize_with(total_rows, Vec::new);
+    for row_vec in out.iter_mut() {
+        row_vec.resize_with(total_cols, String::new);
+    }
     for row in area.y..area.y + area.height {
+        let row_vec = &mut out[row as usize];
         for col in area.x..area.x + area.width {
-            out[row as usize][col as usize] = buf[(col, row)].symbol().to_string();
+            let cell = &mut row_vec[col as usize];
+            cell.clear();
+            cell.push_str(buf[(col, row)].symbol());
         }
     }
 }

@@ -87,13 +87,18 @@ pub(super) fn render_tool_header(
         } else {
             done_verb
         };
-        let mut diff_badge = String::new();
-        if matches!(name, "edit" | "write") {
-            if let Some(idx) = app.find_changed_file_index_cached(&rel) {
+        // Kept as (added, removed) so the two counts can be coloured apart.
+        let diff_counts = if matches!(name, "edit" | "write") {
+            app.find_changed_file_index_cached(&rel).map(|idx| {
                 let fc = &app.session.current.changed_files[idx];
-                diff_badge = format!("  +{} -{}", fc.added, fc.removed);
-            }
-        }
+                (fc.added, fc.removed)
+            })
+        } else {
+            None
+        };
+        let diff_badge = diff_counts
+            .map(|(added, removed)| format!("  +{added} -{removed}"))
+            .unwrap_or_default();
         let meta = format!("  {}", meta_parts.join(" - "));
         let hide_len = if collapsed { 0 } else { 8 };
         let budget = width
@@ -140,9 +145,13 @@ pub(super) fn render_tool_header(
                 line: None,
             }),
         });
-        if !diff_badge.is_empty() {
+        if let Some((added, removed)) = diff_counts {
             spans.push(LinkedSpan {
-                span: Span::styled(diff_badge, Style::default().fg(theme.ok)),
+                span: Span::styled(format!("  +{added}"), Style::default().fg(theme.ok)),
+                target: None,
+            });
+            spans.push(LinkedSpan {
+                span: Span::styled(format!(" -{removed}"), Style::default().fg(theme.bad)),
                 target: None,
             });
         }

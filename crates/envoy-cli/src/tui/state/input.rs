@@ -3,6 +3,9 @@ use super::*;
 
 impl App {
     pub(in crate::tui) fn handle_key(&mut self, key: KeyEvent) -> Action {
+        if key.code != KeyCode::Esc {
+            self.ui.interrupt_at = None;
+        }
         if self.ui.welcome.is_some()
             && key.code == KeyCode::Char('c')
             && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -49,6 +52,7 @@ impl App {
                         's' => Some(Command::Refresh),
                         'l' => Some(Command::OpenLogin),
                         'm' => Some(Command::OpenModels),
+                        'h' => Some(Command::OpenHub),
                         _ => None,
                     };
                     if let Some(cmd) = cmd {
@@ -117,6 +121,9 @@ impl App {
         if self.ui.focus == Focus::Input {
             return self.handle_input_key(key);
         }
+        if self.ui.focus == Focus::Side {
+            return self.handle_side_key(key);
+        }
 
         if self.ui.focus == Focus::Sidebar {
             match key.code {
@@ -126,10 +133,15 @@ impl App {
                 KeyCode::Char('4') => return self.focus_inspector_tab(InspectorTab::Output),
                 KeyCode::Char('5') => return self.focus_inspector_tab(InspectorTab::Inspect),
                 KeyCode::Char('v') => {
-                    self.ui.inspector.diff_layout = match self.ui.inspector.diff_layout {
-                        diff::DiffLayout::Unified => diff::DiffLayout::Split,
-                        diff::DiffLayout::Split => diff::DiffLayout::Unified,
-                    };
+                    if self.ui.inspector.tab == InspectorTab::File {
+                        self.ui.inspector.markdown_raw = !self.ui.inspector.markdown_raw;
+                        self.ui.inspector.scroll = 0;
+                    } else {
+                        self.ui.inspector.diff_layout = match self.ui.inspector.diff_layout {
+                            diff::DiffLayout::Unified => diff::DiffLayout::Split,
+                            diff::DiffLayout::Split => diff::DiffLayout::Unified,
+                        };
+                    }
                     return Action::None;
                 }
                 KeyCode::Char('n') => {
@@ -172,7 +184,7 @@ impl App {
             }
             KeyCode::Esc => {
                 if self.agent.running {
-                    return Action::Cancel;
+                    return self.esc_interrupt();
                 }
                 self.ui.focus = Focus::Input;
                 Action::None
@@ -198,6 +210,7 @@ impl App {
                         self.ui.transcript_scroll = self.ui.transcript_scroll.saturating_sub(2);
                     }
                     Focus::Input => {}
+                    Focus::Side => {}
                 }
                 Action::None
             }
@@ -232,6 +245,7 @@ impl App {
                         self.ui.transcript_scroll = self.ui.transcript_scroll.saturating_add(2);
                     }
                     Focus::Input => {}
+                    Focus::Side => {}
                 }
                 Action::None
             }
@@ -325,6 +339,25 @@ impl App {
             KeyCode::Char('q') => Action::Quit,
             _ => Action::None,
         }
+    }
+
+    /// Interrupting a running turn takes two `Esc` presses. The first arms it
+    /// and hints in the status bar; a second one inside [`INTERRUPT_TIMEOUT`]
+    /// cancels. Any other key disarms, so a stale press can never leak into
+    /// the next turn.
+    pub(in crate::tui) fn esc_interrupt(&mut self) -> Action {
+        let armed = self
+            .ui
+            .interrupt_at
+            .map(|at| at.elapsed() <= INTERRUPT_TIMEOUT)
+            .unwrap_or(false);
+        self.ui.interrupt_at = None;
+        if armed {
+            return Action::Cancel;
+        }
+        self.ui.interrupt_at = Some(Instant::now());
+        self.set_toast("press Esc again to interrupt", false);
+        Action::None
     }
 
     pub(in crate::tui) fn focus_inspector_tab(&mut self, tab: InspectorTab) -> Action {

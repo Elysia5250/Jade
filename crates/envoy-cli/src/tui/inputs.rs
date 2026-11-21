@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 pub(crate) const FILE_PREVIEW_LIMIT: usize = 512 * 1024;
 const CATALOG_TTL: Duration = Duration::from_secs(2);
+const GIT_DIRTY_TTL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TodoMark {
@@ -48,10 +49,16 @@ pub(crate) struct Catalog {
     pub(crate) compact_at: u64,
     pub(crate) hard_window: u64,
     pub(crate) tier: String,
+    pub(crate) effort_level: String,
+    pub(crate) effort_options: Vec<String>,
+    pub(crate) delegate_level: envoy_agent::agent::delegate_pref::DelegateLevel,
     pub(crate) sandbox_label: String,
     pub(crate) bwrap_present: bool,
     pub(crate) trusted: bool,
     pub(crate) daemon_online: bool,
+    pub(crate) git_branch: Option<String>,
+    pub(crate) git_worktree: Option<String>,
+    pub(crate) git_dirty: bool,
     pub(crate) mcp: Vec<McpSnap>,
     pub(crate) skills: Vec<SkillSnap>,
     pub(crate) todos: Vec<TodoSnap>,
@@ -76,6 +83,7 @@ struct RemoteFill {
 
 pub(crate) struct Inputs {
     pub(crate) catalog: Catalog,
+    pub(crate) live_sessions: Vec<envoy_agent::runtime::SessionInfo>,
     pub(crate) cd_comps: Vec<(String, String)>,
     pub(crate) welcome_path_comps: Vec<(String, String)>,
     pub(crate) preview: PreviewBody,
@@ -85,6 +93,7 @@ pub(crate) struct Inputs {
     pub(crate) diff_git: Option<(String, String)>,
     catalog_key: String,
     catalog_at: Option<Instant>,
+    git_dirty_cache: Option<(PathBuf, bool, Instant)>,
     cd_key: Option<(PathBuf, String)>,
     welcome_path_key: Option<(PathBuf, String)>,
     preview_key: String,
@@ -96,6 +105,7 @@ impl Default for Inputs {
     fn default() -> Self {
         Self {
             catalog: Catalog::default(),
+            live_sessions: Vec::new(),
             cd_comps: Vec::new(),
             welcome_path_comps: Vec::new(),
             preview: PreviewBody::Absent,
@@ -105,6 +115,7 @@ impl Default for Inputs {
             diff_git: None,
             catalog_key: String::new(),
             catalog_at: None,
+            git_dirty_cache: None,
             cd_key: None,
             welcome_path_key: None,
             preview_key: String::new(),
@@ -118,6 +129,7 @@ impl Inputs {
     pub(crate) fn invalidate_catalog(&mut self) {
         self.catalog_key.clear();
         self.catalog_at = None;
+        self.git_dirty_cache = None;
     }
 
     pub(crate) fn preview_key_clear(&mut self) {
@@ -130,6 +142,7 @@ impl Inputs {
         self.preview_key.clear();
         self.cd_key = None;
         self.welcome_path_key = None;
+        self.git_dirty_cache = None;
         self.invalidate_catalog();
     }
 }
@@ -238,26 +251,53 @@ fn catalog_key(app: &App) -> String {
 fn fill_catalog(app: &mut App) {
     let key = catalog_key(app);
     let backend = envoy_core::sandbox::probe_backend();
+    let git = if target_is_local(&app.jobs.target) {
+        git_info::probe_git_info(
+            &app.session.current.cwd,
+            &mut app.inputs.git_dirty_cache,
+            GIT_DIRTY_TTL,
+        )
+    } else {
+        git_info::GitInfo::default()
+    };
     let mut catalog = Catalog {
         connected_providers: effective_providers(&app.data_dir)
             .into_iter()
             .map(|(id, sp)| (id, sp.credential.kind_label()))
             .collect(),
+        effort_level: envoy_agent::agent::effort::load(&app.data_dir),
+        delegate_level: envoy_agent::agent::delegate_pref::load(&app.data_dir),
         sandbox_label: envoy_core::sandbox::backend_label().to_string(),
         bwrap_present: matches!(backend, envoy_core::sandbox::SandboxBackend::Bwrap(_)),
         trusted: is_workspace_trusted(&app.data_dir, &app.session.current.cwd),
         daemon_online: daemon::socket_path(&app.data_dir).exists(),
+        git_branch: git.branch,
+        git_worktree: git.worktree,
+        git_dirty: git.dirty,
         ..Catalog::default()
     };
     if let Some((prov, model)) = resolve_active_provider(&app.data_dir) {
         let budget =
             envoy_agent::agent::context::resolve_budget(&app.data_dir, &prov.id, &model.model_id);
+        let mut opts = Vec::new();
+        if let Some(spec) =
+            envoy_agent::agent::effort::advertised(&app.data_dir, &prov.id, &model.model_id)
+        {
+            opts = spec.efforts.clone();
+            if spec.toggle
+                && !opts.iter().any(|l| l == "off" || l == "none")
+                && envoy_agent::agent::effort::accepts(&spec, prov.protocol, "off")
+            {
+                opts.push("off".to_string());
+            }
+        }
         catalog.signed_in = true;
         catalog.provider_id = prov.id;
         catalog.model_id = model.model_id;
         catalog.compact_at = budget.compact_at;
         catalog.hard_window = budget.hard_window;
         catalog.tier = budget.tier.to_string();
+        catalog.effort_options = opts;
     }
     let mcp = envoy_agent::mcp::config::load_mcp_configs(&app.data_dir, &app.session.current.cwd);
     catalog.mcp = mcp

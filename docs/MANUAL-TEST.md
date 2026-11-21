@@ -5,7 +5,7 @@
 | 界面 | 形态 | 适合 |
 |---|---|---|
 | `envoy` CLI | 终端 | 日常操作、脚本、演示 |
-| `envoy ui` | 终端 TUI（opencode 布局） | 手动看任务、跟日志、取消 |
+| `envoy`（裸命令） | 终端 TUI | 交互式会话、看任务、跟日志、取消 |
 | `envoy mcp serve` | stdio JSON-RPC | Claude/Cursor 等 MCP 客户端 |
 | Unix socket | 二进制协议 | 自己写前端时的底层接口 |
 
@@ -23,7 +23,7 @@ B=target/release/envoy                     # 或 target/debug/envoy
 
 ```bash
 $B daemon start          # => daemon started (.../envoy.sock)
-$B status                # => enabled/allow/max_jobs/daemon/jobs/protocol: v2
+$B status                # => enabled/allow/max_jobs/daemon/jobs/protocol
 
 $B run "echo hello; echo err >&2; exit 3"
 # => err / hello / exit=3，进程退出码也是 3
@@ -50,7 +50,7 @@ $B daemon stop
 TUI（需要真终端）：
 
 ```bash
-$B ui
+$B
 # 空白会话只有底部输入框。状态行：模式、工作区、模型、上下文用量
 # ctrl+p 打开命令面板；ctrl+x q 退出
 ```
@@ -62,7 +62,7 @@ printf '%s\n' \
 '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
 '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"exec","arguments":{"command":"echo from-mcp","wait_s":5}}}' \
 | $B mcp serve 2>/dev/null
-# => 6 个工具：exec/read/write/edit/ls/job
+# => 8 个工具：exec/read/write/edit/ls/glob/grep/job
 #    text 为 "from-mcp\n\n[job N exit=0]"
 ```
 

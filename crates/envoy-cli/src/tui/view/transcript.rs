@@ -13,6 +13,11 @@ use super::{ensure_trailing_blanks, push_blank_linked};
 use crate::tui::links::{inline_spans_linked, LinkedSpan};
 use crate::tui::*;
 
+/// Filled diamond on assistant body text. `say` uses `SAY_MARK`, a hollow
+/// diamond of the same width, so a mid-turn report reads apart from the reply.
+pub(super) const AGENT_MARK: &str = "◆";
+pub(super) const SAY_MARK: &str = "◇";
+
 pub(super) fn draw_transcript(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     app.ui.transcript_height = area.height;
     app.ui.transcript_area = area;
@@ -258,7 +263,9 @@ fn cache_transcript_entry(
 ) {
     const TRANSCRIPT_CACHE_CAP: usize = 256;
     if !cache.contains_key(&key) && cache.len() >= TRANSCRIPT_CACHE_CAP {
-        cache.clear();
+        if let Some(&oldest) = cache.keys().min() {
+            cache.remove(&oldest);
+        }
     }
     cache.insert(key, (fp, rendered.to_vec()));
 }
@@ -273,6 +280,30 @@ fn render_single_item(
     last_notice: &mut Option<String>,
 ) {
     let item = app.session.current.items[idx].clone();
+    if let TranscriptItem::Tool {
+        name,
+        call_id,
+        status,
+        ..
+    } = &item
+    {
+        if name == "delegate" {
+            let lanes = app
+                .session
+                .current
+                .subagents
+                .get(call_id)
+                .map(Vec::as_slice);
+            let show = lanes.is_some_and(|rows| !rows.is_empty()) || *status == CardStatus::Running;
+            if show {
+                *last_notice = None;
+                lines.extend(super::delegate::render_delegate_rows(
+                    lanes, width, theme, call_id,
+                ));
+                return;
+            }
+        }
+    }
     match &item {
         TranscriptItem::User { text, .. } => {
             *last_notice = None;
@@ -397,7 +428,7 @@ fn render_single_item(
                     )
                 };
 
-                let bullet = "●";
+                let bullet = AGENT_MARK;
                 let cont = " ".repeat(display_width(bullet));
                 for (line_idx, mut rline) in rendered.into_iter().enumerate() {
                     let prefix = if line_idx == 0 {
@@ -551,7 +582,7 @@ fn render_single_item(
                     truncate_width(first, width.saturating_sub(4))
                 };
                 lines.push(LinkedLine::from_line(Line::from(vec![
-                    Span::styled("  · ", Style::default().fg(theme.accent)),
+                    Span::styled(format!("  {SAY_MARK} "), Style::default().fg(theme.accent)),
                     Span::styled(single, style),
                 ])));
                 push_blank_linked(lines);

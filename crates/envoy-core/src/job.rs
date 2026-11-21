@@ -72,7 +72,7 @@ impl Jobs {
     pub fn open(root: PathBuf, max_jobs: usize) -> Self {
         let logs = JobLogs::new(root);
         let _ = std::fs::create_dir_all(logs.dir());
-        let max_jobs = max_jobs.max(1);
+        let max_jobs = max_jobs.clamp(1, 64);
 
         let mut table = Table {
             next_id: 1,
@@ -158,7 +158,7 @@ impl Jobs {
     /// cross-group cap. Lowering it never kills running jobs; it only stops
     /// starting new ones.
     pub fn set_max_jobs(&self, max_jobs: usize) {
-        let max_jobs = max_jobs.max(1);
+        let max_jobs = max_jobs.clamp(1, 64);
         let previous = self.inner.max_jobs.swap(max_jobs, Ordering::SeqCst);
         let changed = {
             let mut t = self.inner.table.lock().unwrap();
@@ -247,13 +247,23 @@ impl Jobs {
 
     /// All retained jobs, oldest first.
     pub fn list(&self) -> Vec<Job> {
-        let t = self.inner.table.lock().unwrap();
-        t.jobs.values().map(|e| self.snapshot(e)).collect()
+        let mut jobs: Vec<Job> = {
+            let t = self.inner.table.lock().unwrap();
+            t.jobs.values().map(snapshot_entry).collect()
+        };
+        for job in &mut jobs {
+            self.attach_log_bytes(job);
+        }
+        jobs
     }
 
     pub fn get(&self, id: JobId) -> Option<Job> {
-        let t = self.inner.table.lock().unwrap();
-        t.jobs.get(&id).map(|e| self.snapshot(e))
+        let mut job = {
+            let t = self.inner.table.lock().unwrap();
+            t.jobs.get(&id).map(snapshot_entry)
+        }?;
+        self.attach_log_bytes(&mut job);
+        Some(job)
     }
 
     pub fn log_path(&self, id: JobId) -> Option<PathBuf> {
@@ -338,18 +348,10 @@ impl Jobs {
         self.persist();
     }
 
-    fn snapshot(&self, entry: &Entry) -> Job {
-        let mut job = entry.job.clone();
-        if let Some(slot) = entry.pid_slot.as_ref() {
-            let pid = slot.load(Ordering::SeqCst);
-            if pid != 0 {
-                job.pid = Some(pid);
-            }
-        }
+    fn attach_log_bytes(&self, job: &mut Job) {
         job.log_bytes = std::fs::metadata(self.inner.logs.path(job.id))
             .map(|m| m.len())
             .unwrap_or(0);
-        job
     }
 
     /// Start every queued job whose group has capacity and whose start would
@@ -496,10 +498,13 @@ impl Jobs {
 
     fn persist(&self) {
         let _guard = self.inner.persist_lock.lock().unwrap();
-        let jobs: Vec<Job> = {
+        let mut jobs: Vec<Job> = {
             let t = self.inner.table.lock().unwrap();
-            t.jobs.values().map(|e| self.snapshot(e)).collect()
+            t.jobs.values().map(snapshot_entry).collect()
         };
+        for job in &mut jobs {
+            self.attach_log_bytes(job);
+        }
         let dir = self.inner.logs.dir();
         if std::fs::create_dir_all(&dir).is_err() {
             return;
@@ -564,6 +569,17 @@ pub fn read_available(
     budget: usize,
 ) -> std::io::Result<(Vec<envoy_proto::LogRecord>, u64)> {
     log::read_from(path, offset, budget)
+}
+
+fn snapshot_entry(entry: &Entry) -> Job {
+    let mut job = entry.job.clone();
+    if let Some(slot) = entry.pid_slot.as_ref() {
+        let pid = slot.load(Ordering::SeqCst);
+        if pid != 0 {
+            job.pid = Some(pid);
+        }
+    }
+    job
 }
 
 #[cfg(test)]

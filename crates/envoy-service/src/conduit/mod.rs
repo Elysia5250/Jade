@@ -392,8 +392,16 @@ impl ConduitClient {
 
         let mut raw = Vec::new();
         let mut buf = [0u8; 8192];
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
-            let n = stream.read(&mut buf).await?;
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                bail!("conduit response timed out for {path}");
+            }
+            let step = remaining.min(Duration::from_secs(10));
+            let n = tokio::time::timeout(step, stream.read(&mut buf))
+                .await
+                .map_err(|_| anyhow::anyhow!("conduit read timed out for {path}"))??;
             if n == 0 {
                 break;
             }

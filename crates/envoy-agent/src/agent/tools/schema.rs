@@ -176,11 +176,11 @@ pub(crate) fn openai_tools_json() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "say",
-                "description": "One present-tense sentence for the user when you change phase, start work that will take a while, or the plan changes. Use the user's language, for example `现在在对列表缩进，接着改代码块对齐`. Emit this in the same response as the next real tool; do not spend a turn on it alone. Do not call it for every file read, and do not restate the request. Non-blocking.",
+                "description": "One plain text progress line for the user. No period, no path, no Markdown, display width at most 48. Chinese: `正在<动作>，接着<下一拍>` or `收到，先<动作>`. English: `Doing <action>, then <next>` or `On it, first <action>`. Other languages use that same present-tense shape. Always emit one alongside your very first tool call after a user message or `ask` answer, and also when changing phase, starting long work, or updating the plan. Emit in the same response as the next real tool; never spend a turn on `say` alone, do not call it for every file read, and do not restate the request. Non-blocking.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "text": { "type": "string", "description": "One sentence in the user's language, present tense." },
+                        "text": { "type": "string", "description": "One plain text line in the user's language. Chinese: `正在对列表缩进，接着改代码块对齐`. English: `Doing the list indent, then the code-block alignment`." },
                         "kind": { "type": "string", "enum": ["progress", "note", "warning"], "default": "progress" }
                     },
                     "required": ["text"]
@@ -191,19 +191,20 @@ pub(crate) fn openai_tools_json() -> Vec<Value> {
             "type": "function",
             "function": {
                 "name": "ask",
-                "description": "Ask the user to choose between options. Blocks the turn until answered. `recommended` is a highlight only. If nobody answers, the call fails (default 120s).",
+                "description": "Ask the user to choose, in the user's language. The question is at most 22 Chinese characters or 44 Latin letters. Give 2-4 options. Blocks the turn until answered. `recommended` is a highlight only. If nobody answers, the call fails (default 120s).",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "question": { "type": "string" },
+                        "question": { "type": "string", "description": "One question in the user's language. At most 22 Chinese characters or 44 Latin letters." },
                         "options": {
                             "type": "array",
                             "minItems": 2,
+                            "maxItems": 4,
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "label": { "type": "string" },
-                                    "description": { "type": "string" },
+                                    "label": { "type": "string", "description": "At most 8 Chinese characters or 16 Latin letters." },
+                                    "description": { "type": "string", "description": "At most 18 Chinese characters or 36 Latin letters. Omit when the label is enough." },
                                     "recommended": { "type": "boolean" }
                                 },
                                 "required": ["label"]

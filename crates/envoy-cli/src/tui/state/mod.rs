@@ -11,6 +11,8 @@ mod jobs;
 mod login;
 mod modals;
 mod ops;
+mod sidechat;
+mod subagent;
 mod welcome;
 
 impl App {
@@ -53,6 +55,7 @@ impl App {
                 active_assistant_id: None,
                 active_tool_items: HashMap::new(),
                 active_monitors: Vec::new(),
+                turn_started_at: None,
                 daemon_tx: std::cell::RefCell::new(None),
             },
             session: SessionState {
@@ -90,13 +93,16 @@ impl App {
                 selected_card: None,
                 input: String::new(),
                 input_cursor: 0,
+                pending_images: Vec::new(),
                 history: Vec::new(),
                 history_pos: None,
+                history_draft: None,
                 menu_selected: 0,
                 at_dismissed_at: None,
                 modal: None,
                 theme: prefs.theme % THEMES.len(),
                 leader_at: None,
+                interrupt_at: None,
                 toast: None,
                 welcome: None,
                 inspector: InspectorState::default(),
@@ -106,6 +112,11 @@ impl App {
                 selection: None,
                 drag_start: None,
                 screen_lines: Vec::new(),
+                side_open: false,
+                side_running: false,
+                side_items: Vec::new(),
+                side_input: String::new(),
+                side_cursor: 0,
             },
         }
     }
@@ -167,6 +178,7 @@ impl App {
         self.ui.selection = None;
         self.ui.drag_start = None;
         self.ui.screen_lines.clear();
+        self.ui.pending_images.clear();
         self.ui.inspector = InspectorState::default();
         self.session.workspace_index.invalidate();
         self.inputs.invalidate_catalog();
@@ -184,6 +196,7 @@ impl App {
         self.agent.outbox.clear();
         self.agent.stream = None;
         self.agent.ready = false;
+        self.agent.turn_started_at = None;
         self.agent.retry_at = Instant::now();
     }
 
@@ -243,6 +256,7 @@ impl App {
         self.ui.inspector.force_open = true;
         self.ui.inspector.file_path = Some(rel.clone());
         self.ui.inspector.file_line = target_line;
+        self.ui.inspector.markdown_raw = target_line.is_some();
 
         if target_line.is_none() {
             if let Some(idx) = self.find_changed_file_index(&rel) {

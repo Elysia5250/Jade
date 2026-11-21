@@ -4,7 +4,7 @@ use std::path::{Component, Path, PathBuf};
 
 /// Directory or file basenames that always require protection.
 const PROTECTED_BASENAMES: &[&str] = &[
-    ".git", ".ssh", ".env", ".envoy", ".codex", ".agents", ".aws",
+    ".git", ".ssh", ".env", ".envoy", ".codex", ".agents", ".aws", ".netrc", ".curlrc", ".wgetrc",
 ];
 
 #[derive(Debug, Clone)]
@@ -69,6 +69,140 @@ pub fn is_temp_path(resolved: &ResolvedPath) -> bool {
         || is_under(&resolved.canonical, &sys_tmp)
 }
 
+/// Canonicalize and filter `extra_rw` roots, dropping any path that targets or
+/// traverses a protected secret/config directory, system root, or `$HOME` and
+/// its ancestors. Legitimate external workspace directories and `/tmp` pass.
+pub fn sanitize_extra_rw(cwd: &Path, raw: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in raw {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let resolved = resolve_path_pair(cwd, trimmed);
+        if is_protected(&resolved)
+            || is_unsafe_extra_rw_root(&resolved.requested)
+            || is_unsafe_extra_rw_root(&resolved.canonical)
+        {
+            continue;
+        }
+        let canon = resolved.canonical.display().to_string();
+        if !out.contains(&canon) {
+            out.push(canon);
+        }
+    }
+    out
+}
+
+fn path_starts_with_ignore_ascii_case(path: &Path, prefix: &Path) -> bool {
+    let mut p_iter = path.components();
+    for pre in prefix.components() {
+        let Some(cur) = p_iter.next() else {
+            return false;
+        };
+        let matched = match (cur, pre) {
+            (Component::Normal(a), Component::Normal(b)) => a
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&b.to_string_lossy()),
+            (a, b) => a == b,
+        };
+        if !matched {
+            return false;
+        }
+    }
+    true
+}
+
+fn path_eq_ignore_ascii_case(a: &Path, b: &Path) -> bool {
+    path_starts_with_ignore_ascii_case(a, b) && path_starts_with_ignore_ascii_case(b, a)
+}
+
+fn is_unsafe_extra_rw_root(path: &Path) -> bool {
+    if path == Path::new("/") {
+        return true;
+    }
+    // Reject `$HOME`, any ancestor of `$HOME` (e.g. `/home`, `/Users`), and
+    // any other user's home directory under `/home/*` or `/Users/*`.
+    let under_home_parent = path_starts_with_ignore_ascii_case(path, Path::new("/home"))
+        || path_starts_with_ignore_ascii_case(path, Path::new("/Users"));
+    if let Some(home) = std::env::var_os("HOME").filter(|s| !s.is_empty()) {
+        let raw_home = PathBuf::from(home);
+        let canon_home = canonicalize_with_missing_tail(&raw_home);
+        if path_starts_with_ignore_ascii_case(&raw_home, path)
+            || path_starts_with_ignore_ascii_case(&canon_home, path)
+        {
+            return true;
+        }
+        if under_home_parent
+            && !path_starts_with_ignore_ascii_case(path, &raw_home)
+            && !path_starts_with_ignore_ascii_case(path, &canon_home)
+        {
+            return true;
+        }
+    } else if under_home_parent {
+        return true;
+    }
+    // Reject any path that is equal to or an ancestor of a user secret path.
+    if envoy_core::sandbox::user_secret_paths()
+        .iter()
+        .any(|secret| path_starts_with_ignore_ascii_case(secret, path))
+    {
+        return true;
+    }
+    // Reject sensitive OS trees, mount roots, and system package prefixes
+    // (case-insensitively by component for macOS APFS compatibility).
+    const BLOCKED_TREES: &[&str] = &[
+        "/etc",
+        "/private/etc",
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/lib32",
+        "/lib64",
+        "/libx32",
+        "/boot",
+        "/proc",
+        "/sys",
+        "/dev",
+        "/root",
+        "/run",
+        "/mnt",
+        "/media",
+        "/opt/homebrew",
+        "/System",
+        "/Library",
+        "/var/lib",
+        "/var/log",
+        "/var/run",
+        "/var/spool",
+        "/var/cache",
+        "/var/db",
+        "/var/mail",
+        "/var/backups",
+        "/var/root",
+        "/var/empty",
+        "/private/var/lib",
+        "/private/var/log",
+        "/private/var/run",
+        "/private/var/spool",
+        "/private/var/cache",
+        "/private/var/db",
+        "/private/var/mail",
+        "/private/var/root",
+    ];
+    if BLOCKED_TREES
+        .iter()
+        .any(|root| path_starts_with_ignore_ascii_case(path, Path::new(root)))
+    {
+        return true;
+    }
+    const BLOCKED_EXACT: &[&str] = &["/var", "/private/var", "/private", "/opt", "/srv", "/data"];
+    BLOCKED_EXACT
+        .iter()
+        .any(|exact| path_eq_ignore_ascii_case(path, Path::new(exact)))
+}
+
 pub fn path_has_protected_component(path: &Path) -> bool {
     has_component_in(path, PROTECTED_BASENAMES)
 }
@@ -102,7 +236,9 @@ fn has_component_in(path: &Path, basenames: &[&str]) -> bool {
             continue;
         };
         let name = os.to_string_lossy();
-        if basenames.contains(&name.as_ref()) || envoy_core::sandbox::is_env_filename(&name) {
+        if basenames.iter().any(|b| name.eq_ignore_ascii_case(b))
+            || envoy_core::sandbox::is_env_filename(&name)
+        {
             return true;
         }
         if name.contains(['*', '?', '[']) {

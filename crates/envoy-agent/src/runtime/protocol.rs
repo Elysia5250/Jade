@@ -6,13 +6,15 @@
 use crate::agent::checkpoint::CheckpointSummary;
 use crate::agent::AgentEvent;
 use crate::permissions::PermissionMode;
-use crate::session::ChatMessage;
+use crate::session::{ChatMessage, ImageAttachment};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Agent control protocol. Bumped with the job-socket [`envoy_proto::AGENT_VERSION`]
 /// when the framed handshake or these enums change incompatibly.
-pub const AGENT_PROTOCOL_VERSION: u32 = 5;
+pub const AGENT_PROTOCOL_VERSION: u32 = 8;
+
+const _: () = assert!(AGENT_PROTOCOL_VERSION as u8 == envoy_proto::AGENT_VERSION);
 
 /// First frame on `agent.sock`, both directions, before any [`AgentReq`].
 ///
@@ -34,6 +36,13 @@ pub enum SendMode {
     Steer,
     /// Deliver after the current run finishes.
     FollowUp,
+    /// Main composer while a worker turn may be running. The daemon opens the
+    /// plan sidechat, or starts a normal turn when the session is actually idle.
+    Side,
+    /// Side composer. Talks only to the side thread.
+    SideTalk,
+    /// Queue on the side thread. Never touches the worker queue.
+    SideQueue,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,6 +72,12 @@ pub enum AgentReq {
     Send {
         id: String,
         text: String,
+        mode: SendMode,
+    },
+    SendImages {
+        id: String,
+        text: String,
+        images: Vec<ImageAttachment>,
         mode: SendMode,
     },
     Attach {
@@ -95,6 +110,10 @@ pub enum AgentReq {
     SetPermissionMode {
         id: String,
         mode: PermissionMode,
+    },
+    /// Query live daemon-side permission engine status for a session.
+    GetPermissions {
+        id: String,
     },
     /// Stop an active background monitor in a session.
     StopMonitor {
@@ -135,6 +154,12 @@ pub enum AgentReq {
     },
     /// Refresh models.dev cache if stale and fetch models for the active provider.
     RefreshModels,
+    /// The console is showing this prompt and the user is interacting with it,
+    /// so the answer clock must not run out underneath them.
+    AskTouched {
+        id: String,
+        ask_id: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,6 +197,14 @@ pub enum AgentResp {
     ModelsRefreshed {
         provider_id: String,
         models: Vec<crate::agent::context::ListedModel>,
+    },
+    /// Authoritative daemon-side permission engine state for a session.
+    PermissionsStatus {
+        mode: PermissionMode,
+        sandbox: String,
+        workspace_trusted: bool,
+        rules: usize,
+        extra_rw: usize,
     },
     Ack,
     Error(String),
@@ -347,6 +380,11 @@ mod tests {
                 text: "step".into(),
                 signature: "sig".into(),
             }],
+            images: vec![ImageAttachment {
+                mime: "image/png".into(),
+                data_base64: "iVBORw0KGgo=".into(),
+                name: Some("wire.png".into()),
+            }],
         }
     }
 
@@ -371,6 +409,16 @@ mod tests {
                 text: "do the thing".into(),
                 mode: SendMode::Steer,
             },
+            AgentReq::SendImages {
+                id: "s-send-img".into(),
+                text: "look".into(),
+                images: vec![ImageAttachment {
+                    mime: "image/png".into(),
+                    data_base64: "iVBORw0KGgo=".into(),
+                    name: Some("clip.png".into()),
+                }],
+                mode: SendMode::Prompt,
+            },
             AgentReq::Attach {
                 id: "s-attach".into(),
                 from: 4,
@@ -380,6 +428,10 @@ mod tests {
                 id: "s-ans".into(),
                 ask_id: 11,
                 label: "allow".into(),
+            },
+            AgentReq::AskTouched {
+                id: "s-touch".into(),
+                ask_id: 11,
             },
             AgentReq::Recall {
                 id: "s-recall".into(),
@@ -400,6 +452,9 @@ mod tests {
             AgentReq::SetPermissionMode {
                 id: "s-mode".into(),
                 mode: PermissionMode::Plan,
+            },
+            AgentReq::GetPermissions {
+                id: "s-perm".into(),
             },
             AgentReq::StopMonitor {
                 id: "s-stop".into(),
@@ -456,6 +511,9 @@ mod tests {
             AgentReq::Clear { .. } => 17,
             AgentReq::ProbeMcp { .. } => 18,
             AgentReq::RefreshModels => 19,
+            AgentReq::AskTouched { .. } => 20,
+            AgentReq::SendImages { .. } => 21,
+            AgentReq::GetPermissions { .. } => 22,
         }
     }
 
@@ -500,6 +558,13 @@ mod tests {
                 provider_id: "openai".into(),
                 models: Vec::new(),
             },
+            AgentResp::PermissionsStatus {
+                mode: PermissionMode::AcceptEdits,
+                sandbox: "bwrap".into(),
+                workspace_trusted: true,
+                rules: 3,
+                extra_rw: 1,
+            },
             AgentResp::Ack,
             AgentResp::Error("no such session: s9".into()),
         ]
@@ -519,6 +584,7 @@ mod tests {
             AgentResp::ModelsRefreshed { .. } => 9,
             AgentResp::Ack => 10,
             AgentResp::Error(_) => 11,
+            AgentResp::PermissionsStatus { .. } => 12,
         }
     }
 
@@ -540,12 +606,23 @@ mod tests {
     fn every_agent_req_and_resp_round_trips_postcard() {
         let mut reqs = sample_reqs_open();
         reqs.extend(sample_reqs_edit());
-        assert_each(reqs, req_index, 20);
-        assert_each(sample_resps(), resp_index, 12);
+        assert_each(reqs, req_index, 23);
+        assert_each(sample_resps(), resp_index, 13);
         assert_postcard(&AgentHello {
             protocol_version: AGENT_PROTOCOL_VERSION,
             incarnation_id: 7,
             bin_version: "0.1.0".into(),
         });
+    }
+
+    #[test]
+    fn side_send_modes_round_trip_postcard() {
+        for mode in [SendMode::Side, SendMode::SideTalk, SendMode::SideQueue] {
+            assert_postcard(&AgentReq::Send {
+                id: "s-side".into(),
+                text: "plan this".into(),
+                mode,
+            });
+        }
     }
 }

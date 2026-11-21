@@ -150,7 +150,14 @@ pub(crate) async fn execute_loop(
     };
     let mut cache_read_tokens = 0u64;
     let mut cache_create_tokens = 0u64;
-    let env_disk = EnvDiskSnapshot::capture(&cfg.data_dir, &cfg.cwd, opts.depth);
+    let data_dir = cfg.data_dir.clone();
+    let cwd = cfg.cwd.clone();
+    let depth = opts.depth;
+    let env_disk = tokio::task::spawn_blocking(move || {
+        EnvDiskSnapshot::capture(&data_dir, &cwd, depth, is_local)
+    })
+    .await
+    .map_err(|err| anyhow::anyhow!("environment snapshot failed: {err}"))?;
 
     let remote = crate::runtime::remote_for(
         &cfg.data_dir,
@@ -327,6 +334,7 @@ pub(crate) async fn execute_loop(
                 tool_call_id: None,
                 tool_name: None,
                 reasoning_blocks: reply.reasoning_blocks.clone(),
+                images: Vec::new(),
             });
 
             if tool_calls.is_empty() {
@@ -346,6 +354,7 @@ pub(crate) async fn execute_loop(
                         tool_name: None,
 
                         reasoning_blocks: Vec::new(),
+                        images: Vec::new(),
                     });
                     continue;
                 }
@@ -412,6 +421,7 @@ pub(crate) async fn execute_loop(
                     tool_name: None,
 
                     reasoning_blocks: Vec::new(),
+                    images: Vec::new(),
                 });
             }
         }

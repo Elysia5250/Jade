@@ -92,7 +92,10 @@ pub(super) async fn run_tasks(
                 });
                 jobs.push((task, child));
             }
-            Err(error) => reports.push(failed_report(&task, error)),
+            Err(error) => {
+                super::forward::emit_stopped(parent_tx, parent_call_id, &task, total, &error);
+                reports.push(failed_report(&task, error));
+            }
         }
     }
     let base = hook_state.clone();
@@ -239,6 +242,7 @@ async fn refuse_writers(
         if task.spec.is_readonly() {
             readonly.push(task);
         } else {
+            super::forward::emit_stopped(parent_tx, parent_call_id, &task, total, &reason);
             reports.push(failed_report(&task, reason.clone()));
         }
     }

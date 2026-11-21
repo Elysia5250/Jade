@@ -149,23 +149,41 @@ pub(super) fn render_turn_summary(
         target: Some(HitTarget::ToggleToolGroup(ids.clone())),
     }];
     let budget = width.saturating_sub(16);
-    if let Some((head, diff_tail)) = sentence.rsplit_once(" +") {
-        let diff_part = format!(" +{diff_tail}");
-        let head_shown = truncate_width(head, budget.saturating_sub(display_width(&diff_part)));
+    // The sentence can end with ` +A -R` and/or ` (failed)`. The removed count
+    // must read as red, so the tail is split rather than styled as one span.
+    let (body, fail) = match sentence.strip_suffix(" (failed)") {
+        Some(rest) => (rest, Some(" (failed)")),
+        None => (sentence.as_str(), None),
+    };
+    let (head, diff) = match body.rsplit_once(" +") {
+        Some((head, tail)) => (head, Some(tail)),
+        None => (body, None),
+    };
+    let tail_w =
+        diff.map(|t| display_width(t) + 2).unwrap_or(0) + fail.map(display_width).unwrap_or(0);
+    spans.push(LinkedSpan {
+        span: Span::styled(
+            truncate_width(head, budget.saturating_sub(tail_w)),
+            Style::default().fg(theme.dim),
+        ),
+        target: Some(HitTarget::ToggleToolGroup(ids.clone())),
+    });
+    if let Some(tail) = diff {
+        let (added, removed) = tail.split_once(" -").unwrap_or((tail, ""));
         spans.push(LinkedSpan {
-            span: Span::styled(head_shown, Style::default().fg(theme.dim)),
+            span: Span::styled(format!(" +{added}"), Style::default().fg(theme.ok)),
             target: Some(HitTarget::ToggleToolGroup(ids.clone())),
         });
+        if !removed.is_empty() {
+            spans.push(LinkedSpan {
+                span: Span::styled(format!(" -{removed}"), Style::default().fg(theme.bad)),
+                target: Some(HitTarget::ToggleToolGroup(ids.clone())),
+            });
+        }
+    }
+    if let Some(fail) = fail {
         spans.push(LinkedSpan {
-            span: Span::styled(diff_part, Style::default().fg(theme.ok)),
-            target: Some(HitTarget::ToggleToolGroup(ids.clone())),
-        });
-    } else {
-        spans.push(LinkedSpan {
-            span: Span::styled(
-                truncate_width(&sentence, budget),
-                Style::default().fg(theme.dim),
-            ),
+            span: Span::styled(fail, Style::default().fg(theme.dim)),
             target: Some(HitTarget::ToggleToolGroup(ids.clone())),
         });
     }

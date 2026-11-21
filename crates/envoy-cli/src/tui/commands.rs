@@ -21,6 +21,7 @@ pub(crate) enum SlashCmdKind {
     Machine,
     New,
     Sessions,
+    Home,
     Expand,
     Sidebar,
     Diff,
@@ -185,6 +186,13 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         aliases: &["resume"],
         args: "",
         about: "list or switch saved sessions",
+    },
+    SlashCommand {
+        kind: SlashCmdKind::Home,
+        name: "home",
+        aliases: &["hub", "welcome"],
+        args: "",
+        about: "open the Envoy Hub (sessions, workspaces, settings)",
     },
     SlashCommand {
         kind: SlashCmdKind::Expand,

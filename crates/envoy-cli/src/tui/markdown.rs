@@ -21,6 +21,18 @@ pub(crate) fn render_markdown_linked(
     changed: &[FileChange],
     index: &WorkspaceIndex,
 ) -> Vec<LinkedLine> {
+    render_markdown_linked_with_code_bg(text, width, theme, cwd, changed, index, theme.panel)
+}
+
+pub(crate) fn render_markdown_linked_with_code_bg(
+    text: &str,
+    width: usize,
+    theme: &Theme,
+    cwd: &Path,
+    changed: &[FileChange],
+    index: &WorkspaceIndex,
+    code_bg_color: ratatui::style::Color,
+) -> Vec<LinkedLine> {
     let mut out = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
     let mut in_code = false;
@@ -28,7 +40,7 @@ pub(crate) fn render_markdown_linked(
     let mut in_list = false;
     let mut in_quote = false;
     let mut prev_list_wrapped = false;
-    let code_bg = Style::default().bg(theme.panel);
+    let code_bg = Style::default().bg(code_bg_color);
     let mut i = 0usize;
 
     while i < lines.len() {
@@ -117,15 +129,17 @@ pub(crate) fn render_markdown_linked(
             i += 1;
             continue;
         }
-        if trimmed.starts_with("### ") || trimmed.starts_with("## ") || trimmed.starts_with("# ") {
+        if let Some((level, heading)) = heading_level(trimmed) {
             in_list = false;
             in_quote = false;
             prev_list_wrapped = false;
             push_md_blank_if_needed(&mut out);
-            let h3 = trimmed.starts_with("### ");
-            let heading = trimmed.trim_start_matches('#').trim();
             let h_style = Style::default()
-                .fg(if h3 { theme.secondary } else { theme.accent })
+                .fg(if level >= 3 {
+                    theme.secondary
+                } else {
+                    theme.accent
+                })
                 .add_modifier(Modifier::BOLD);
             for w in wrap_text(heading, width.saturating_sub(2)) {
                 out.push(LinkedLine::from_line(Line::styled(
@@ -244,6 +258,19 @@ fn push_md_blank_if_needed(out: &mut Vec<LinkedLine>) {
     if !already {
         out.push(LinkedLine::from_line(Line::from("")));
     }
+}
+
+fn heading_level(trimmed: &str) -> Option<(usize, &str)> {
+    let hashes = trimmed.bytes().take_while(|&b| b == b'#').count();
+    if !(1..=6).contains(&hashes) {
+        return None;
+    }
+    let rest = &trimmed[hashes..];
+    if !rest.starts_with(' ') && !rest.starts_with('\t') {
+        return None;
+    }
+    let title = rest.trim();
+    (!title.is_empty()).then_some((hashes, title))
 }
 
 fn is_horizontal_rule(trimmed: &str) -> bool {

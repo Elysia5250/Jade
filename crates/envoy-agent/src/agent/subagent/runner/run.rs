@@ -76,6 +76,7 @@ pub(super) async fn run_single_subagent(
             tool_name: None,
 
             reasoning_blocks: Vec::new(),
+            images: Vec::new(),
         }],
         asks: Arc::clone(&host.asks),
         steer: Arc::new(Mutex::new(Vec::new())),
@@ -103,37 +104,26 @@ pub(super) async fn run_single_subagent(
     };
 
     let (child_tx, mut child_rx) = mpsc::unbounded_channel::<AgentEvent>();
-    let fwd_call_id = parent_call_id.to_string();
-    let fwd_prefix = prefix.clone();
-    let fwd_tx = parent_tx.clone();
+    let tap_tx = parent_tx.clone();
+    let tap_call = parent_call_id.to_string();
+    let tap_prefix = prefix.clone();
+    let tap_name = spec.name.clone();
+    let tap_desc = desc.clone();
+    let tap_index = task.index;
     let forwarder = tokio::spawn(async move {
+        let mut tap = super::forward::ChildTap::new(
+            tap_tx,
+            &tap_call,
+            tap_index,
+            total,
+            &tap_name,
+            &tap_desc,
+            &tap_prefix,
+        );
         while let Some(ev) = child_rx.recv().await {
-            match ev {
-                AgentEvent::ToolStart { title, .. } => {
-                    emit_line(
-                        &fwd_tx,
-                        &fwd_call_id,
-                        format!("{fwd_prefix} {title}"),
-                        false,
-                    );
-                }
-                AgentEvent::Say { text, .. } => {
-                    emit_line(
-                        &fwd_tx,
-                        &fwd_call_id,
-                        format!("{fwd_prefix} note: {text}"),
-                        false,
-                    );
-                }
-                ev @ (AgentEvent::FileChanged { .. }
-                | AgentEvent::Ask { .. }
-                | AgentEvent::AskClosed { .. }
-                | AgentEvent::HookRan { .. }) => {
-                    let _ = fwd_tx.send(ev);
-                }
-                _ => {}
-            }
+            tap.push(ev);
         }
+        tap.flush_text();
     });
 
     let fut: std::pin::Pin<Box<dyn std::future::Future<Output = Result<LoopOutcome>> + Send + '_>> =
@@ -158,6 +148,12 @@ pub(super) async fn run_single_subagent(
                 format!("{prefix} done ({duration_ms}ms)"),
                 false,
             );
+            close_lane(
+                parent_tx,
+                lane_id(parent_call_id, task.index, total, &spec.name, &desc),
+                true,
+                None,
+            );
             (
                 SubagentTaskReport {
                     index: task.index,
@@ -180,6 +176,12 @@ pub(super) async fn run_single_subagent(
                 parent_call_id,
                 format!("{prefix} error: {msg}"),
                 true,
+            );
+            close_lane(
+                parent_tx,
+                lane_id(parent_call_id, task.index, total, &spec.name, &desc),
+                false,
+                Some(&msg),
             );
             let (input_tokens, output_tokens) = charged(&usage);
             let next_state =
@@ -207,6 +209,12 @@ pub(super) async fn run_single_subagent(
                 format!("{prefix} error: {msg}"),
                 true,
             );
+            close_lane(
+                parent_tx,
+                lane_id(parent_call_id, task.index, total, &spec.name, &desc),
+                false,
+                Some(&msg),
+            );
             let (input_tokens, output_tokens) = charged(&usage);
             let next_state =
                 run_subagent_stop_fallback(host, spec, &msg, child_hook_state, parent_tx).await;
@@ -226,6 +234,48 @@ pub(super) async fn run_single_subagent(
             )
         }
     }
+}
+
+fn lane_id<'a>(
+    parent_call_id: &'a str,
+    index: usize,
+    total: usize,
+    name: &'a str,
+    description: &'a str,
+) -> super::forward::LaneId<'a> {
+    super::forward::LaneId {
+        parent_call_id,
+        index: u32::try_from(index).unwrap_or(u32::MAX),
+        total: u32::try_from(total).unwrap_or(u32::MAX),
+        name,
+        description,
+    }
+}
+
+fn close_lane(
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    id: super::forward::LaneId<'_>,
+    ok: bool,
+    detail: Option<&str>,
+) {
+    use super::forward::{cap_text, emit_subagent, LaneId};
+    use crate::agent::events::SubagentNote;
+    if let Some(detail) = detail {
+        emit_subagent(
+            tx,
+            LaneId {
+                parent_call_id: id.parent_call_id,
+                index: id.index,
+                total: id.total,
+                name: id.name,
+                description: id.description,
+            },
+            SubagentNote::Text {
+                text: cap_text(detail, 800),
+            },
+        );
+    }
+    emit_subagent(tx, id, SubagentNote::Finished { ok });
 }
 
 /// `McpManager` has no close or shutdown method. A timed-out or failed child

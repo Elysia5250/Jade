@@ -29,12 +29,7 @@ Exact commands / PTY checks.
 
 Active plans:
 
-- `hardening-and-modernization.md` — close OS sandbox, permission, MCP, and SSRF
-  security gaps; fix data loss, protocol versioning, and concurrency bugs;
-  align prompt caching and reasoning; slim TUI and duplicated subsystems.
-- `handoff-phase3-to-phase8.md` — standalone step-by-step execution manual,
-  non-negotiable invariants, pitfalls, and quantitative test metrics for taking
-  over Phase 3 through Phase 8.
+_None at present._
 
 Completed plans:
 
@@ -43,3 +38,12 @@ Completed plans:
   core ADRs.
 - `modularize-agent-and-console.md` — split the console state/view and the
   agent loop, clear the 700-line baseline, and land compaction/permissions/MCP.
+
+Archived plans (frozen, read-only; see [`docs/achieved/`](../achieved/README.md)):
+
+- `hardening-and-modernization.md` — closed OS sandbox, permission, MCP, and
+  SSRF gaps; fixed data loss, protocol versioning, and concurrency bugs;
+  aligned prompt caching and reasoning; slimmed the TUI. Phases 1–8 complete.
+- `handoff-phase3-to-phase8.md` — the Phase 3–8 takeover manual (invariants,
+  pitfalls, quantitative gates). Its phases shipped in `35b24bb`.
+

@@ -7,14 +7,14 @@ pub(super) fn ask_inline_height(app: &App, width: u16) -> u16 {
     };
     let inner_w = width.saturating_sub(4).max(16) as usize;
     let q_lines = wrap_text(&ask.question, inner_w).len() as u16;
-    let mut opt_lines = 0u16;
-    for opt in &ask.options {
-        opt_lines += 1;
-        if opt.description.is_some() {
-            opt_lines += 1;
-        }
-    }
-    (q_lines + opt_lines + 4).min(14)
+    let opt_lines: u16 = ask
+        .options
+        .iter()
+        .map(|opt| 1 + u16::from(opt.description.is_some()))
+        .sum();
+    (q_lines.min(6) + opt_lines + 3)
+        .max(ask.options.len() as u16 + 4)
+        .min(16)
 }
 
 pub(super) fn draw_ask(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
@@ -26,11 +26,15 @@ pub(super) fn draw_ask(frame: &mut Frame, app: &mut App, theme: &Theme, area: Re
     }
     frame.render_widget(Clear, area);
 
-    let left = ask
-        .deadline
-        .saturating_duration_since(Instant::now())
-        .as_secs();
-    let title = format!(" ask - {left}s - up/down Enter ");
+    let title = match ask.paused_left {
+        Some(left) => format!(" ask - {}s paused - up/down Enter ", left.as_secs()),
+        None => format!(
+            " ask - {}s - up/down Enter ",
+            ask.deadline
+                .saturating_duration_since(Instant::now())
+                .as_secs()
+        ),
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -46,28 +50,54 @@ pub(super) fn draw_ask(frame: &mut Frame, app: &mut App, theme: &Theme, area: Re
         return;
     }
 
+    let inner_h = inner.height as usize;
+    let q_width = inner.width.saturating_sub(2).max(8) as usize;
+    let wrapped_q = wrap_text(&ask.question, q_width);
+    let full_opt_lines: usize = ask
+        .options
+        .iter()
+        .map(|opt| 1 + usize::from(opt.description.is_some()))
+        .sum();
+    let show_desc = inner_h >= full_opt_lines + 2;
+    let opt_lines = if show_desc {
+        full_opt_lines
+    } else {
+        ask.options.len()
+    };
+    let gap = usize::from(inner_h >= opt_lines + 2);
+    let max_q_lines = inner_h.saturating_sub(opt_lines + gap).max(1);
+    let q_truncated = wrapped_q.len() > max_q_lines;
+
     let mut lines = Vec::new();
-    for wrapped in wrap_text(&ask.question, inner.width.saturating_sub(2) as usize) {
+    for (idx, wrapped) in wrapped_q.into_iter().take(max_q_lines).enumerate() {
+        let text = if q_truncated && idx + 1 == max_q_lines {
+            format!("{}…", truncate_width(&wrapped, q_width.saturating_sub(1)))
+        } else {
+            wrapped
+        };
         lines.push(Line::styled(
-            format!(" {wrapped}"),
+            format!(" {text}"),
             Style::default().fg(theme.text),
         ));
     }
-    lines.push(Line::from(""));
+    if gap > 0 {
+        lines.push(Line::from(""));
+    }
 
     for (index, option) in ask.options.iter().enumerate() {
         let row_y = inner.y + lines.len() as u16;
-        if row_y < inner.y + inner.height {
-            app.ui.hit_regions.push(HitRegion {
-                rect: Rect {
-                    x: inner.x,
-                    y: row_y,
-                    width: inner.width,
-                    height: 1,
-                },
-                target: HitTarget::SelectAskOption(index),
-            });
+        if row_y >= inner.y + inner.height {
+            break;
         }
+        app.ui.hit_regions.push(HitRegion {
+            rect: Rect {
+                x: inner.x,
+                y: row_y,
+                width: inner.width,
+                height: 1,
+            },
+            target: HitTarget::SelectAskOption(index),
+        });
         let chosen = index == ask.selected;
         let marker = if chosen { " > " } else { "   " };
         let style = if chosen {
@@ -82,18 +112,21 @@ pub(super) fn draw_ask(frame: &mut Frame, app: &mut App, theme: &Theme, area: Re
         } else {
             ""
         };
+        let label = format!("{marker}{}{rec}", option.label);
         lines.push(Line::styled(
-            format!("{marker}{}{rec}", option.label),
+            truncate_width(&label, inner.width as usize),
             style,
         ));
-        if let Some(desc) = &option.description {
-            lines.push(Line::styled(
-                format!(
-                    "     {}",
-                    truncate_width(desc, inner.width.saturating_sub(6) as usize)
-                ),
-                Style::default().fg(theme.dim),
-            ));
+        if show_desc && lines.len() < inner_h {
+            if let Some(desc) = &option.description {
+                lines.push(Line::styled(
+                    format!(
+                        "     {}",
+                        truncate_width(desc, inner.width.saturating_sub(6) as usize)
+                    ),
+                    Style::default().fg(theme.dim),
+                ));
+            }
         }
     }
 

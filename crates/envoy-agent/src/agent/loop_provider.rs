@@ -261,6 +261,7 @@ pub(super) async fn finalize_step_limit(
         tool_call_id: None,
         tool_name: None,
         reasoning_blocks: Vec::new(),
+    images: Vec::new(),
     });
     let no_tools = ToolFilter {
         depth: 0,
@@ -312,6 +313,7 @@ pub(super) async fn finalize_step_limit(
         tool_call_id: None,
         tool_name: None,
         reasoning_blocks: Vec::new(),
+        images: Vec::new(),
     });
     Ok(LoopOutcome {
         messages,

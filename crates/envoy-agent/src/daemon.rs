@@ -386,13 +386,23 @@ pub fn spawn(data_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Ask a running daemon to shut down. Returns whether a pid was signalled.
+/// Ask a running daemon to shut down. Returns whether a verified daemon pid
+/// was signalled.
 pub fn stop(data_dir: &Path) -> Result<bool> {
-    let text = std::fs::read_to_string(pid_path(data_dir)).unwrap_or_default();
+    let pid_file = pid_path(data_dir);
+    let text = std::fs::read_to_string(&pid_file).unwrap_or_default();
     let Some(pid) = text.trim().parse::<i32>().ok() else {
         return Ok(false);
     };
     if pid <= 0 || pid == std::process::id() as i32 {
+        return Ok(false);
+    }
+    #[cfg(unix)]
+    if std::os::unix::net::UnixStream::connect(socket_path(data_dir)).is_err() {
+        let _ = std::fs::remove_file(&pid_file);
+        return Ok(false);
+    }
+    if !pid_is_envoy(pid) {
         return Ok(false);
     }
     #[cfg(unix)]
@@ -401,7 +411,49 @@ pub fn stop(data_dir: &Path) -> Result<bool> {
             return Ok(false);
         }
     }
+    let _ = std::fs::remove_file(&pid_file);
     Ok(true)
+}
+
+fn pid_is_envoy(pid: i32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(raw) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+            return false;
+        };
+        let Some(argv0) = raw.split(|&b| b == 0).next() else {
+            return false;
+        };
+        let argv0_str = String::from_utf8_lossy(argv0);
+        let name = Path::new(argv0_str.as_ref())
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        name.starts_with("envoy")
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let Ok(out) = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output()
+        else {
+            return false;
+        };
+        if !out.status.success() {
+            return false;
+        }
+        let comm = String::from_utf8_lossy(&out.stdout);
+        let name = Path::new(comm.trim())
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        name.starts_with("envoy")
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 /// Accept request streams until `shutdown` fires.

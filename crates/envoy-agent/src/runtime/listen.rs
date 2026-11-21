@@ -115,8 +115,10 @@ fn queue_req(req: &AgentReq) -> bool {
     matches!(
         req,
         AgentReq::Send { .. }
+            | AgentReq::SendImages { .. }
             | AgentReq::Interrupt { .. }
             | AgentReq::Answer { .. }
+            | AgentReq::AskTouched { .. }
             | AgentReq::Recall { .. }
             | AgentReq::SetPermissionMode { .. }
     )
@@ -182,6 +184,19 @@ where
                 ack(wr).await?;
             }
         }
+        AgentReq::SendImages {
+            id,
+            text,
+            images,
+            mode,
+        } => {
+            if runtime.session(&id).is_none() {
+                fail(wr, no_session(&id)).await?;
+            } else {
+                runtime.send_with_images(&id, text, images, mode);
+                ack(wr).await?;
+            }
+        }
         AgentReq::Interrupt { id } => {
             if runtime.session(&id).is_none() {
                 fail(wr, no_session(&id)).await?;
@@ -195,6 +210,14 @@ where
                 fail(wr, no_session(&id)).await?;
             } else {
                 runtime.answer(&id, ask_id, label);
+                ack(wr).await?;
+            }
+        }
+        AgentReq::AskTouched { id, ask_id } => {
+            if runtime.session(&id).is_none() {
+                fail(wr, no_session(&id)).await?;
+            } else {
+                runtime.touch_ask(&id, ask_id);
                 ack(wr).await?;
             }
         }
@@ -271,6 +294,22 @@ where
                     &AgentResp::ModelsRefreshed {
                         provider_id,
                         models,
+                    },
+                )
+                .await?;
+            }
+            Err(err) => fail(wr, format!("{err:#}")).await?,
+        },
+        AgentReq::GetPermissions { id } => match runtime.permissions_status(&id) {
+            Ok((mode, sandbox, workspace_trusted, rules, extra_rw)) => {
+                write_framed(
+                    wr,
+                    &AgentResp::PermissionsStatus {
+                        mode,
+                        sandbox,
+                        workspace_trusted,
+                        rules,
+                        extra_rw,
                     },
                 )
                 .await?;

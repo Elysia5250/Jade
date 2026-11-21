@@ -524,6 +524,7 @@ impl TurnHookSession {
                 tool_name: Some(p.call.name),
 
                 reasoning_blocks: Vec::new(),
+                images: Vec::new(),
             });
         }
         (child_in, child_out)
@@ -560,6 +561,7 @@ pub(crate) fn hook_context_message(extra: &[String]) -> ChatMessage {
         tool_call_id: None,
         tool_name: None,
         reasoning_blocks: Vec::new(),
+        images: Vec::new(),
     }
 }
 

@@ -274,7 +274,7 @@ pub(super) async fn call_tool(mcp: &Mcp, params: &Value) -> Result<ToolReply> {
                 true,
             ));
         }
-        if mode != PermissionMode::Auto {
+        if !matches!(mode, PermissionMode::Auto | PermissionMode::Turbo) {
             return Ok((
                 format!(
                     "permission requires approval over non-interactive MCP stdio (remote machine target `{machine}`)"

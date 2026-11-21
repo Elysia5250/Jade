@@ -13,11 +13,13 @@
 //!   Device Flow), and custom OpenAI/Anthropic-compatible endpoints.
 
 mod app_state;
+mod clipboard;
 mod commands;
 mod decrypt;
 mod diff;
 mod drive;
 mod edit_file;
+mod git_info;
 mod highlight;
 mod inputs;
 mod links;
@@ -46,7 +48,7 @@ pub(crate) use types::*;
 pub(crate) use anyhow::{bail, Result};
 pub(crate) use envoy_agent::agent::checkpoint::CheckpointSummary;
 pub(crate) use envoy_agent::agent::MonitorInfo;
-pub(crate) use envoy_agent::agent::{AgentEvent, AskOption};
+pub(crate) use envoy_agent::agent::{AgentEvent, AskOption, SideNote, SubagentNote};
 #[allow(unused_imports)] // re-exported for the state and view modules
 pub(crate) use envoy_agent::auth::{
     anthropic_authorize_url, available_models, bind_openai_callback_listener, effective_providers,
@@ -65,7 +67,8 @@ pub(crate) use envoy_agent::permissions::{
 pub(crate) use envoy_agent::runtime::{self, AgentReq, AgentResp, SendMode, SeqEvent};
 pub(crate) use envoy_agent::session::{
     delete_session, exact_session_for_cwd, latest_session_for_cwd, list_sessions, load_session,
-    recent_workspaces, save_session, CardStatus, ChatMessage, ChatRole, Session, TranscriptItem,
+    rename_session, save_session, CardStatus, ChatMessage, ChatRole, Session, SubagentLane,
+    TranscriptItem,
 };
 pub(crate) use envoy_proto::{
     Job, JobId, JobState as ProtoJobState, LogRecord, SubmitRequest, TaskSpec, DEFAULT_GROUP,
@@ -100,6 +103,10 @@ pub(crate) use tokio::task::JoinHandle;
 
 pub(crate) const LEADER_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long the first `Esc` stays armed for the interrupting second press.
+pub(crate) const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[cfg(test)]
 pub(crate) fn paint(frame: &mut Frame, app: &mut App) {
     inputs::sync(app);
     view::draw(frame, app);
@@ -168,8 +175,9 @@ pub async fn run(
     app.jobs.last_refresh = Instant::now();
     {
         let app_ref = &mut app;
+        inputs::sync(app_ref);
         let _ = execute!(stdout(), BeginSynchronizedUpdate);
-        tui.terminal.draw(|frame| paint(frame, app_ref))?;
+        tui.terminal.draw(|frame| view::draw(frame, app_ref))?;
         let _ = execute!(stdout(), EndSynchronizedUpdate);
     }
 
@@ -218,6 +226,8 @@ pub(crate) enum Focus {
     Input,
     Transcript,
     Sidebar,
+    /// Plan sidechat composer in the right pane.
+    Side,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,6 +252,8 @@ pub(crate) enum Action {
     SubmitShell(SubmitRequest),
     SubmitAgent(String),
     SubmitAgentFollowup(String),
+    /// Ctrl+Enter. Steers the worker, or the side thread when that composer is focused.
+    SubmitAgentSteer(String),
     Cancel,
     CancelJob(JobId),
     Switch(String),
@@ -260,6 +272,7 @@ pub(crate) enum Command {
     OpenLogin,
     OpenModels,
     OpenSessions,
+    OpenHub,
     OpenRewind,
     NewSession,
     ToggleMode,
@@ -309,7 +322,7 @@ pub(crate) enum UiNotice {
     /// outbox so the next attach can deliver them.
     Requeue {
         session_id: String,
-        items: Vec<(String, SendMode)>,
+        items: Vec<(String, Vec<envoy_agent::session::ImageAttachment>, SendMode)>,
     },
     /// The daemon returned a recalled follow-up (or had none).
     Recalled {
@@ -327,6 +340,10 @@ pub(crate) enum UiNotice {
         msg: String,
         err: bool,
     },
+    /// Live daemon session list returned for the Hub.
+    LiveSessions(Vec<envoy_agent::runtime::SessionInfo>),
+    /// Live MCP server probe lines returned for the Hub MCP panel.
+    McpProbeLines(Vec<String>),
     /// Transcript notice emitted from an async command.
     Notice {
         session_id: String,
@@ -338,7 +355,7 @@ pub(crate) enum UiNotice {
 pub(crate) enum DaemonCmd {
     Send {
         session_id: String,
-        items: Vec<(String, SendMode)>,
+        items: Vec<(String, Vec<envoy_agent::session::ImageAttachment>, SendMode)>,
     },
     Tell(AgentReq),
 }
@@ -350,6 +367,10 @@ pub(crate) struct PendingAsk {
     recommended: usize,
     selected: usize,
     deadline: Instant,
+    /// Set once the console told the daemon the user is working in the prompt.
+    touched: bool,
+    /// Answer time left when the clock was stopped; `None` while it still runs.
+    paused_left: Option<Duration>,
 }
 
 #[derive(Default)]
@@ -383,6 +404,10 @@ mod tests_effort;
 mod tests_inspector;
 #[cfg(test)]
 mod tests_phase6;
+#[cfg(test)]
+mod tests_side;
+#[cfg(test)]
+mod tests_subagent;
 #[cfg(test)]
 mod tests_ux;
 #[cfg(test)]

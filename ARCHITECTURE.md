@@ -12,7 +12,7 @@
 | :--- | :--- | :--- | :--- | :--- |
 | **`conduit`** | **纯网络与会话引擎底座** | `conduit`、`conduit-coord` | 设备密钥身份、账号信任链、Coord 信令/Relay/STUN、QUIC/mTLS、NAT 打洞、mDNS、多路复用会话与插件分发 | `~/.conduit` |
 | **`grain`** | **文件同步项目（上层应用）** | `grain` | `blake3` 分块索引、Delta 同步、冲突保留、历史版本（`.grain/versions`）、忽略规则（`.grainignore`）、Ed25519 签名文件夹策略 | `~/.grain` |
-| **`envoy`** | **Agent 执行与 MCP 项目（已重构为分离式任务模型）** | `envoy`、`envoy-bridge` | 分离式作业（submit/logs/cancel，断线不影响执行）、进程组执行与超时、范围读取、原子写、目录列表、审计与作业日志、策略门禁、stdio MCP 服务、conduit 适配器 | `~/.envoy` |
+| **`envoy`** | **Agent 执行与 MCP 项目（已重构为分离式任务模型）** | `envoy` | 分离式作业（submit/logs/cancel，断线不影响执行）、进程组执行与超时、范围读取、原子写、目录列表、审计与作业日志、策略门禁、stdio MCP 服务、conduit 适配器 | `~/.envoy` |
 
 ### 当前状态：刻意不耦合
 三个项目之间目前**没有任何代码级依赖**（Cargo 依赖完全隔离）。`grain` 和 `envoy` 当前均内置本地 CLI 与内存/双工流测试，不直接依赖网络实现。

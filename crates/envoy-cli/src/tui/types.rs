@@ -8,6 +8,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Line;
 use std::path::PathBuf;
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InspectorTab {
@@ -16,6 +17,10 @@ pub(crate) enum InspectorTab {
     File,
     Output,
     Inspect,
+    /// One delegated child's transcript. Shown only after a subagent row is opened.
+    Agent,
+    /// Plan sidechat. Shown only while that thread is open.
+    Side,
 }
 
 impl InspectorTab {
@@ -34,6 +39,8 @@ impl InspectorTab {
             Self::File => "3 File",
             Self::Output => "4 Out",
             Self::Inspect => "5 Info",
+            Self::Agent => "Agent",
+            Self::Side => "Plan",
         }
     }
 
@@ -61,6 +68,22 @@ pub(crate) enum HitTarget {
     SelectAskOption(usize),
     StopMonitor(u64),
     OpenLogin,
+    OpenModels,
+    CycleEffort,
+    OpenBudget,
+    OpenTrustPicker,
+    JumpToBottom,
+    ToggleFileMarkdown,
+    OpenSubagent { call_id: String, index: u32 },
+    OpenHub,
+    HubReturn,
+    HubSelectTab(HubTab),
+    HubSelectFocus(HubFocus),
+    HubSession(usize),
+    HubWorkspace(usize),
+    HubControl(HubControl),
+    HubOpenPath,
+    HubNewFolder,
 }
 
 #[derive(Debug, Clone)]
@@ -78,12 +101,15 @@ pub(crate) struct InspectorState {
     pub(crate) max_scroll: usize,
     pub(crate) height: u16,
     pub(crate) diff_layout: DiffLayout,
+    pub(crate) markdown_raw: bool,
     pub(crate) selected_diff: usize,
     pub(crate) file_path: Option<String>,
     pub(crate) file_line: Option<usize>,
     pub(crate) output_item_id: Option<u64>,
     pub(crate) output_job_id: Option<JobId>,
     pub(crate) inspect_item_id: Option<u64>,
+    /// Parent delegate call id and 1-based child index shown in the Agent tab.
+    pub(crate) subagent: Option<(String, u32)>,
     pub(crate) divider_x: Option<u16>,
     pub(crate) dragging_divider: bool,
     pub(crate) hover_divider: bool,
@@ -101,12 +127,14 @@ impl Default for InspectorState {
             max_scroll: 0,
             height: 0,
             diff_layout: DiffLayout::Unified,
+            markdown_raw: false,
             selected_diff: 0,
             file_path: None,
             file_line: None,
             output_item_id: None,
             output_job_id: None,
             inspect_item_id: None,
+            subagent: None,
             divider_x: None,
             dragging_divider: false,
             hover_divider: false,
@@ -158,23 +186,74 @@ impl LinkedLine {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum HubFocus {
+    #[default]
+    Left,
+    Controls,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum HubTab {
+    #[default]
+    Sessions,
+    Workspaces,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HubControl {
+    Provider,
+    Model,
+    Effort,
+    Budget,
+    Delegate,
+    Permission,
+    Trust,
+    Target,
+    Skills,
+    Memory,
+    Mcp,
+    Theme,
+    Sidebar,
+}
+
+impl HubControl {
+    pub(crate) const ALL: [Self; 13] = [
+        Self::Provider,
+        Self::Model,
+        Self::Effort,
+        Self::Budget,
+        Self::Delegate,
+        Self::Permission,
+        Self::Trust,
+        Self::Target,
+        Self::Skills,
+        Self::Memory,
+        Self::Mcp,
+        Self::Theme,
+        Self::Sidebar,
+    ];
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum WelcomeMode {
     #[default]
     Home,
     OpenPath,
     NewFolderPickParent,
     NewFolderName,
+    RenameSession,
     Skills,
     SkillsNew,
     Memory,
     MemoryNew,
+    Mcp,
 }
 
 impl WelcomeMode {
     pub(crate) fn is_naming(self) -> bool {
         matches!(
             self,
-            Self::NewFolderName | Self::SkillsNew | Self::MemoryNew
+            Self::NewFolderName | Self::RenameSession | Self::SkillsNew | Self::MemoryNew
         )
     }
 
@@ -183,11 +262,48 @@ impl WelcomeMode {
     }
 }
 
-/// Startup workspace picker. Shown before the console attaches to a directory.
+#[derive(Clone)]
+pub(crate) struct HubSessionRow {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) cwd: PathBuf,
+    pub(crate) target: String,
+    pub(crate) updated_ms: u64,
+    pub(crate) item_count: usize,
+    pub(crate) prompt_tokens: u64,
+    pub(crate) changed_files: usize,
+    pub(crate) last_preview: String,
+    pub(crate) running: bool,
+    pub(crate) queued: usize,
+    pub(crate) is_current: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct HubWorkspaceRow {
+    pub(crate) cwd: PathBuf,
+    pub(crate) title: String,
+    pub(crate) updated_ms: u64,
+    pub(crate) session_count: usize,
+    pub(crate) running_count: usize,
+    pub(crate) is_here: bool,
+    pub(crate) resumes: bool,
+}
+
+/// Central Mission Control Hub. Shown on startup and reachable anytime via `/home` or `Ctrl+X h`.
 pub(crate) struct Welcome {
-    pub(crate) rows: Vec<WelcomeRow>,
-    pub(crate) selected: usize,
+    pub(crate) can_return: bool,
+    pub(crate) focus: HubFocus,
+    pub(crate) tab: HubTab,
     pub(crate) mode: WelcomeMode,
+    pub(crate) sessions: Vec<HubSessionRow>,
+    pub(crate) workspaces: Vec<HubWorkspaceRow>,
+    pub(crate) selected_session: usize,
+    pub(crate) selected_workspace: usize,
+    pub(crate) selected_control: usize,
+    pub(crate) search: String,
+    pub(crate) searching: bool,
+    pub(crate) confirm_delete: Option<String>,
+    pub(crate) rename_target: Option<String>,
     pub(crate) path: String,
     pub(crate) path_selected: usize,
     pub(crate) error: Option<String>,
@@ -197,16 +313,10 @@ pub(crate) struct Welcome {
     pub(crate) skills: Vec<SkillSummary>,
     pub(crate) notes: Vec<MemoryNote>,
     pub(crate) skill_count: usize,
+    pub(crate) skill_injected_count: usize,
     pub(crate) memory_count: usize,
-}
-
-#[derive(Clone)]
-pub(crate) enum WelcomeRow {
-    Here(PathBuf, bool),
-    Recent(PathBuf, String),
-    OpenPath,
-    NewFolder,
-    Account,
-    Skills,
-    Memory,
+    pub(crate) memory_enabled_count: usize,
+    pub(crate) mcp_probe: Vec<String>,
+    pub(crate) mcp_probing: bool,
+    pub(crate) live_refreshed_at: Option<Instant>,
 }

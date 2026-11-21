@@ -7,6 +7,10 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
     let w = area.width.max(16) as usize;
     let mut rows: Vec<LinkedLine> = Vec::new();
 
+    push_section_header(&mut rows, "WORKSPACE", "", theme);
+    push_tree_lines(&mut rows, app.session.workspace_index.tree(), w, theme);
+    rows.push(LinkedLine::from_line(Line::from("")));
+
     // 1. Changed Files
     push_section_header(
         &mut rows,
@@ -308,6 +312,33 @@ pub(super) fn draw_overview(frame: &mut Frame, app: &mut App, theme: &Theme, are
     app.ui.inspector.max_scroll = max_scroll;
     app.ui.inspector.scroll = app.ui.inspector.scroll.min(max_scroll);
     push_linked_rows(frame, app, &rows, app.ui.inspector.scroll, area);
+}
+
+const TREE_PREVIEW: usize = 18;
+
+fn push_tree_lines(rows: &mut Vec<LinkedLine>, tree: &str, width: usize, theme: &Theme) {
+    let lines: Vec<&str> = tree.lines().filter(|line| !line.is_empty()).collect();
+    if lines.is_empty() {
+        rows.push(LinkedLine::from_line(Line::styled(
+            "  (empty)",
+            Style::default().fg(theme.dim),
+        )));
+        return;
+    }
+    let shown = TREE_PREVIEW.min(lines.len());
+    for line in lines.iter().take(shown) {
+        let text = truncate_width(&format!("  {line}"), width);
+        rows.push(LinkedLine::from_line(Line::styled(
+            text,
+            Style::default().fg(theme.text),
+        )));
+    }
+    if lines.len() > shown {
+        rows.push(LinkedLine::from_line(Line::styled(
+            format!("  ({} more)", lines.len() - shown),
+            Style::default().fg(theme.dim),
+        )));
+    }
 }
 
 fn push_section_header(rows: &mut Vec<LinkedLine>, title: &str, meta: &str, theme: &Theme) {

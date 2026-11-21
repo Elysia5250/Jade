@@ -22,6 +22,7 @@ pub(super) struct InspectContext {
     pub(super) uses_sudo: bool,
     pub(super) shell_readonly: bool,
     pub(super) needs_net: bool,
+    pub(super) net_allowlisted: bool,
     pub(super) destructive: bool,
     pub(super) catastrophic: bool,
     pub(super) extra_rw: Vec<String>,
@@ -48,6 +49,7 @@ impl InspectContext {
             uses_sudo: false,
             shell_readonly: false,
             needs_net: false,
+            net_allowlisted: false,
             destructive: false,
             catastrophic: false,
             extra_rw: Vec::new(),
@@ -92,6 +94,7 @@ impl InspectContext {
                     ctx.suggested_rule = Some(format!("WebFetch(domain:{domain})"));
                 }
                 ctx.needs_net = true;
+                ctx.net_allowlisted = super::net_allowlist::webfetch_url_allowlisted(args);
             }
             "exec" => {
                 let cmd = args["command"].as_str().unwrap_or("").trim();
@@ -113,6 +116,8 @@ impl InspectContext {
                     Ok(a) => {
                         ctx.suggested_rule = suggest_bash_rule(cmd, Some(&a));
                         ctx.needs_net = a.needs_net;
+                        ctx.net_allowlisted =
+                            super::net_allowlist::exec_segments_all_allowlisted(&a);
                         ctx.destructive = a.destructive;
                         ctx.catastrophic = a.catastrophic;
                         ctx.shell_readonly = a.read_only_all;

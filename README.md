@@ -44,7 +44,7 @@ watch can live for minutes without blocking anything else.
 
 | Layer | Where | Responsibility |
 |---|---|---|
-| Agent | `envoy-cli` runtime | Turns, tools, permissions, skills, and compaction. The console only renders state and sends requests. |
+| Agent | `envoy-agent` runtime | Turns, tools, permissions, skills, hooks, MCP, and compaction. The console (`envoy-cli`) only renders state and sends requests. |
 | Interaction | `envoy-service` (server/client) | One short request per stream: submit, list, status, log cursor, cancel, file ops |
 | Execution | `envoy-core::job` / `exec` / `log` | Job table, queueing, process groups, timeouts, cancellation, log records |
 | Policy | `envoy-core::config` | `agent.json`: enabled + caller allowlist + `max_jobs` |
@@ -53,8 +53,8 @@ watch can live for minutes without blocking anything else.
 
 ## Crates
 
-- `envoy-proto`: protocol v2 — `Op`, `Reply`, `ClientMsg`, `Job`, `JobState`,
-  `JobResult`, `LogRecord`, and length-prefixed postcard framing.
+- `envoy-proto`: wire protocol (`Op`, `Reply`, `ClientMsg`, `Job`, `JobState`,
+  `JobResult`, `LogRecord`) and length-prefixed postcard framing.
 - `envoy-core`: job table (`Jobs`), detached execution (`exec`), append-only job
   logs with resume cursors (`log`), filesystem primitives (`fs`), the OS sandbox
   (`sandbox`), search (`search`), policy (`config`), audit trail.
@@ -62,9 +62,11 @@ watch can live for minutes without blocking anything else.
   client (`Remote<D>`, plus stream-level helpers), transport traits, and the
   `conduit` runtime adapter (`ConduitClient`, `ConduitDialer`, `WsByteStream`,
   accept pool).
-- `envoy-cli` (`envoy`): daemon lifecycle, the agent loop (tools, providers,
-  permissions, skills, sessions), the terminal console, headless `envoy ask`,
-  and the stdio MCP server.
+- `envoy-agent`: daemon lifecycle, the agent loop (tools, providers,
+  permissions, hooks, skills, MCP, auth, memory, worktree, sessions, and
+  context compaction), and the `agent.sock` control runtime.
+- `envoy-cli` (`envoy`): binary entrypoint, CLI dispatch, headless mode
+  (`envoy ask` / `envoy -p`), and the terminal console (`tui/`).
 
 The old `bridge/` crate (which linked the conduit crates and started a second
 engine) has been removed — it conflicts with `conduit run` owning the device
@@ -145,7 +147,8 @@ the screen. One status line is the only chrome.
 
 | Key | Action |
 |---|---|
-| `enter` | send prompt (starts a turn, or steers the live one at the next tool boundary) |
+| `enter` | send prompt. While a turn is running, open the plan sidechat |
+| `ctrl+enter` | steer the live turn at the next tool boundary (starts a turn when idle) |
 | `alt+enter` | queue the prompt as a follow-up after the current run |
 | `shift+enter` / `ctrl+j` | insert a newline in the editor |
 | `!cmd` | run a shell command directly as a detached job (even in `Agent` mode) |
@@ -156,15 +159,24 @@ the screen. One status line is the only chrome.
 | `ctrl+p` | command palette (login, models, sessions, switch machine, theme, quit) |
 | `ctrl+x` then `q`/`n`/`c`/`b`/`t`/`l`/`m`/`s` | leader shortcuts (quit, new session, cancel, sidebar, theme, login, models, refresh) |
 | `pgup`/`pgdn`, `ctrl+u`/`ctrl+f`, `g`/`G` | scroll transcript / jump top or bottom |
+| `up`/`down` | move the caret inside the draft (never replaces it) |
+| `ctrl+up`/`ctrl+down` | walk the send history (the unsent draft comes back on the way out) |
 | `alt+up` | recall the last queued follow-up into the editor |
-| `esc` / `ctrl+c` | clear input / cancel active turn or focus transcript / quit |
+| `esc` / `ctrl+c` | clear input / arm then cancel the active turn (twice) / focus transcript / quit |
 
 **Async input.** The turn lives in the daemon, so the console is only a client.
-While a turn is running the editor stays live: `enter` steers the loop with your
-exact words (delivered at the next tool boundary), `alt+enter` queues a follow-up
-for after the run, `esc` interrupts, and `alt+up` recalls a queued follow-up.
-`enter` always sends `Prompt` to the daemon, which decides whether to start or
-steer, so a stale console flag cannot swallow the next task. Closing the console
+While a turn is running the editor stays live: `enter` opens a plan sidechat
+on the right. That thread is forced into plan mode and sees a snapshot of the
+worker context. It cannot steer, queue, or interrupt the worker until it writes
+a plan file. After that file exists and the side turn ends, an ask chooses
+whether to interrupt now or wait until this turn ends. `ctrl+enter` steers the
+worker with your exact words (delivered at the next tool boundary), `alt+enter`
+queues a follow-up for after the run, `esc` twice (or `ctrl+c`) interrupts, and
+`alt+up` recalls a queued follow-up.
+Idle `enter` and idle `ctrl+enter` both start a turn. While a turn is running
+the console sends `Side` for `enter` and `Steer` for `ctrl+enter`. Headless
+clients still send `Prompt`, which the daemon steers when a turn is running.
+Closing the console
 does not kill the running turn. The agent reports through the `say` tool and asks decisions
 through `ask` (options with one recommended; after 300s the recommended option
 is taken). Detached jobs can be awaited with `job action=wait`.
@@ -207,9 +219,12 @@ conduit peer:
 
 Permission decisions use an explicit ladder: managed and local deny, the hard
 protected paths, then ask, then allow, then the mode baseline (`default`,
-`accept-edits`, `plan`, `auto`). Plan mode is read-only except for its own plan
-files. After an allow, the OS sandbox is the boundary. `/permissions` and
-`/plan` change the session. Decisions are appended to
+`accept-edits`, `plan`, `auto`, `turbo`). Plan mode is read-only except for its
+own plan files. `auto` turns every baseline ask into an allow once a sandbox
+that enforces the workspace boundary is available (`bwrap` or Seatbelt);
+`turbo` always allows and writes the badge in red. Deny rules still win in both.
+After an allow, the OS sandbox is the boundary. `/permissions` and `/plan`
+change the session. Decisions are appended to
 `~/.envoy/audit/permissions.jsonl`.
 
 Context is compacted in two stages. Older tool output is folded first, then the

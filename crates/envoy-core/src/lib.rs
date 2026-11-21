@@ -4,10 +4,12 @@ pub mod audit;
 pub mod config;
 pub mod exec;
 pub mod fs;
+pub mod fs_atomic;
 pub mod job;
 pub mod log;
 pub mod sandbox;
 pub mod search;
+pub mod workspace;
 
 mod seatbelt;
 
@@ -26,3 +28,4 @@ pub use sandbox::{
     probe_backend, SandboxBackend, SandboxCapabilities, ScratchGuard,
 };
 pub use search::{glob_files, grep_files};
+pub use workspace::{scan_workspace, WorkspaceScan};

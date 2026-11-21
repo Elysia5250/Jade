@@ -38,6 +38,14 @@ pub enum ReasoningBlock {
     Encrypted { id: String, content: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    pub mime: String,
+    pub data_base64: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: ChatRole,
@@ -56,6 +64,9 @@ pub struct ChatMessage {
     /// Structured thinking, redacted thinking, or encrypted reasoning items.
     #[serde(default)]
     pub reasoning_blocks: Vec<ReasoningBlock>,
+    /// Optional pasted/attached user images (never skipped on postcard wire).
+    #[serde(default)]
+    pub images: Vec<ImageAttachment>,
 }
 
 impl ChatMessage {
@@ -68,6 +79,7 @@ impl ChatMessage {
             tool_call_id: None,
             tool_name: None,
             reasoning_blocks: Vec::new(),
+            images: Vec::new(),
         }
     }
 }
@@ -150,6 +162,17 @@ pub enum TranscriptItem {
         text: String,
         level: String,
     },
+}
+
+/// One child of a `delegate` call, plus the transcript the inspector shows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentLane {
+    pub index: u32,
+    pub name: String,
+    pub description: String,
+    pub status: CardStatus,
+    #[serde(default)]
+    pub items: Vec<TranscriptItem>,
 }
 
 fn default_true() -> bool {
@@ -322,6 +345,9 @@ pub struct Session {
     pub messages: Vec<ChatMessage>,
     #[serde(default)]
     pub changed_files: Vec<FileChange>,
+    /// Delegated children keyed by the parent `delegate` tool call id.
+    #[serde(default)]
+    pub subagents: BTreeMap<String, Vec<SubagentLane>>,
 }
 
 impl Session {
@@ -345,6 +371,7 @@ impl Session {
             items: Vec::new(),
             messages: Vec::new(),
             changed_files: Vec::new(),
+            subagents: BTreeMap::new(),
         }
     }
 
@@ -408,8 +435,12 @@ pub struct SessionSummary {
     pub id: String,
     pub title: String,
     pub cwd: PathBuf,
+    pub target: String,
     pub updated_ms: u64,
     pub item_count: usize,
+    pub prompt_tokens: u64,
+    pub changed_files: usize,
+    pub last_preview: String,
 }
 
 pub fn sessions_dir(data_dir: &Path) -> PathBuf {
@@ -468,6 +499,36 @@ pub fn delete_session(data_dir: &Path, id: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn rename_session(data_dir: &Path, id: &str, title: &str) -> Result<()> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        bail!("session title is empty");
+    }
+    let mut session = load_session(data_dir, id)?;
+    session.title = trimmed.chars().take(64).collect();
+    session.touch();
+    save_session(data_dir, &session)
+}
+
+fn extract_last_preview(items: &[TranscriptItem]) -> String {
+    items
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            TranscriptItem::User { text, .. } | TranscriptItem::Assistant { text, .. } => {
+                let first = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+                let shown: String = first.chars().take(80).collect();
+                Some(if first.chars().count() > 80 {
+                    format!("{shown}…")
+                } else {
+                    shown
+                })
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 pub fn list_sessions(data_dir: &Path) -> Vec<SessionSummary> {
     let dir = sessions_dir(data_dir);
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -485,12 +546,17 @@ pub fn list_sessions(data_dir: &Path) -> Vec<SessionSummary> {
         let Ok(s) = serde_json::from_str::<Session>(&raw) else {
             continue;
         };
+        let last_preview = extract_last_preview(&s.items);
         out.push(SessionSummary {
             id: s.id,
             title: s.title,
             cwd: s.cwd,
+            target: s.target,
             updated_ms: s.updated_ms,
             item_count: s.items.len(),
+            prompt_tokens: s.prompt_tokens,
+            changed_files: s.changed_files.len(),
+            last_preview,
         });
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.updated_ms));
@@ -575,6 +641,7 @@ mod tests {
             tool_name: None,
 
             reasoning_blocks: Vec::new(),
+            images: Vec::new(),
         };
         let bytes = postcard::to_stdvec(&message).unwrap();
         let back: ChatMessage = postcard::from_bytes(&bytes).unwrap();
@@ -596,6 +663,7 @@ mod tests {
                 tool_name: None,
 
                 reasoning_blocks: Vec::new(),
+                images: Vec::new(),
             }],
             input_tokens: 3,
             output_tokens: 4,
@@ -652,6 +720,11 @@ mod tests {
         let listed = list_sessions(&dir);
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, s.id);
+        assert_eq!(listed[0].last_preview, "fix the build error");
+
+        rename_session(&dir, &s.id, "  build cleanup  ").unwrap();
+        assert_eq!(list_sessions(&dir)[0].title, "build cleanup");
+        assert!(rename_session(&dir, &s.id, "   ").is_err());
 
         let loaded = latest_session_for_cwd(&dir, Path::new("/tmp/proj")).unwrap();
         assert_eq!(loaded.id, s.id);

@@ -165,26 +165,31 @@ pub(crate) async fn run_prepared_tool_call(
                 "read" => read_tool(remote, target, cwd, args)
                     .await
                     .map(|s| (s, None)),
-                "write" => match write_tool(remote, target, cwd, args).await {
-                    Ok((msg, snap)) => {
-                        if let Some(s) = snap {
-                            let (added, removed) =
-                                crate::session::compute_diff_counts(&s.before, &s.after);
-                            let _ = tx.send(AgentEvent::FileChanged {
-                                path: s.path,
-                                before: s.before,
-                                after: s.after,
-                                added,
-                                removed,
-                                existed_before: s.existed_before,
-                                restorable_before: s.restorable_before,
-                            });
+                "write" => {
+                    match write_tool(remote, target, cwd, args, auth.resolved_path.as_deref()).await
+                    {
+                        Ok((msg, snap)) => {
+                            if let Some(s) = snap {
+                                let (added, removed) =
+                                    crate::session::compute_diff_counts(&s.before, &s.after);
+                                let _ = tx.send(AgentEvent::FileChanged {
+                                    path: s.path,
+                                    before: s.before,
+                                    after: s.after,
+                                    added,
+                                    removed,
+                                    existed_before: s.existed_before,
+                                    restorable_before: s.restorable_before,
+                                });
+                            }
+                            Ok((msg, None))
                         }
-                        Ok((msg, None))
+                        Err(e) => Err(e),
                     }
-                    Err(e) => Err(e),
-                },
-                "edit" => match edit_tool(remote, target, cwd, args).await {
+                }
+                "edit" => match edit_tool(remote, target, cwd, args, auth.resolved_path.as_deref())
+                    .await
+                {
                     Ok((msg, snap)) => {
                         if let Some(s) = snap {
                             let (added, removed) =

@@ -39,6 +39,47 @@ fn symlink_loop_indexes_each_inode_once() {
 }
 
 #[test]
+fn workspace_tree_shows_on_open_and_hides_gitignored_files() {
+    let dir = tmpdir("tree");
+    let init = std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(init.success(), "git init");
+    std::fs::write(dir.join(".gitignore"), "secret.log\n").unwrap();
+    std::fs::write(dir.join("visible.rs"), "fn visible() {}\n").unwrap();
+    std::fs::write(dir.join("secret.log"), "nope").unwrap();
+
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.ui.show_sidebar = true;
+    app.ui.inspector.force_open = true;
+    app.ui.inspector.tab = InspectorTab::Overview;
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    terminal.draw(|frame| paint(frame, &mut app)).unwrap();
+    let painted: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(
+        painted.contains("visible.rs"),
+        "workspace tree should list visible.rs:\n{painted}"
+    );
+    assert!(
+        !painted.contains("secret.log"),
+        "gitignored files stay out of the tree:\n{painted}"
+    );
+    assert!(app.session.workspace_index.tree().contains("visible.rs"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn truncated_preview_renders_banner_in_file_inspector() {
     let dir = tmpdir("trunc");
     let path = dir.join("huge.txt");
@@ -408,6 +449,7 @@ fn p6_3a_welcome_mode_and_single_source_slash_commands() {
 
     for (prefix, want) in [("job", "jobs"), ("log", "logs"), ("out", "output")] {
         app.ui.input = format!("/{prefix}");
+        app.ui.input_cursor = app.ui.input.chars().count();
         assert!(
             app.filtered_slash().iter().any(|c| c.name == want),
             "expected /{want} in completion for {prefix}"
@@ -431,5 +473,41 @@ fn p6_3a_welcome_mode_and_single_source_slash_commands() {
         .expect("unknown command sets error toast");
     assert!(*is_err && msg.contains("unknown command"), "{msg}");
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn status_bar_preserves_toast_when_inspector_is_open() {
+    let dir = tmpdir("status-toast");
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.ui.show_sidebar = true;
+    app.inputs.catalog.signed_in = true;
+    app.inputs.catalog.model_id = "claude-sonnet-4-5".into();
+    app.inputs.catalog.compact_at = 200_000;
+    app.inputs.catalog.hard_window = 200_000;
+    app.inputs.catalog.sandbox_label = "bwrap".into();
+    app.inputs.catalog.bwrap_present = true;
+
+    for ch in "/clear".chars() {
+        let _ = app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    let _ = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.ui.input.is_empty());
+
+    let backend = ratatui::backend::TestBackend::new(120, 30);
+    let mut terminal = ratatui::Terminal::new(backend).unwrap();
+    terminal.draw(|frame| view::draw(frame, &mut app)).unwrap();
+    let buf = terminal.backend().buffer();
+    let mut screen = String::new();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            screen.push_str(buf[(x, y)].symbol());
+        }
+        screen.push('\n');
+    }
+    assert!(
+        screen.contains("transcript cleared"),
+        "expected toast in narrow status bar:\n{screen}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

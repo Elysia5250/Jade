@@ -17,10 +17,11 @@ pub(crate) struct AgentState {
     pub(crate) skip_replay_tokens: bool,
     pub(crate) pending_ask: Option<PendingAsk>,
     pub(crate) queued: VecDeque<String>,
-    pub(crate) outbox: VecDeque<(String, SendMode)>,
+    pub(crate) outbox: VecDeque<(String, Vec<envoy_agent::session::ImageAttachment>, SendMode)>,
     pub(crate) active_assistant_id: Option<u64>,
     pub(crate) active_tool_items: HashMap<String, u64>,
     pub(crate) active_monitors: Vec<MonitorInfo>,
+    pub(crate) turn_started_at: Option<Instant>,
     pub(crate) daemon_tx: std::cell::RefCell<Option<mpsc::UnboundedSender<DaemonCmd>>>,
 }
 
@@ -68,13 +69,18 @@ pub(crate) struct UiState {
     pub(crate) selected_card: Option<usize>,
     pub(crate) input: String,
     pub(crate) input_cursor: usize,
+    pub(crate) pending_images: Vec<envoy_agent::session::ImageAttachment>,
     pub(crate) history: Vec<String>,
     pub(crate) history_pos: Option<usize>,
+    /// Unsent draft stashed while walking the send history.
+    pub(crate) history_draft: Option<String>,
     pub(crate) menu_selected: usize,
     pub(crate) at_dismissed_at: Option<usize>,
     pub(crate) modal: Option<Modal>,
     pub(crate) theme: usize,
     pub(crate) leader_at: Option<Instant>,
+    /// Set by the first `Esc` of a double-`Esc` interrupt.
+    pub(crate) interrupt_at: Option<Instant>,
     pub(crate) toast: Option<(String, bool, Instant)>,
     pub(crate) welcome: Option<Welcome>,
     pub(crate) inspector: InspectorState,
@@ -84,4 +90,10 @@ pub(crate) struct UiState {
     pub(crate) selection: Option<MouseSelection>,
     pub(crate) drag_start: Option<GridPos>,
     pub(crate) screen_lines: Vec<Vec<String>>,
+    /// Plan sidechat transcript. It is not part of the persisted session.
+    pub(crate) side_open: bool,
+    pub(crate) side_running: bool,
+    pub(crate) side_items: Vec<TranscriptItem>,
+    pub(crate) side_input: String,
+    pub(crate) side_cursor: usize,
 }

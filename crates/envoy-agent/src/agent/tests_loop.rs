@@ -92,6 +92,7 @@ async fn overflow_triggers_one_compaction_retry_and_second_failure_errors() {
             tool_name: None,
 
             reasoning_blocks: Vec::new(),
+            images: Vec::new(),
         },
         ChatMessage {
             role: ChatRole::User,
@@ -102,6 +103,7 @@ async fn overflow_triggers_one_compaction_retry_and_second_failure_errors() {
             tool_name: None,
 
             reasoning_blocks: Vec::new(),
+            images: Vec::new(),
         },
     ];
     let cfg = TurnConfig {

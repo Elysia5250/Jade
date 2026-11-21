@@ -15,7 +15,6 @@ use crate::agent::{AgentEvent, AskBroker, AskOption};
 use crate::permissions::audit::{now_ms, redact_secrets};
 use crate::permissions::is_workspace_trusted;
 use serde::Serialize;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -174,7 +173,6 @@ impl HookEngine {
 
 fn record_hook_audit(data_dir: &Path, ctx: &HookContext, duration_ms: u64) {
     let path = data_dir.join("agent").join("hook_audit.jsonl");
-    envoy_core::audit::rotate_if_oversized(&path, envoy_core::audit::LOG_ROTATE_BYTES);
     if let Some(parent) = path.parent() {
         let _ = envoy_core::fs::ensure_private_dir(parent);
     }
@@ -204,11 +202,11 @@ fn record_hook_audit(data_dir: &Path, ctx: &HookContext, duration_ms: u64) {
         trace: &trace,
     };
     if let Ok(line) = serde_json::to_string(&entry) {
-        let mut buf = line.into_bytes();
-        buf.push(b'\n');
-        if let Ok(mut f) = envoy_core::fs::open_append_private(&path) {
-            let _ = f.write_all(&buf);
-        }
+        let _ = envoy_core::audit::append_line_with_rotate(
+            &path,
+            envoy_core::audit::LOG_ROTATE_BYTES,
+            &line,
+        );
     }
 }
 
@@ -248,7 +246,7 @@ pub async fn confirm_hook_ask(
     }
     let _gate = asks.acquire_prompt().await;
     let id = asks.next_id();
-    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+    let (resp_tx, mut resp_rx) = tokio::sync::oneshot::channel();
     asks.register(id, resp_tx);
     let options = vec![
         AskOption {
@@ -272,18 +270,19 @@ pub async fn confirm_hook_ask(
         recommended: 1,
         timeout_ms: 120_000,
     });
-    let res = match tokio::time::timeout(Duration::from_secs(120), resp_rx).await {
-        Ok(Ok(label)) if label == "Allow once" => Ok(()),
-        Ok(Ok(label)) => Err(format!(
+    let res = match asks
+        .wait_for_answer(id, Duration::from_secs(120), &mut resp_rx)
+        .await
+    {
+        Some(label) if label == "Allow once" => Ok(()),
+        Some(label) => Err(format!(
             "denied by user ({label}) after hook `{by}` ask: {reason}"
         )),
-        Ok(Err(_)) | Err(_) => {
-            asks.forget(id);
-            Err(format!(
-                "timed out waiting for hook `{by}` confirmation: {reason}"
-            ))
-        }
+        None => Err(format!(
+            "timed out waiting for hook `{by}` confirmation: {reason}"
+        )),
     };
+    asks.forget(id);
     let _ = tx.send(AgentEvent::AskClosed { id });
     res
 }

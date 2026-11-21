@@ -120,14 +120,24 @@ async fn mcp_server_normalizes_relative_paths_rejects_ld_preload_and_audits() {
     );
     assert!(local_rc.0.contains("WORKSPACE_RC_ONLY"), "{}", local_rc.0);
 
+    // A path that climbs out of the workspace must never land on disk. With an
+    // enforcing sandbox `auto` allows the call and the OS boundary rejects it;
+    // without one the policy layer asks (and headless asks fail closed).
+    let escaped = std::path::Path::new("/var/nonexistent_file_xyz");
     let res = call_tool(
         &eng_auto,
         &json!({ "name": "write", "arguments": { "path": "../../../../../../var/nonexistent_file_xyz", "content": "x" } }),
     )
-    .await
-    .unwrap();
-    assert!(res.2);
-    assert!(res.0.contains("requires approval"), "{}", res.0);
+    .await;
+    let why = match res {
+        Ok((msg, _, is_err)) => {
+            assert!(is_err, "escaping write must be an error result: {msg}");
+            msg
+        }
+        Err(e) => format!("{e}"),
+    };
+    assert!(!escaped.exists(), "escaping write reached the disk: {why}");
+    assert!(!why.is_empty(), "the failure must be reported");
     let _ = stop_tx.send(());
 
     let _ = std::fs::remove_dir_all(&dir);

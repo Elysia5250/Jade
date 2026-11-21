@@ -38,12 +38,20 @@ pub struct PreCompactHook<'a> {
     pub ctx: &'a mut HookContext,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SummarySource {
+    Model,
+    MaskOnly,
+    Fallback(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct CompactionOutcome {
     pub messages: Vec<ChatMessage>,
     pub before_tokens: u64,
     pub after_tokens: u64,
     pub summary: String,
+    pub summary_source: SummarySource,
     pub pruned_only: bool,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -54,6 +62,7 @@ pub struct CompactionOutcome {
 #[derive(Debug, Clone)]
 pub struct HandoffOutcome {
     pub summary: String,
+    pub summary_source: SummarySource,
     pub before_tokens: u64,
     pub after_tokens: u64,
     pub title: String,
@@ -188,6 +197,7 @@ async fn prepare_context_body(
 ) -> Result<Option<CompactionOutcome>> {
     let before_tokens = estimate_turn_tokens(system, messages, tools_overhead, calibration);
 
+    // Floor guard for direct non-forced callers (`agent/loop.rs` gates at `compact_at`).
     if !force && before_tokens <= plan.prune_at {
         return Ok(None);
     }
@@ -263,7 +273,7 @@ async fn prepare_context_body(
         });
     }
 
-    let (summary_text, usage) = summary::summarize_messages_with_usage(
+    let (summary_text, usage, summary_source) = summary::summarize_messages_with_usage(
         http,
         data_dir,
         provider,
@@ -276,6 +286,15 @@ async fn prepare_context_body(
     )
     .await?;
 
+    if let SummarySource::Fallback(reason) = &summary_source {
+        if let Some(tx) = tx {
+            let _ = tx.send(AgentEvent::Say {
+                text: format!("compaction fell back to deterministic summary ({reason})"),
+                kind: "warn".into(),
+            });
+        }
+    }
+
     let compacted = assemble_compacted_messages(&summary_text, tail, target, cwd);
     let after_tokens = estimate_turn_tokens(system, &compacted, tools_overhead, calibration);
     *messages = compacted.clone();
@@ -285,6 +304,7 @@ async fn prepare_context_body(
         before_tokens,
         after_tokens,
         summary: summary_text,
+        summary_source,
         pruned_only: false,
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
@@ -306,6 +326,7 @@ fn mask_outcome(
         summary: format!(
             "Masked {pruned} older tool outputs (~{before_tokens} -> ~{after_tokens} tokens)."
         ),
+        summary_source: SummarySource::MaskOnly,
         pruned_only: true,
         input_tokens: 0,
         output_tokens: 0,
@@ -339,7 +360,7 @@ pub async fn generate_handoff(
         tools_overhead(&[]),
         TokenCalibration::default(),
     );
-    let summary = summarize_messages(
+    let (summary, _usage, summary_source) = summary::summarize_messages_with_usage(
         http, data_dir, provider, model_id, system, messages, focus, true, session_id,
     )
     .await?;
@@ -354,6 +375,7 @@ pub async fn generate_handoff(
             tool_name: None,
 
             reasoning_blocks: Vec::new(),
+            images: Vec::new(),
         }],
         tools_overhead(&[]),
         TokenCalibration::default(),
@@ -361,6 +383,7 @@ pub async fn generate_handoff(
     let title = derive_handoff_title(messages, focus);
     Ok(HandoffOutcome {
         summary,
+        summary_source,
         before_tokens,
         after_tokens,
         title,

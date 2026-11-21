@@ -134,6 +134,144 @@ fn slash_menu_filters_completes_and_opens_login() {
 }
 
 #[test]
+fn slash_query_stops_at_the_cursor() {
+    let dir = tmpdir();
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.ui.input = "/lo fix".into();
+    app.ui.input_cursor = 3;
+    assert_eq!(app.slash_query(), Some("lo"));
+    app.ui.input_cursor = 7;
+    assert_eq!(app.slash_query(), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn slash_menu_opens_over_a_draft_and_esc_keeps_the_draft() {
+    let dir = tmpdir();
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.ui.input = "fix the parser".into();
+    app.ui.input_cursor = app.ui.input.chars().count();
+
+    app.handle_key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    assert_eq!(app.ui.input, "/fix the parser");
+    let names: Vec<&str> = app.filtered_slash().iter().map(|c| c.name).collect();
+    assert!(names.contains(&"login"), "menu should open over a draft");
+
+    for ch in "lo".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    assert_eq!(app.ui.input, "/lofix the parser");
+    let names: Vec<&str> = app.filtered_slash().iter().map(|c| c.name).collect();
+    assert_eq!(names, vec!["login", "logout", "logs"]);
+
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.ui.input, "fix the parser");
+    assert_eq!(app.ui.input_cursor, 0);
+    assert!(app.filtered_slash().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn esc_takes_two_presses_to_interrupt_a_running_turn() {
+    let dir = tmpdir();
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.agent.running = true;
+
+    let first = app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(first, Action::None), "first Esc must not cancel");
+    assert!(app.agent.running);
+    let (msg, is_err, _) = app.ui.toast.as_ref().expect("first Esc hints");
+    assert!(!*is_err && msg.contains("Esc again"), "{msg}");
+
+    let second = app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(second, Action::Cancel));
+
+    let third = app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(third, Action::None), "arm is consumed once");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn typing_between_esc_presses_rearms_the_interrupt() {
+    let dir = tmpdir();
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.agent.running = true;
+
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+    // The draft clears instead of cancelling, and the arm starts over.
+    let clear = app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(clear, Action::None));
+    assert!(app.ui.input.is_empty());
+    let arm = app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(arm, Action::None));
+    let cancel = app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(cancel, Action::Cancel));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn esc_without_a_running_turn_still_just_moves_focus() {
+    let dir = tmpdir();
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    let action = app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(matches!(action, Action::None));
+    assert_eq!(app.ui.focus, Focus::Transcript);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn plain_arrows_edit_the_draft_and_ctrl_arrows_walk_history() {
+    let dir = tmpdir();
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.ui.history = vec!["first".into(), "second".into()];
+    app.ui.input = "line1\nline2".into();
+    app.ui.input_cursor = 3;
+
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.ui.input, "line1\nline2", "arrows never recall history");
+    assert_eq!(app.ui.input_cursor, 3, "already on the first line");
+
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(app.ui.input, "line1\nline2");
+    assert_eq!(app.ui.input_cursor, 9);
+
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
+    assert_eq!(app.ui.input, "second");
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
+    assert_eq!(app.ui.input, "first");
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
+    assert_eq!(app.ui.input, "first", "oldest entry is the floor");
+
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
+    assert_eq!(app.ui.input, "second");
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
+    assert_eq!(app.ui.input, "line1\nline2", "the draft comes back");
+    assert_eq!(app.ui.input_cursor, "line1\nline2".chars().count());
+    assert_eq!(app.ui.history_pos, None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn sending_clears_the_stashed_history_draft() {
+    let dir = tmpdir();
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.ui.history = vec!["old prompt".into()];
+    app.ui.input = "draft".into();
+    app.ui.input_cursor = 5;
+
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
+    assert_eq!(app.ui.input, "old prompt");
+    app.ui.input = "fresh".into();
+    app.ui.input_cursor = 5;
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.ui.history_draft, None);
+    assert!(app.ui.input.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn login_api_key_flow_persists_and_enables_agent_mode() {
     let dir = tmpdir();
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
@@ -212,7 +350,9 @@ fn multiline_shift_enter_inserts_newline_and_bang_runs_shell() {
 fn renders_transcript_cards_and_sidebar() {
     use ratatui::backend::TestBackend;
     let dir = tmpdir();
-    let mut app = App::new(dir.clone(), "local".into(), None, PathBuf::from("/tmp"));
+    // Isolated cwd: listing a shared `/tmp` picks up sibling tests' scratch dirs
+    // and can push the `jobs` section below the visible rows.
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
     app.jobs.connected = true;
     app.ui.show_sidebar = true;
     app.jobs.list = vec![job(
@@ -342,26 +482,31 @@ async fn context_budget_compacted_and_handoff_render_cleanly() {
                     .collect()
             })
             .collect();
-        if let Some(status) = rows.iter().find(|row| row.contains("~1.0m")) {
+        if let Some(comp) = rows.iter().find(|row| row.contains("~1.0m")) {
             assert!(
-                status.contains("agent"),
-                "status row clipped the left side:\n{status}"
+                comp.contains("gemini-4-hydrogen"),
+                "composer bar clipped the model:\n{comp}"
             );
             assert_eq!(
-                display_width(status),
+                display_width(comp),
                 width as usize,
-                "status row:\n{status}"
+                "composer row:\n{comp}"
             );
         }
+        let bottom = rows.last().expect("bottom bar");
+        assert!(
+            bottom.contains("agent"),
+            "bottom bar missing mode:\n{bottom}"
+        );
         rows.concat()
     };
 
     let first = draw_text(&mut app);
-    assert!(first.contains("50k/512k~1.0m"), "status bar:\n{first}");
+    assert!(first.contains("50k/512k~1.0m"), "composer bar:\n{first}");
 
     app.run_slash("/budget focused");
     let second = draw_text(&mut app);
-    assert!(second.contains("50k/200k~1.0m"), "status bar:\n{second}");
+    assert!(second.contains("50k/200k~1.0m"), "composer bar:\n{second}");
 
     let old_id = app.session.current.id.clone();
     app.apply_event(
@@ -376,6 +521,7 @@ async fn context_budget_compacted_and_handoff_render_cleanly() {
                 tool_name: None,
 
                 reasoning_blocks: Vec::new(),
+                images: Vec::new(),
             }],
             before_tokens: 50_000,
             after_tokens: 4_000,
@@ -421,6 +567,16 @@ fn permission_mode_cycles_on_shift_tab_and_renders_status_badge() {
     app.run_slash("/plan");
     assert_eq!(app.session.perm_mode, PermissionMode::Plan);
 
+    // Plan -> Auto -> Turbo -> Default closes the ring.
+    app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(app.session.perm_mode, PermissionMode::Auto);
+    app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(app.session.perm_mode, PermissionMode::Turbo);
+    app.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    assert_eq!(app.session.perm_mode, PermissionMode::Default);
+    app.run_slash("/permissions plan");
+    assert_eq!(app.session.perm_mode, PermissionMode::Plan);
+
     let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
     terminal.draw(|frame| paint(frame, &mut app)).unwrap();
     let text: String = terminal
@@ -431,6 +587,59 @@ fn permission_mode_cycles_on_shift_tab_and_renders_status_badge() {
         .map(|c| c.symbol())
         .collect();
     assert!(text.contains("perm:plan"), "status bar:\n{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn turbo_badge_is_red_and_never_selected_by_default() {
+    use ratatui::backend::TestBackend;
+    let dir = tmpdir();
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.run_slash("/permissions turbo");
+    assert_eq!(app.session.perm_mode, PermissionMode::Turbo);
+    assert_eq!(app.session.perm_mode.short_badge(), "perm:turbo");
+
+    let theme = app.theme();
+    let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
+    terminal.draw(|frame| paint(frame, &mut app)).unwrap();
+    let buf = terminal.backend().buffer();
+    let screen: String = {
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    };
+    let (x, y) = (0..buf.area.height)
+        .find_map(|y| {
+            (0..buf.area.width)
+                .find(|&x| buf[(x, y)].symbol() == "p")
+                .filter(|&x| {
+                    let line: String = (x..(x + 10).min(buf.area.width))
+                        .map(|i| buf[(i, y)].symbol())
+                        .collect();
+                    line.starts_with("perm:turbo")
+                })
+                .map(|x| (x, y))
+        })
+        .unwrap_or_else(|| panic!("turbo badge missing:\n{screen}"));
+    assert_eq!(
+        buf[(x, y)].fg,
+        theme.bad,
+        "turbo badge must be red:\n{screen}"
+    );
+
+    app.run_slash("/permission");
+    let Some(Modal::Picker(picker)) = app.ui.modal.as_ref() else {
+        panic!("expected a permission picker");
+    };
+    assert!(
+        picker.items.iter().any(|(l, _)| l.contains("turbo")),
+        "picker must offer turbo"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -503,8 +712,9 @@ async fn welcome_picker_selects_a_recent_workspace() {
 
     let mut app = App::new(dir.clone(), "local".into(), None, here.clone());
     app.open_welcome();
-    assert_eq!(app.ui.welcome.as_ref().unwrap().rows.len(), 7);
-    assert_eq!(app.ui.welcome.as_ref().unwrap().selected, 0);
+    assert_eq!(app.ui.welcome.as_ref().unwrap().sessions.len(), 1);
+    assert_eq!(app.ui.welcome.as_ref().unwrap().workspaces.len(), 2);
+    assert_eq!(app.ui.welcome.as_ref().unwrap().selected_session, 0);
 
     let mut terminal = Terminal::new(TestBackend::new(110, 32)).unwrap();
     terminal.draw(|frame| paint(frame, &mut app)).unwrap();
@@ -515,12 +725,11 @@ async fn welcome_picker_selects_a_recent_workspace() {
         .iter()
         .map(|c| c.symbol())
         .collect();
-    assert!(text.contains("Pick a workspace"), "{text}");
-    assert!(text.contains("open a path"), "{text}");
+    assert!(text.contains("envoy hub"), "{text}");
+    assert!(text.contains("open path"), "{text}");
+    assert!(text.contains("Quick Controls"), "{text}");
 
-    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
-    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
     assert_eq!(app.ui.welcome.as_ref().unwrap().mode, WelcomeMode::OpenPath);
     for ch in dir.join("missing").display().to_string().chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
@@ -537,8 +746,9 @@ async fn welcome_picker_selects_a_recent_workspace() {
     assert!(err.contains("not a directory"), "{err}");
 
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    app.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
-    assert_eq!(app.ui.welcome.as_ref().unwrap().selected, 1);
+    app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    assert_eq!(app.ui.welcome.as_ref().unwrap().selected_workspace, 1);
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(app.ui.welcome.is_none());
     assert_eq!(
@@ -569,8 +779,7 @@ async fn welcome_without_a_saved_session_mints_a_new_id() {
 
     let picked = app.session.current.id.clone();
     app.open_welcome();
-    app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
     for ch in fresh.display().to_string().chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
     }
@@ -656,13 +865,13 @@ fn composer_and_turns_keep_vertical_room() {
         .rposition(|row| row.contains('╰'))
         .expect("composer bottom");
     assert!(
-        top >= 2 && rows[top - 1].trim().is_empty() && rows[top - 2].trim().is_empty(),
-        "composer should have two blank rows above it\n{}",
+        top >= 2 && rows[top - 1].contains("/login to sign in") && rows[top - 2].trim().is_empty(),
+        "composer bar should sit directly above the composer with a blank row above it\n{}",
         rows.join("\n")
     );
     assert!(
         rows[bottom + 1].trim().is_empty() && rows[bottom + 2].contains("agent"),
-        "composer should sit one row above the status line\n{}",
+        "composer should sit one row above the bottom status line\n{}",
         rows.join("\n")
     );
     let _ = std::fs::remove_dir_all(&dir);

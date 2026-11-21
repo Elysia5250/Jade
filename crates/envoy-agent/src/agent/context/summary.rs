@@ -136,6 +136,7 @@ pub fn assemble_compacted_messages(
         tool_name: None,
 
         reasoning_blocks: Vec::new(),
+        images: Vec::new(),
     }];
     if tail
         .first()
@@ -152,6 +153,7 @@ pub fn assemble_compacted_messages(
             tool_name: None,
 
             reasoning_blocks: Vec::new(),
+            images: Vec::new(),
         });
     }
     out.extend(tail);
@@ -181,7 +183,7 @@ pub async fn summarize_messages(
     for_handoff: bool,
     session_id: &str,
 ) -> Result<String> {
-    let (summary, _usage) = summarize_messages_with_usage(
+    let (summary, _usage, _source) = summarize_messages_with_usage(
         http,
         data_dir,
         provider,
@@ -207,10 +209,11 @@ pub(crate) async fn summarize_messages_with_usage(
     focus: Option<&str>,
     for_handoff: bool,
     session_id: &str,
-) -> Result<(String, SummaryUsage)> {
+) -> Result<(String, SummaryUsage, super::SummarySource)> {
     let (previous, dossier) = condense_for_summary(slice);
     let mut body = summary_input(&previous, &dossier);
     let instruction = build_summary_prompt(focus, for_handoff);
+    let mut fallback_reason = "empty summary input".to_string();
     let mut usage = SummaryUsage::default();
 
     for attempt in 0..2 {
@@ -285,18 +288,36 @@ pub(crate) async fn summarize_messages_with_usage(
                 usage.cache_read_tokens += reply.cache_read_tokens;
                 usage.cache_create_tokens += reply.cache_create_tokens;
                 if !reply.text.trim().is_empty() {
-                    return Ok((reply.text.trim().to_string(), usage));
+                    return Ok((
+                        reply.text.trim().to_string(),
+                        usage,
+                        super::SummarySource::Model,
+                    ));
                 }
+                fallback_reason = "empty model summary response".to_string();
                 break;
             }
             Err(err) if attempt == 0 && is_context_overflow_error(&format!("{err:#}")) => {
+                fallback_reason = format!("{err:#}");
                 body = truncate_chars(&body, body.chars().count() / 2);
             }
-            Err(_) => break,
+            Err(err) => {
+                fallback_reason = format!("{err:#}");
+                tracing::warn!(
+                    model = model_id,
+                    error = %fallback_reason,
+                    "context summary model call failed; falling back to deterministic summary"
+                );
+                break;
+            }
         }
     }
 
-    Ok((merge_summary(previous.as_deref(), &dossier), usage))
+    Ok((
+        merge_summary(previous.as_deref(), &dossier),
+        usage,
+        super::SummarySource::Fallback(fallback_reason),
+    ))
 }
 
 /// One synthetic user message and no tools. Two user messages in a row are
@@ -319,6 +340,7 @@ fn user_note(text: &str) -> ChatMessage {
         tool_call_id: None,
         tool_name: None,
         reasoning_blocks: Vec::new(),
+        images: Vec::new(),
     }
 }
 
@@ -529,6 +551,7 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             reasoning_blocks: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -545,6 +568,7 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             reasoning_blocks: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -557,6 +581,7 @@ mod tests {
             tool_call_id: Some(id.into()),
             tool_name: Some("exec".into()),
             reasoning_blocks: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -617,6 +642,7 @@ mod tests {
                 tool_call_id: None,
                 tool_name: None,
                 reasoning_blocks: Vec::new(),
+                images: Vec::new(),
             },
             user("add a flag"),
             ChatMessage {
@@ -627,6 +653,7 @@ mod tests {
                 tool_call_id: None,
                 tool_name: None,
                 reasoning_blocks: Vec::new(),
+                images: Vec::new(),
             },
             tool("c9", &huge),
         ];

@@ -364,6 +364,7 @@ mod tests {
             tool_name: None,
 
             reasoning_blocks: Vec::new(),
+            images: Vec::new(),
         }];
         let (tx, _rx) = mpsc::unbounded_channel();
         let reply = stream_openai_chat(

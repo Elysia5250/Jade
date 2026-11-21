@@ -1,34 +1,80 @@
-//! Path, naming, skills, and memory panels for the home screen.
-use super::welcome::{popup_inner, push_choice, push_dim};
+//! Sub-panels for the Hub: path picker, naming/rename, skills, memory, and MCP servers.
 use crate::tui::*;
+
+fn popup_inner(frame: &mut Frame, theme: &Theme, area: Rect, height: u16, title: &str) -> Rect {
+    let width = 84u16
+        .min(area.width.saturating_sub(4).max(1))
+        .min(area.width.max(1));
+    let height = height.min(area.height.max(1));
+    let popup = centered_rect(area, width, height);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.accent))
+        .title(Span::styled(
+            format!(" {title} "),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme.bg));
+    let inner = block.inner(popup);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(block, popup);
+    inner
+}
 
 fn panel_height(count: usize, area_h: u16) -> u16 {
     let cap = area_h.max(1);
-    let wanted = (count as u16).saturating_add(8);
+    let wanted = (count as u16).saturating_add(9);
     wanted.clamp(12.min(cap), cap)
+}
+
+fn push_choice(
+    lines: &mut Vec<Line<'static>>,
+    theme: &Theme,
+    width: usize,
+    selected: bool,
+    text: &str,
+) {
+    let marker = if selected { "▸ " } else { "  " };
+    let style = if selected {
+        Style::default()
+            .fg(theme.bg)
+            .bg(theme.accent)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.text)
+    };
+    let shown = format!(" {marker}{text}");
+    lines.push(Line::styled(pad_to_width(&shown, width), style));
+}
+
+fn push_dim(lines: &mut Vec<Line<'static>>, theme: &Theme, text: &str) {
+    lines.push(Line::styled(
+        text.to_string(),
+        Style::default().fg(theme.dim),
+    ));
 }
 
 pub(super) fn draw_path(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     let Some(welcome) = app.ui.welcome.as_ref() else {
         return;
     };
-    let inner = popup_inner(frame, theme, area, 16);
     let choosing_parent = welcome.mode == WelcomeMode::NewFolderPickParent;
-    let mut lines = vec![Line::styled(
-        if choosing_parent {
-            "  Pick a parent"
-        } else {
-            "  Open path"
-        },
-        Style::default().fg(theme.accent),
-    )];
-    lines.push(Line::from(vec![
+    let title = if choosing_parent {
+        "new folder · parent"
+    } else {
+        "open path"
+    };
+    let inner = popup_inner(frame, theme, area, 16, title);
+    let mut lines = vec![Line::from(vec![
         Span::styled("  > ", Style::default().fg(theme.accent)),
         Span::raw(welcome.path.clone()),
-    ]));
+    ])];
     let comps = &app.inputs.welcome_path_comps;
     let sel = welcome.path_selected.min(comps.len().saturating_sub(1));
-    let window = 6usize;
+    let window = 7usize;
     let start = if sel >= window { sel + 1 - window } else { 0 };
     for (offset, (label, _)) in comps.iter().skip(start).take(window).enumerate() {
         let idx = start + offset;
@@ -64,19 +110,20 @@ pub(super) fn draw_naming(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
     let Some(welcome) = app.ui.welcome.as_ref() else {
         return;
     };
-    let inner = popup_inner(frame, theme, area, 12);
-    let (heading, label) = match welcome.mode {
-        WelcomeMode::NewFolderName => ("  New folder", "folder name"),
-        WelcomeMode::SkillsNew => ("  New skill", "skill name"),
-        _ => ("  New memory", "title"),
+    let (title, label, hint) = match welcome.mode {
+        WelcomeMode::NewFolderName => ("new folder", "folder name", "enter create   esc back"),
+        WelcomeMode::RenameSession => ("rename session", "title", "enter save   esc back"),
+        WelcomeMode::SkillsNew => ("new skill", "skill name", "enter create   esc back"),
+        _ => ("new memory", "title", "enter create   esc back"),
     };
-    let mut lines = vec![Line::styled(
-        heading,
-        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-    )];
+    let inner = popup_inner(frame, theme, area, 10, title);
+    let mut lines = Vec::new();
     if let Some(parent) = &welcome.folder_parent {
-        push_dim(&mut lines, theme, &format!("  {}", collapse_home(parent)));
+        if welcome.mode == WelcomeMode::NewFolderName {
+            push_dim(&mut lines, theme, &format!("  {}", collapse_home(parent)));
+        }
     }
+    lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled(format!("  {label}  "), Style::default().fg(theme.dim)),
         Span::styled(">", Style::default().fg(theme.accent)),
@@ -88,7 +135,8 @@ pub(super) fn draw_naming(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
             Style::default().fg(theme.bad),
         ));
     }
-    push_dim(&mut lines, theme, "  enter create   esc back");
+    lines.push(Line::from(""));
+    push_dim(&mut lines, theme, &format!("  {hint}"));
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
@@ -97,12 +145,9 @@ pub(super) fn draw_skills(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
         return;
     };
     let height = panel_height(welcome.skills.len(), area.height);
-    let inner = popup_inner(frame, theme, area, height);
+    let inner = popup_inner(frame, theme, area, height, "skills");
     let width = inner.width as usize;
-    let mut lines = vec![Line::styled(
-        "  Skills",
-        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-    )];
+    let mut lines = Vec::new();
     push_dim(
         &mut lines,
         theme,
@@ -114,7 +159,7 @@ pub(super) fn draw_skills(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
     } else {
         let total = welcome.skills.len();
         let sel = welcome.list_selected.min(total - 1);
-        let window = 8usize;
+        let window = 10usize;
         let start = if sel >= window { sel + 1 - window } else { 0 };
         let mut prev = "";
         for (offset, skill) in welcome.skills.iter().skip(start).take(window).enumerate() {
@@ -153,12 +198,9 @@ pub(super) fn draw_memory(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
         return;
     };
     let height = panel_height(welcome.notes.len(), area.height);
-    let inner = popup_inner(frame, theme, area, height);
+    let inner = popup_inner(frame, theme, area, height, "memory");
     let width = inner.width as usize;
-    let mut lines = vec![Line::styled(
-        "  Memory",
-        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-    )];
+    let mut lines = Vec::new();
     push_dim(
         &mut lines,
         theme,
@@ -170,7 +212,7 @@ pub(super) fn draw_memory(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
     } else {
         let total = welcome.notes.len();
         let sel = welcome.list_selected.min(total - 1);
-        let window = 8usize;
+        let window = 10usize;
         let start = if sel >= window { sel + 1 - window } else { 0 };
         for (offset, note) in welcome.notes.iter().skip(start).take(window).enumerate() {
             let idx = start + offset;
@@ -189,6 +231,52 @@ pub(super) fn draw_memory(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
             format!("  {err}"),
             Style::default().fg(theme.bad),
         ));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+pub(super) fn draw_mcp(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+    let Some(welcome) = app.ui.welcome.as_ref() else {
+        return;
+    };
+    let mcp = &app.inputs.catalog.mcp;
+    let extra = welcome.mcp_probe.len().min(8);
+    let height = panel_height(mcp.len() + extra + 2, area.height);
+    let inner = popup_inner(frame, theme, area, height, "mcp servers");
+    let width = inner.width as usize;
+    let mut lines = Vec::new();
+    push_dim(&mut lines, theme, "  p probe live servers   esc back");
+    lines.push(Line::from(""));
+    if mcp.is_empty() {
+        push_dim(&mut lines, theme, "  no MCP servers configured");
+    } else {
+        let sel = welcome.list_selected.min(mcp.len() - 1);
+        for (idx, srv) in mcp.iter().enumerate().take(8) {
+            let status = if srv.disabled { "disabled" } else { "enabled " };
+            push_choice(
+                &mut lines,
+                theme,
+                width,
+                idx == sel,
+                &format!("{:<18} [{:<7}] {status}", srv.name, srv.scope),
+            );
+        }
+    }
+    if welcome.mcp_probing {
+        lines.push(Line::from(""));
+        lines.push(Line::styled(
+            "  probing configured MCP servers...",
+            Style::default().fg(theme.accent),
+        ));
+    } else if !welcome.mcp_probe.is_empty() {
+        lines.push(Line::from(""));
+        push_dim(&mut lines, theme, "  PROBE OUTPUT");
+        for row in welcome.mcp_probe.iter().take(8) {
+            lines.push(Line::styled(
+                truncate_width(&format!("  {row}"), width),
+                Style::default().fg(theme.text),
+            ));
+        }
     }
     frame.render_widget(Paragraph::new(lines), inner);
 }

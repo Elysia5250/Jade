@@ -1,6 +1,6 @@
 # Plan: 安全加固、缺陷清零与现代 Harness 架构瘦身
 
-- Status: active
+- Status: complete（已归档，见 `docs/achieved/README.md`）
 - Owner: Elysia
 - Last updated: 2026-11-20
 - Baseline: `dda2b42` (`v0.3.0`)

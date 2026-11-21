@@ -187,8 +187,9 @@ async fn welcome_shows_resumes_tag_and_n_starts_fresh_session() {
 
     let mut app = App::new(dir.clone(), "local".into(), None, here.clone());
     app.open_welcome();
+    app.handle_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
 
-    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(112, 26)).unwrap();
     terminal.draw(|frame| paint(frame, &mut app)).unwrap();
     let screen: String = terminal
         .backend()
@@ -396,7 +397,7 @@ fn transcript_folds_cross_step_activity_bidirectionally_and_hides_monitor_notice
         "user card:\n{collapsed}"
     );
     assert!(
-        collapsed.contains("● Final summary ready."),
+        collapsed.contains("◆ Final summary ready."),
         "reply:\n{collapsed}"
     );
 
@@ -553,7 +554,7 @@ fn settled_turn_folds_edits_explores_and_commands() {
         live.contains("Edited 1 file, explored 1 file, ran 1 command"),
         "all collapsed tools fold into one clean summary row while open:\n{live}"
     );
-    assert!(!live.contains("● ▍"), "no stray caret:\n{live}");
+    assert!(!live.contains("◆ ▍"), "no stray caret:\n{live}");
 
     let thinking = app.session.current.alloc_id();
     app.session.current.items.insert(
@@ -574,7 +575,7 @@ fn settled_turn_folds_edits_explores_and_commands() {
         "thinking row stays scrambled/collapsed without spinner:\n{with_caret}"
     );
     assert!(
-        !with_caret.contains("● ▍"),
+        !with_caret.contains("◆ ▍"),
         "caret stays gone:\n{with_caret}"
     );
     app.session.current.items.remove(1);
@@ -592,7 +593,169 @@ fn settled_turn_folds_edits_explores_and_commands() {
         !settled.contains("$ cargo test"),
         "commands fold into the summary:\n{settled}"
     );
-    assert!(settled.contains("● Done."), "reply stays:\n{settled}");
+    assert!(settled.contains("◆ Done."), "reply stays:\n{settled}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn turn_summary_paints_removed_lines_red() {
+    let dir = tmpdir("foldcolor");
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.jobs.connected = true;
+    app.apply_event(
+        1,
+        AgentEvent::FileChanged {
+            path: "src/a.rs".into(),
+            before: "old\n".into(),
+            after: "new\nline\n".into(),
+            added: 2,
+            removed: 1,
+            existed_before: true,
+            restorable_before: true,
+        },
+    );
+    let uid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::User {
+        id: uid,
+        text: "fix it".into(),
+        mode: "Agent".into(),
+        cwd: ".".into(),
+        ts_ms: now_ms(),
+    });
+    let id = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Tool {
+        id,
+        call_id: id.to_string(),
+        name: "edit".into(),
+        title: "edit src/a.rs".into(),
+        subtitle: String::new(),
+        job_id: None,
+        target: "local".into(),
+        output: Vec::new(),
+        status: CardStatus::Done,
+        collapsed: true,
+        duration_ms: Some(10),
+        exit_code: Some(0),
+        started_ms: now_ms(),
+    });
+    let aid = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Assistant {
+        id: aid,
+        text: "Done.".into(),
+        reasoning: String::new(),
+        reasoning_collapsed: true,
+        model: "m".into(),
+        done: true,
+        error: None,
+    });
+
+    let theme = app.theme();
+    let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+    terminal.draw(|frame| paint(frame, &mut app)).unwrap();
+    let buf = terminal.backend().buffer();
+
+    let row = (0..buf.area.height)
+        .find(|&y| {
+            let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            line.contains("Edited 1 file") && line.contains("+2 -1")
+        })
+        .unwrap_or_else(|| panic!("summary row with diff counts missing:\n{}", screen_of(buf)));
+
+    let cell_at = |needle: char, next: char| {
+        (0..buf.area.width).find(|&x| {
+            buf[(x, row)].symbol() == needle.to_string()
+                && x + 1 < buf.area.width
+                && buf[(x + 1, row)].symbol() == next.to_string()
+        })
+    };
+    let plus = cell_at('+', '2').expect("+2 present");
+    let minus = cell_at('-', '1').expect("-1 present");
+    assert_eq!(
+        buf[(plus, row)].fg,
+        theme.ok,
+        "added count stays green:\n{}",
+        screen_of(buf)
+    );
+    assert_eq!(
+        buf[(minus, row)].fg,
+        theme.bad,
+        "removed count is red:\n{}",
+        screen_of(buf)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn screen_of(buf: &ratatui::buffer::Buffer) -> String {
+    let mut out = String::new();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            out.push_str(buf[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+#[test]
+fn open_file_card_paints_removed_lines_red() {
+    let dir = tmpdir("cardcolor");
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.jobs.connected = true;
+    app.apply_event(
+        1,
+        AgentEvent::FileChanged {
+            path: "src/a.rs".into(),
+            before: "old\n".into(),
+            after: "new\nline\n".into(),
+            added: 2,
+            removed: 1,
+            existed_before: true,
+            restorable_before: true,
+        },
+    );
+    let id = app.session.current.alloc_id();
+    app.session.current.items.push(TranscriptItem::Tool {
+        id,
+        call_id: id.to_string(),
+        name: "edit".into(),
+        title: "edit src/a.rs".into(),
+        subtitle: String::new(),
+        job_id: None,
+        target: "local".into(),
+        output: Vec::new(),
+        status: CardStatus::Done,
+        // An opened card renders on its own instead of folding into the summary.
+        collapsed: false,
+        duration_ms: Some(10),
+        exit_code: Some(0),
+        started_ms: now_ms(),
+    });
+
+    let theme = app.theme();
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal.draw(|frame| paint(frame, &mut app)).unwrap();
+    let buf = terminal.backend().buffer();
+
+    let row = (0..buf.area.height)
+        .find(|&y| {
+            let line: String = (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect();
+            line.contains("src/a.rs") && line.contains("+2") && line.contains("-1")
+        })
+        .unwrap_or_else(|| panic!("file card with diff counts missing:\n{}", screen_of(buf)));
+
+    let cell_at = |needle: char, next: char| {
+        (0..buf.area.width).find(|&x| {
+            buf[(x, row)].symbol() == needle.to_string()
+                && x + 1 < buf.area.width
+                && buf[(x + 1, row)].symbol() == next.to_string()
+        })
+    };
+    let plus = cell_at('+', '2').expect("+2 present");
+    let minus = cell_at('-', '1').expect("-1 present");
+    assert_eq!(buf[(plus, row)].fg, theme.ok, "card +2 stays green");
+    assert_eq!(buf[(minus, row)].fg, theme.bad, "card -1 is red");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

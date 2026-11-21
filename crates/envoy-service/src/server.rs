@@ -5,9 +5,10 @@
 //! affecting the job and reattach later at its last cursor.
 
 use crate::policy;
+use crate::server_search::{glob_op, grep_op};
 use crate::transport::AgentHost;
 use anyhow::Result;
-use envoy_core::{audit, fs, gate, job, search, truncate, Caller, Jobs};
+use envoy_core::{audit, fs, gate, job, truncate, Caller, Jobs};
 use envoy_proto::codec::{read_framed, write_framed};
 use envoy_proto::{
     Call, ClientMsg, Hello, JobId, Op, Reply, VersionMismatch, AGENT_CHUNK, AGENT_VERSION,
@@ -17,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 use tokio::sync::Semaphore;
 use tracing::debug;
 
@@ -135,15 +136,14 @@ where
         Ok(Ok(msg)) => msg,
         Ok(Err(e)) => {
             if let Some(mismatch) = e.downcast_ref::<VersionMismatch>() {
-                reply(
+                return reply_version_mismatch(
                     &mut wr,
-                    Reply::VersionMismatch {
-                        server_version: mismatch.local_version,
-                        client_version: mismatch.peer_version,
-                    },
+                    &inner.root,
+                    caller.as_str(),
+                    mismatch.local_version,
+                    mismatch.peer_version,
                 )
-                .await?;
-                return Ok(());
+                .await;
             }
             return Err(e.context("reading the agent call"));
         }
@@ -173,15 +173,14 @@ where
     };
 
     if call.version != AGENT_VERSION {
-        reply(
+        return reply_version_mismatch(
             &mut wr,
-            Reply::VersionMismatch {
-                server_version: WIRE_VERSION,
-                client_version: u16::from(call.version),
-            },
+            &inner.root,
+            caller.as_str(),
+            WIRE_VERSION,
+            u16::from(call.version),
         )
-        .await?;
-        return Ok(());
+        .await;
     }
 
     // Gate before anything else: an unauthorized caller learns nothing beyond refusal.
@@ -365,8 +364,15 @@ async fn follow_log<W: AsyncWrite + Unpin>(
         return Ok(());
     };
     let wake = inner.jobs.wake();
+    let mut saw_done = false;
     loop {
-        let (records, next) = match job::read_available(&path, offset, LOG_BATCH) {
+        let p = path.clone();
+        let read_res =
+            tokio::task::spawn_blocking(move || job::read_available(&p, offset, LOG_BATCH))
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
+                .and_then(|r| Ok(r?));
+        let (records, next) = match read_res {
             Ok(v) => v,
             Err(e) => {
                 reply(
@@ -393,9 +399,12 @@ async fn follow_log<W: AsyncWrite + Unpin>(
         };
         let done = snapshot.state.exit_code();
         let file_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(offset);
-        // Done, and either the cursor is at EOF or this read made no progress
-        // (a partial trailing record will not grow after the writer exits).
-        let complete = done.is_some() && (offset >= file_len || !progressed);
+        // Done, and either the cursor is at EOF or a post-exit read made no
+        // progress (a partial trailing record will not grow after exit).
+        let complete = done.is_some() && (offset >= file_len || (saw_done && !progressed));
+        if done.is_some() {
+            saw_done = true;
+        }
         if progressed || complete || !follow {
             reply(
                 wr,
@@ -483,7 +492,8 @@ async fn list_op<W: AsyncWrite + Unpin>(path: &str, wr: &mut W) -> Result<()> {
     Ok(())
 }
 
-/// Streaming write: `Data` frames until `End` commits, EOF rolls back.
+/// Streaming write: `Data` frames until `End` commits via a directory-fd pinned
+/// `.part` file (`openat` + `fchmod` + `renameat`); EOF or error rolls back.
 async fn serve_write<S: AsyncRead + AsyncWrite + Unpin>(
     rd: &mut ReadHalf<S>,
     wr: &mut WriteHalf<S>,
@@ -491,23 +501,13 @@ async fn serve_write<S: AsyncRead + AsyncWrite + Unpin>(
     mode: Option<u32>,
 ) -> Result<()> {
     let path = fs::resolve(path);
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            tokio::fs::create_dir_all(parent).await.ok();
-        }
-    }
-    let part = fs::part_path(&path);
-    let mut opts = tokio::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    opts.mode(mode.unwrap_or(0o600));
-    let mut f = match opts.open(&part).await {
-        Ok(f) => f,
+    let mut staged = match envoy_core::fs_atomic::PinnedWrite::create(&path, mode) {
+        Ok(s) => s,
         Err(e) => {
             reply(
                 wr,
                 Reply::Failed {
-                    error: format!("create {}: {e}", part.display()),
+                    error: format!("create {}: {e:#}", path.display()),
                 },
             )
             .await?;
@@ -521,8 +521,7 @@ async fn serve_write<S: AsyncRead + AsyncWrite + Unpin>(
         {
             Ok(Ok(ClientMsg::Data(d))) => {
                 if bytes + (d.len() as u64) > policy::MAX_WRITE_BYTES {
-                    drop(f);
-                    let _ = tokio::fs::remove_file(&part).await;
+                    drop(staged);
                     reply(
                         wr,
                         Reply::Failed {
@@ -532,13 +531,12 @@ async fn serve_write<S: AsyncRead + AsyncWrite + Unpin>(
                     .await?;
                     return Ok(());
                 }
-                if let Err(e) = f.write_all(&d).await {
-                    drop(f);
-                    let _ = tokio::fs::remove_file(&part).await;
+                if let Err(e) = staged.write_all(&d) {
+                    drop(staged);
                     reply(
                         wr,
                         Reply::Failed {
-                            error: format!("write {}: {e}", part.display()),
+                            error: format!("write {}: {e:#}", path.display()),
                         },
                     )
                     .await?;
@@ -547,17 +545,11 @@ async fn serve_write<S: AsyncRead + AsyncWrite + Unpin>(
                 bytes += d.len() as u64;
             }
             Ok(Ok(ClientMsg::End)) => {
-                f.flush().await.ok();
-                drop(f);
-                if let Some(m) = mode {
-                    fs::set_mode(&part, m);
-                }
-                if let Err(e) = tokio::fs::rename(&part, &path).await {
-                    let _ = tokio::fs::remove_file(&part).await;
+                if let Err(e) = staged.commit(mode, false, false) {
                     reply(
                         wr,
                         Reply::Failed {
-                            error: format!("rename into {}: {e}", path.display()),
+                            error: format!("rename into {}: {e:#}", path.display()),
                         },
                     )
                     .await?;
@@ -568,13 +560,11 @@ async fn serve_write<S: AsyncRead + AsyncWrite + Unpin>(
                 return Ok(());
             }
             Ok(Ok(ClientMsg::Call(_))) | Ok(Err(_)) => {
-                drop(f);
-                let _ = tokio::fs::remove_file(&part).await;
+                drop(staged);
                 return Ok(());
             }
             Err(_) => {
-                drop(f);
-                let _ = tokio::fs::remove_file(&part).await;
+                drop(staged);
                 reply(
                     wr,
                     Reply::Failed {
@@ -606,58 +596,9 @@ fn describe(op: &Op) -> (&'static str, String) {
     (op.name(), detail)
 }
 
-async fn glob_op<W: AsyncWrite + Unpin>(
-    root: &str,
-    pattern: &str,
-    max_results: u32,
-    wr: &mut W,
-) -> Result<()> {
-    match search::glob_files(root, pattern, max_results).await {
-        Ok(paths) => {
-            reply(wr, Reply::GlobMatches { paths }).await?;
-            reply(wr, Reply::Done { code: 0, ms: 0 }).await?;
-        }
-        Err(e) => {
-            reply(
-                wr,
-                Reply::Failed {
-                    error: format!("{e:#}"),
-                },
-            )
-            .await?;
-        }
-    }
-    Ok(())
-}
-
-async fn grep_op<W: AsyncWrite + Unpin>(
-    root: &str,
-    pattern: &str,
-    include: Option<&str>,
-    max_results: u32,
-    wr: &mut W,
-) -> Result<()> {
-    match search::grep_files(root, pattern, include, max_results).await {
-        Ok(matches) => {
-            reply(wr, Reply::GrepMatches { matches }).await?;
-            reply(wr, Reply::Done { code: 0, ms: 0 }).await?;
-        }
-        Err(e) => {
-            reply(
-                wr,
-                Reply::Failed {
-                    error: format!("{e:#}"),
-                },
-            )
-            .await?;
-        }
-    }
-    Ok(())
-}
-
 /// Send one reply. `Failed` / `Denied` clear the audit success flag. A write
 /// error is logged and aborts the request instead of being ignored.
-async fn reply<W: AsyncWrite + Unpin>(wr: &mut W, event: Reply) -> Result<()> {
+pub(crate) async fn reply<W: AsyncWrite + Unpin>(wr: &mut W, event: Reply) -> Result<()> {
     if matches!(event, Reply::Failed { .. } | Reply::Denied { .. }) {
         mark_reply_failed();
     }
@@ -673,6 +614,31 @@ async fn send<W: AsyncWrite + Unpin>(wr: &mut W, event: Reply) -> std::io::Resul
     write_framed(wr, &event)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+async fn reply_version_mismatch<W: AsyncWrite + Unpin>(
+    wr: &mut W,
+    root: &Path,
+    caller: &str,
+    server_version: u16,
+    client_version: u16,
+) -> Result<()> {
+    audit(
+        root,
+        caller,
+        "version_mismatch",
+        &format!("peer={client_version} local={server_version}"),
+        false,
+        0,
+    );
+    reply(
+        wr,
+        Reply::VersionMismatch {
+            server_version,
+            client_version,
+        },
+    )
+    .await
 }
 
 fn hostname() -> String {

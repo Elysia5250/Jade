@@ -15,7 +15,7 @@ use crate::hooks::{
     HookStepStatus, SHUTDOWN_HOOK_TIMEOUT_MS,
 };
 use crate::session::{ChatMessage, ChatRole};
-use anyhow::{bail, Result};
+use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -167,6 +167,7 @@ impl Runtime {
             record_turn_checkpoint(&live, Some(&final_prompt));
             {
                 let mut state = live.lock().unwrap();
+                let images = std::mem::take(&mut state.pending_turn_images);
                 crate::session::strip_prior_turn_reasoning(&mut state.messages);
                 crate::session::strip_prior_turn_reasoning(&mut cfg.history);
                 let msg = ChatMessage {
@@ -176,15 +177,22 @@ impl Runtime {
                     tool_calls: Vec::new(),
                     tool_call_id: None,
                     tool_name: None,
-
                     reasoning_blocks: Vec::new(),
+                    images: images.clone(),
                 };
                 state.messages.push(msg.clone());
                 cfg.history.push(msg);
+                let display_text = if images.is_empty() {
+                    final_prompt
+                } else if final_prompt.trim().is_empty() {
+                    format!("[attached {} image(s)]", images.len())
+                } else {
+                    format!("{final_prompt}\n[attached {} image(s)]", images.len())
+                };
                 self.publish(
                     &mut state,
                     AgentEvent::UserMessage {
-                        text: final_prompt,
+                        text: display_text,
                         mode: "Agent".into(),
                     },
                 );
@@ -241,21 +249,11 @@ impl Runtime {
     }
 
     pub(crate) async fn close_session(&self, id: &str) -> Result<bool> {
-        let Some(live) = self.session(id) else {
+        let Some(live) = self.remove_idle_session(id)? else {
             return Ok(false);
         };
-        {
-            let state = live.lock().unwrap();
-            if state.running {
-                bail!("session is active; interrupt before closing");
-            }
-        }
-        let removed = self.remove_session(id);
-        if let Some(live) = removed {
-            fire_session_end(id, &live, "session_closed", Some(SHUTDOWN_HOOK_TIMEOUT_MS)).await;
-            return Ok(true);
-        }
-        Ok(false)
+        fire_session_end(id, &live, "session_closed", Some(SHUTDOWN_HOOK_TIMEOUT_MS)).await;
+        Ok(true)
     }
 
     /// Run `SessionEnd` across all live sessions within a bounded 2s drain window for daemon stop.
@@ -355,6 +353,16 @@ pub(crate) async fn run_manual_context_op(
             &http, data_dir, provider, model_id, &system, messages, focus, id,
         )
         .await?;
+        if let crate::agent::context::SummarySource::Fallback(reason) = &out.summary_source {
+            let mut state = live.lock().unwrap();
+            runtime.publish(
+                &mut state,
+                AgentEvent::Say {
+                    text: format!("handoff fell back to deterministic summary ({reason})"),
+                    kind: "warn".into(),
+                },
+            );
+        }
         return Ok(AgentEvent::HandoffReady {
             summary: out.summary,
             before_tokens: out.before_tokens,

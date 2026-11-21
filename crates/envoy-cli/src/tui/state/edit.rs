@@ -3,6 +3,14 @@ use super::*;
 
 impl App {
     pub(in crate::tui) fn handle_input_key(&mut self, key: KeyEvent) -> Action {
+        // 0. `ctrl+↑` / `ctrl+↓` walk the send history; plain arrows below are
+        //    left to the editor and to the completion menus.
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Up | KeyCode::Down)
+        {
+            self.recall_history(if key.code == KeyCode::Up { -1 } else { 1 });
+            return Action::None;
+        }
         // 1. `/cd <dir>` directory completion popup
         let cd_dirs = self.cd_completions();
         if !cd_dirs.is_empty() {
@@ -77,8 +85,14 @@ impl App {
                     return Action::None;
                 }
                 KeyCode::Esc => {
-                    self.ui.input.clear();
+                    // Back out only what was typed after the `/`: a slash that
+                    // was prepended to a draft must not wipe the draft.
+                    let chars = self.ui.input.chars().count();
+                    let caret = self.ui.input_cursor.min(chars);
+                    let end = self.byte_index(caret);
+                    self.ui.input.replace_range(..end, "");
                     self.ui.input_cursor = 0;
+                    self.ui.menu_selected = 0;
                     return Action::None;
                 }
                 _ => {}
@@ -125,13 +139,14 @@ impl App {
         match key.code {
             KeyCode::Enter => {
                 let text = self.ui.input.trim().to_string();
-                if text.is_empty() {
+                if text.is_empty() && self.ui.pending_images.is_empty() {
                     return Action::None;
                 }
                 if self.ui.history.last().map(|h| h != &text).unwrap_or(true) {
                     self.ui.history.push(text.clone());
                 }
                 self.ui.history_pos = None;
+                self.ui.history_draft = None;
                 self.ui.input.clear();
                 self.ui.input_cursor = 0;
                 self.ui.menu_selected = 0;
@@ -156,6 +171,9 @@ impl App {
                     });
                 }
                 match self.ui.mode {
+                    InputMode::Agent if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        Action::SubmitAgentSteer(text)
+                    }
                     InputMode::Shell => Action::SubmitShell(SubmitRequest {
                         spec: TaskSpec::Shell { command: text },
                         cwd: Some(self.session.current.cwd.display().to_string()),
@@ -188,8 +206,11 @@ impl App {
                 if !self.ui.input.is_empty() {
                     self.ui.input.clear();
                     self.ui.input_cursor = 0;
+                } else if !self.ui.pending_images.is_empty() {
+                    self.ui.pending_images.clear();
+                    self.set_toast("cleared attached images", false);
                 } else if self.agent.running {
-                    return Action::Cancel;
+                    return self.esc_interrupt();
                 } else {
                     self.ui.focus = Focus::Transcript;
                 }
@@ -218,7 +239,12 @@ impl App {
                 Action::None
             }
             KeyCode::Backspace => {
-                self.delete_before_cursor();
+                if self.ui.input.is_empty() && !self.ui.pending_images.is_empty() {
+                    self.ui.pending_images.pop();
+                    self.set_toast("removed attached image", false);
+                } else {
+                    self.delete_before_cursor();
+                }
                 Action::None
             }
             KeyCode::Delete => {
@@ -260,35 +286,14 @@ impl App {
                 self.ui.input_cursor = self.line_end_char(self.ui.input_cursor);
                 Action::None
             }
+            // Plain arrows move inside the draft like any text editor; the
+            // send history sits behind `ctrl+↑` / `ctrl+↓`.
             KeyCode::Up => {
-                if self.move_cursor_vertical(-1) {
-                    return Action::None;
-                }
-                if !self.ui.history.is_empty() {
-                    let pos = match self.ui.history_pos {
-                        Some(p) => p.saturating_sub(1),
-                        None => self.ui.history.len() - 1,
-                    };
-                    self.ui.history_pos = Some(pos);
-                    self.ui.input = self.ui.history[pos].clone();
-                    self.ui.input_cursor = self.ui.input.chars().count();
-                }
+                self.move_cursor_vertical(-1);
                 Action::None
             }
             KeyCode::Down => {
-                if self.move_cursor_vertical(1) {
-                    return Action::None;
-                }
-                if let Some(pos) = self.ui.history_pos {
-                    if pos + 1 < self.ui.history.len() {
-                        self.ui.history_pos = Some(pos + 1);
-                        self.ui.input = self.ui.history[pos + 1].clone();
-                    } else {
-                        self.ui.history_pos = None;
-                        self.ui.input.clear();
-                    }
-                    self.ui.input_cursor = self.ui.input.chars().count();
-                }
+                self.move_cursor_vertical(1);
                 Action::None
             }
             KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -306,6 +311,7 @@ impl App {
                         self.ui.at_dismissed_at = None;
                     }
                     'w' => self.delete_word_before_cursor(),
+                    'v' => self.paste_from_clipboard(),
                     _ => {}
                 }
                 Action::None
@@ -316,6 +322,10 @@ impl App {
             }
             KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
                 self.move_cursor_word(1);
+                Action::None
+            }
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.paste_from_clipboard();
                 Action::None
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::ALT) => {
@@ -339,6 +349,17 @@ impl App {
             return;
         }
         self.ui.focus = Focus::Input;
+        if text.is_empty() {
+            if let Some((img, bytes)) = clipboard::read_clipboard_image() {
+                self.attach_pasted_image(img, bytes);
+            }
+            return;
+        }
+        if let Some((img, bytes)) = clipboard::try_load_image_path(text, &self.session.current.cwd)
+        {
+            self.attach_pasted_image(img, bytes);
+            return;
+        }
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
         if normalized.is_empty() {
             return;
@@ -353,6 +374,27 @@ impl App {
                 .workspace_index
                 .ensure_fresh(&self.session.current.cwd);
         }
+    }
+
+    pub(in crate::tui) fn paste_from_clipboard(&mut self) {
+        if let Some((img, bytes)) = clipboard::read_clipboard_image() {
+            self.attach_pasted_image(img, bytes);
+            return;
+        }
+        if let Some(text) = clipboard::read_clipboard_text() {
+            self.handle_paste(&text);
+            return;
+        }
+        self.set_toast("clipboard has no image or text", true);
+    }
+
+    fn attach_pasted_image(&mut self, img: envoy_agent::session::ImageAttachment, bytes: usize) {
+        let label = clipboard::format_image_label(&img, Some(bytes));
+        self.ui.pending_images.push(img);
+        self.set_toast(
+            format!("attached image #{}: {label}", self.ui.pending_images.len()),
+            false,
+        );
     }
 
     pub(in crate::tui) fn at_mention_span(&self) -> Option<(usize, usize, String)> {
@@ -503,29 +545,56 @@ impl App {
         i
     }
 
-    pub(in crate::tui) fn move_cursor_vertical(&mut self, delta: isize) -> bool {
+    /// Walks the send history with `delta` = -1 (older) or 1 (newer).
+    ///
+    /// The draft that was in the editor when the walk started is stashed, so
+    /// stepping past the newest entry restores it instead of dropping it.
+    pub(in crate::tui) fn recall_history(&mut self, delta: isize) {
+        if self.ui.history.is_empty() {
+            return;
+        }
+        let next = match self.ui.history_pos {
+            None if delta > 0 => return,
+            None => {
+                self.ui.history_draft = Some(std::mem::take(&mut self.ui.input));
+                self.ui.history.len() - 1
+            }
+            Some(0) if delta < 0 => return,
+            Some(pos) if delta < 0 => pos - 1,
+            Some(pos) if pos + 1 < self.ui.history.len() => pos + 1,
+            Some(_) => {
+                self.ui.history_pos = None;
+                self.ui.input = self.ui.history_draft.take().unwrap_or_default();
+                self.ui.input_cursor = self.ui.input.chars().count();
+                return;
+            }
+        };
+        self.ui.history_pos = Some(next);
+        self.ui.input = self.ui.history[next].clone();
+        self.ui.input_cursor = self.ui.input.chars().count();
+    }
+
+    pub(in crate::tui) fn move_cursor_vertical(&mut self, delta: isize) {
         let chars: Vec<char> = self.ui.input.chars().collect();
         let cur_start = self.line_start_char(self.ui.input_cursor);
         let col = self.ui.input_cursor - cur_start;
         if delta < 0 {
             if cur_start == 0 {
-                return false;
+                return;
             }
             let prev_end = cur_start - 1;
             let prev_start = self.line_start_char(prev_end);
             let prev_len = prev_end - prev_start;
             self.ui.input_cursor = prev_start + col.min(prev_len);
-            true
         } else {
             let cur_end = self.line_end_char(self.ui.input_cursor);
             if cur_end >= chars.len() {
-                return false;
+                return;
             }
             let next_start = cur_end + 1;
             let next_end = self.line_end_char(next_start);
             let next_len = next_end - next_start;
             self.ui.input_cursor = next_start + col.min(next_len);
-            true
         }
     }
 }

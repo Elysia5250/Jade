@@ -151,7 +151,9 @@ fn chunk_items<T: Serialize>(items: Vec<T>) -> Vec<Vec<T>> {
     let mut current = Vec::new();
     let mut size = 0usize;
     for item in items {
-        let bytes = envoy_proto::codec::payload_len(&item);
+        let Ok(bytes) = envoy_proto::codec::payload_len(&item) else {
+            continue;
+        };
         if !current.is_empty() && size.saturating_add(bytes) > SNAPSHOT_CHUNK_BYTES {
             chunks.push(std::mem::take(&mut current));
             size = 0;

@@ -20,6 +20,10 @@ impl App {
                 self.open_sessions_modal();
                 Action::None
             }
+            Command::OpenHub => {
+                self.return_to_hub();
+                Action::None
+            }
             Command::OpenRewind => {
                 self.open_rewind_modal();
                 Action::None
@@ -391,6 +395,10 @@ impl App {
                 self.open_sessions_modal();
                 Action::None
             }
+            SlashCmdKind::Home => {
+                self.return_to_hub();
+                Action::None
+            }
             SlashCmdKind::Expand => {
                 self.toggle_expand_cards();
                 Action::None
@@ -491,12 +499,20 @@ impl App {
         }
     }
 
-    /// Returns either matching slash commands OR `/cd` directory completions.
+    /// Returns the `/command` token the caret sits inside, if any.
+    ///
+    /// The token runs from the leading `/` up to the cursor, so typing `/` at
+    /// the start of a draft opens the menu even when the draft text follows
+    /// the caret.
     pub(in crate::tui) fn slash_query(&self) -> Option<&str> {
         if !self.ui.input.starts_with('/') || self.ui.input.contains('\n') {
             return None;
         }
-        let rest = &self.ui.input[1..];
+        let cursor = self.ui.input_cursor.min(self.ui.input.chars().count());
+        if cursor == 0 {
+            return None;
+        }
+        let rest = self.ui.input.get(1..self.byte_index(cursor))?;
         if rest.contains(char::is_whitespace) {
             return None;
         }

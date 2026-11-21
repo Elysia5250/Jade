@@ -1,6 +1,7 @@
 //! Daemon-side session store, turn runner, and manual `/compact` + `/handoff`.
 
 use super::hooks::run_manual_context_op;
+use super::ops::{cancel_active_job, persist_daemon_session, SessionSnapshot};
 use super::protocol::{SendMode, SeqEvent, SessionInfo};
 use crate::agent::checkpoint::CheckpointStore;
 use crate::agent::MonitorBroker;
@@ -11,7 +12,7 @@ use crate::session::ChatMessage;
 use anyhow::{bail, Result};
 use envoy_service::AgentServer;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
@@ -58,8 +59,15 @@ impl Runtime {
         self.sessions.lock().unwrap().get(id).cloned()
     }
 
-    pub(crate) fn remove_session(&self, id: &str) -> Option<Arc<Mutex<Live>>> {
-        self.sessions.lock().unwrap().remove(id)
+    pub(crate) fn remove_idle_session(&self, id: &str) -> Result<Option<Arc<Mutex<Live>>>> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let Some(live) = sessions.get(id) else {
+            return Ok(None);
+        };
+        if live.lock().unwrap().running {
+            anyhow::bail!("session is active; interrupt before closing");
+        }
+        Ok(sessions.remove(id))
     }
 
     pub(crate) fn drain_sessions(&self) -> Vec<(String, Arc<Mutex<Live>>)> {
@@ -131,7 +139,8 @@ impl Runtime {
         live.seq += 1;
         let seq = live.seq;
         live.record_logged(seq, &event);
-        let live_event = if envoy_proto::codec::payload_len(&event) <= 1024 * 1024 {
+        let live_event = if envoy_proto::codec::payload_len(&event).is_ok_and(|n| n <= 1024 * 1024)
+        {
             event
         } else {
             super::live::slim_event(&event)
@@ -153,6 +162,13 @@ impl Runtime {
             live.seq += 1;
             let reset = AgentEvent::SessionReset;
             live.record_logged(live.seq, &reset);
+            let reset_item = SeqEvent {
+                seq: live.seq,
+                event: reset,
+            };
+            for tx in &live.subs {
+                let _ = tx.try_send(reset_item.clone());
+            }
         }
     }
 
@@ -211,8 +227,11 @@ impl Runtime {
             usage,
         ) = {
             let mut state = live.lock().unwrap();
-            if state.phase == LivePhase::Idle {
-                state.claim(LivePhase::RunningTurn);
+            let claimed = (state.phase == LivePhase::RunningTurn && state.turn.is_none())
+                || state.claim(LivePhase::RunningTurn);
+            if !claimed {
+                self.publish(&mut state, AgentEvent::TurnError("session is busy".into()));
+                return;
             }
             state.turn_seq += 1;
             *state.turn_usage.lock().unwrap() = crate::agent::TurnUsage {
@@ -379,11 +398,29 @@ impl Runtime {
     }
 
     pub fn send(self: &Arc<Self>, id: &str, text: String, mode: SendMode) {
+        self.send_with_images(id, text, Vec::new(), mode);
+    }
+
+    pub fn send_with_images(
+        self: &Arc<Self>,
+        id: &str,
+        text: String,
+        images: Vec<crate::session::ImageAttachment>,
+        mode: SendMode,
+    ) {
         let Some(live) = self.session(id) else {
             debug!(session = id, "send for an unknown session");
             return;
         };
-        let start = {
+        enum Dispatch {
+            Turn(String),
+            Side {
+                text: String,
+                images: Vec<crate::session::ImageAttachment>,
+                queue: bool,
+            },
+        }
+        let dispatch = {
             let mut state = live.lock().unwrap();
             debug!(session = id, ?mode, running = state.running, "send");
             match mode {
@@ -402,16 +439,39 @@ impl Runtime {
                     state.queued.push_back(text);
                     return;
                 }
+                SendMode::Side if state.phase == LivePhase::Idle && !state.running => {
+                    if !state.claim(LivePhase::RunningTurn) {
+                        self.publish(&mut state, AgentEvent::TurnError("session is busy".into()));
+                        return;
+                    }
+                    state.pending_turn_images = images;
+                    Dispatch::Turn(text)
+                }
+                SendMode::Side | SendMode::SideTalk | SendMode::SideQueue => Dispatch::Side {
+                    text,
+                    images,
+                    queue: matches!(mode, SendMode::SideQueue),
+                },
                 _ => {
                     if !state.claim(LivePhase::RunningTurn) {
                         self.publish(&mut state, AgentEvent::TurnError("session is busy".into()));
                         return;
                     }
-                    text
+                    state.pending_turn_images = images;
+                    Dispatch::Turn(text)
                 }
             }
         };
-        self.start_turn(id, live, Some(start));
+        match dispatch {
+            Dispatch::Turn(text) => self.start_turn(id, live, Some(text)),
+            Dispatch::Side {
+                text,
+                images,
+                queue,
+            } => {
+                self.launch_side(id, &live, text, images, queue);
+            }
+        }
     }
 
     pub fn start_compact(
@@ -550,6 +610,14 @@ impl Runtime {
             .unwrap_or(false)
     }
 
+    /// The console reports that the user is interacting with a shown prompt, so
+    /// the answer clock stops instead of firing the recommended option.
+    pub fn touch_ask(&self, id: &str, ask_id: u64) -> bool {
+        self.session(id)
+            .map(|live| live.lock().unwrap().asks.engage(ask_id))
+            .unwrap_or(false)
+    }
+
     pub fn recall(&self, id: &str) -> Option<String> {
         self.session(id)
             .and_then(|live| live.lock().unwrap().queued.pop_back())
@@ -561,6 +629,31 @@ impl Runtime {
             state.permissions.set_mode(mode);
             self.publish(&mut state, AgentEvent::PermissionModeChanged { mode });
         }
+    }
+
+    pub fn permissions_status(
+        &self,
+        id: &str,
+    ) -> Result<(PermissionMode, String, bool, usize, usize)> {
+        let Some(live) = self.session(id) else {
+            bail!("no such session: {id}");
+        };
+        let state = live.lock().unwrap();
+        let mode = state.permissions.mode();
+        let loaded = state.permissions.loaded_policies();
+        let trusted = state.permissions.is_trusted();
+        let sandbox = if state.target == "local" || state.target.is_empty() {
+            envoy_core::sandbox::backend_label().to_string()
+        } else {
+            "peer".to_string()
+        };
+        Ok((
+            mode,
+            sandbox,
+            trusted,
+            loaded.rules.len(),
+            loaded.extra_rw.len(),
+        ))
     }
 
     pub fn list(&self) -> Vec<SessionInfo> {
@@ -584,50 +677,4 @@ fn new_incarnation() -> u64 {
     } else {
         id
     }
-}
-
-struct SessionSnapshot {
-    cwd: PathBuf,
-    target: String,
-    messages: Vec<ChatMessage>,
-    usage: crate::agent::TurnUsage,
-}
-
-fn persist_daemon_session(data_dir: &Path, id: &str, snap: SessionSnapshot) {
-    if crate::session::checked_session_id(id).is_err() {
-        return;
-    }
-    let mut session = crate::session::load_session(data_dir, id).unwrap_or_else(|_| {
-        let mut created = crate::session::Session::new(snap.cwd.clone(), snap.target.clone());
-        created.id = id.to_string();
-        created
-    });
-    session.id = id.to_string();
-    session.cwd = snap.cwd;
-    session.target = snap.target;
-    session.messages = snap.messages;
-    session.input_tokens += snap.usage.input_tokens;
-    session.output_tokens += snap.usage.output_tokens;
-    if snap.usage.context_tokens > 0 {
-        session.prompt_tokens = snap.usage.context_tokens;
-    }
-    session.cache_read_tokens += snap.usage.cache_read_tokens;
-    session.cache_create_tokens += snap.usage.cache_create_tokens;
-    if (0.65..=1.65).contains(&snap.usage.calibration_factor) {
-        session.calibration_factor = snap.usage.calibration_factor;
-    }
-    session.touch();
-    let _ = crate::session::save_session(data_dir, &session);
-}
-
-async fn cancel_active_job(
-    data_dir: &Path,
-    target: &str,
-    local_socket: Option<PathBuf>,
-    conduit: Option<PathBuf>,
-    local_server: Option<AgentServer>,
-    job_id: u64,
-) {
-    let remote = super::remote_for(data_dir, target, conduit, local_socket, local_server);
-    let _ = remote.cancel(target, job_id).await;
 }

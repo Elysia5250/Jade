@@ -82,7 +82,7 @@ enum TermOutcome {
 
 /// Idle consoles do not arm this. Decrypt and ask countdown do.
 pub(crate) fn animation_tick(app: &App) -> Option<Duration> {
-    if app.agent.running {
+    if app.agent.running || app.subagent_running() {
         Some(Duration::from_millis(FRAME_MS))
     } else if app.agent.pending_ask.is_some() {
         Some(Duration::from_millis(ASK_FRAME_MS))
@@ -152,9 +152,8 @@ fn tty_reader(tx: mpsc::UnboundedSender<Event>, stop: Arc<AtomicBool>) {
 }
 
 fn paint_now(tui: &mut Tui, app: &mut App) -> Result<()> {
-    inputs::sync(app);
     let _ = execute!(stdout(), BeginSynchronizedUpdate);
-    tui.terminal.draw(|frame| paint(frame, app))?;
+    tui.terminal.draw(|frame| view::draw(frame, app))?;
     let _ = execute!(stdout(), EndSynchronizedUpdate);
     Ok(())
 }
@@ -204,6 +203,7 @@ async fn dispatch_wake(
     wake: ConsoleWake,
     redraw: &mut bool,
 ) -> Result<bool> {
+    let sync_inputs = !matches!(wake, ConsoleWake::Timer { .. });
     match wake {
         ConsoleWake::Term(None) | ConsoleWake::Signal => return Ok(true),
         ConsoleWake::Term(Some(ev)) => {
@@ -244,6 +244,9 @@ async fn dispatch_wake(
             *redraw = true;
         }
         ConsoleWake::Timer { draw } => *redraw = draw,
+    }
+    if sync_inputs {
+        inputs::sync(app);
     }
     // The match applied the winning event. Anything else already queued is
     // drained here so one wake paints at most once.
@@ -340,6 +343,13 @@ fn next_wake(app: &App) -> Option<WakePlan> {
         let left = app.agent.retry_at.saturating_duration_since(Instant::now());
         push_wake(&mut best, left, false);
     }
+    if let Some(welcome) = &app.ui.welcome {
+        let left = welcome
+            .live_refreshed_at
+            .map(|at| Duration::from_secs(2).saturating_sub(at.elapsed()))
+            .unwrap_or(Duration::ZERO);
+        push_wake(&mut best, left, false);
+    }
     best
 }
 
@@ -371,6 +381,9 @@ async fn settle_background(app: &mut App, remote: &Remote<AnyDialer>) -> bool {
     {
         app.spawn_agent_attach();
         dirty = true;
+    }
+    if app.ui.welcome.is_some() {
+        app.maybe_poll_hub_live_sessions();
     }
     dirty
 }
@@ -476,6 +489,10 @@ async fn on_action(
             app.queue_followup(prompt);
             Ok(false)
         }
+        Action::SubmitAgentSteer(prompt) => {
+            app.submit_agent_steer(prompt);
+            Ok(false)
+        }
         Action::Cancel => {
             app.cancel_active(remote).await;
             Ok(false)
@@ -564,6 +581,10 @@ pub(super) async fn dispatch_action_for_test(
         }
         Action::SubmitAgentFollowup(prompt) => {
             app.queue_followup(prompt);
+            Ok(false)
+        }
+        Action::SubmitAgentSteer(prompt) => {
+            app.submit_agent_steer(prompt);
             Ok(false)
         }
         Action::Cancel => {

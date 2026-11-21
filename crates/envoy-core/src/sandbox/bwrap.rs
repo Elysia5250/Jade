@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 const SKIP_WALK_DIRS: &[&str] = &["target", "node_modules", ".venv", "venv", "__pycache__"];
-const MAX_WALK_ENTRIES: usize = 4096;
+const MAX_WALK_ENTRIES: usize = 16_384;
 
 pub(crate) fn find_bwrap() -> Option<PathBuf> {
     for fixed in ["/usr/bin/bwrap", "/bin/bwrap"] {
@@ -196,12 +196,14 @@ pub(crate) fn build_bwrap_with_secrets(
     }
     let home_paths = home_candidates();
     for root in &inspect_roots {
-        let max_depth = if root == Path::new("/") || home_paths.iter().any(|h| h == root) {
+        let max_depth = if root == Path::new("/") {
             1
+        } else if home_paths.iter().any(|h| h == root) {
+            2
         } else {
             6
         };
-        inspect_and_protect_root(root, max_depth, &empty, &mut masked, &mut out);
+        inspect_and_protect_root(root, max_depth, &empty, &mut masked, &mut out)?;
     }
 
     for (k, v) in env {
@@ -265,7 +267,7 @@ fn inspect_and_protect_root(
     empty: &Path,
     masked: &mut HashSet<PathBuf>,
     out: &mut Vec<String>,
-) {
+) -> Result<()> {
     let mut stack = vec![(root.to_path_buf(), 1usize)];
     let mut seen_entries = 0usize;
 
@@ -276,7 +278,10 @@ fn inspect_and_protect_root(
         for entry in rd.flatten() {
             seen_entries += 1;
             if seen_entries > MAX_WALK_ENTRIES {
-                return;
+                bail!(
+                    "sandbox walk exceeded {MAX_WALK_ENTRIES} entries under {}; refusing to run with unmasked subtrees",
+                    root.display()
+                );
             }
             let Ok(ft) = entry.file_type() else {
                 continue;
@@ -298,6 +303,7 @@ fn inspect_and_protect_root(
             }
         }
     }
+    Ok(())
 }
 
 fn lock_protected_entry(

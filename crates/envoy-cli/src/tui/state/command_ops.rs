@@ -5,31 +5,50 @@ impl App {
     pub(in crate::tui) fn run_permissions_command(&mut self, arg: &str) {
         let trimmed = arg.trim();
         if trimmed.is_empty() || trimmed == "status" {
-            let eng = PermissionEngine::new(
-                self.data_dir.clone(),
-                self.session.current.cwd.clone(),
-                self.session.current.id.clone(),
-                self.jobs.target.clone(),
-                self.session.perm_mode,
-            );
-            let loaded = eng.loaded_policies();
-            let trusted = eng.is_trusted();
-            let sandbox = if self.jobs.target == "local" || self.jobs.target.is_empty() {
-                envoy_core::sandbox::backend_label()
-            } else {
-                "peer"
-            };
-            self.push_notice(
-                format!(
-                    "Permissions: mode={} - sandbox={} - workspace_trusted={} - rules={} - extra_rw={}",
-                    self.session.perm_mode.label(),
-                    sandbox,
-                    trusted,
-                    loaded.rules.len(),
-                    loaded.extra_rw.len(),
-                ),
-                false,
-            );
+            if self.agent.offline
+                || self.agent.stream.is_none()
+                || !self.agent.ready
+                || tokio::runtime::Handle::try_current().is_err()
+            {
+                self.set_toast("daemon offline - cannot query permissions status", true);
+                return;
+            }
+            let data_dir = self.data_dir.clone();
+            let sid = self.session.current.id.clone();
+            let notice = self.notice_tx.clone();
+            self.set_toast("querying permissions status...", false);
+            tokio::spawn(async move {
+                let (msg, err) =
+                    match runtime::request(&data_dir, &AgentReq::GetPermissions { id: sid.clone() })
+                        .await
+                    {
+                        Ok(AgentResp::PermissionsStatus {
+                            mode,
+                            sandbox,
+                            workspace_trusted,
+                            rules,
+                            extra_rw,
+                        }) => (
+                            format!(
+                                "Permissions (daemon): mode={} - sandbox={} - workspace_trusted={} - rules={} - extra_rw={}",
+                                mode.label(),
+                                sandbox,
+                                workspace_trusted,
+                                rules,
+                                extra_rw,
+                            ),
+                            false,
+                        ),
+                        Ok(AgentResp::Error(reason)) => (reason, true),
+                        Ok(_) => ("unexpected daemon reply to permissions query".into(), true),
+                        Err(err) => (format!("permissions status failed: {err:#}"), true),
+                    };
+                let _ = notice.send(UiNotice::Notice {
+                    session_id: sid,
+                    msg,
+                    err,
+                });
+            });
             return;
         }
         if let Some(mode) = PermissionMode::parse(trimmed) {
@@ -81,7 +100,7 @@ impl App {
             return;
         }
         self.set_toast(
-            "usage: /permissions [default|accept-edits|plan|auto|allow <rule>|deny <rule>]",
+            "usage: /permissions [default|accept-edits|plan|auto|turbo|allow <rule>|deny <rule>]",
             true,
         );
     }

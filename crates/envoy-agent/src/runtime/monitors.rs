@@ -30,6 +30,7 @@ struct MonitorEntry {
     local_server: Option<AgentServer>,
     cancel_tx: watch::Sender<bool>,
     task: Option<JoinHandle<()>>,
+    runtime_handle: Option<tokio::runtime::Handle>,
 }
 
 impl Drop for MonitorEntry {
@@ -47,7 +48,11 @@ impl Drop for MonitorEntry {
         let conduit = self.conduit.clone();
         let local_socket = self.local_socket.clone();
         let local_server = self.local_server.clone();
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        let handle = self
+            .runtime_handle
+            .clone()
+            .or_else(|| tokio::runtime::Handle::try_current().ok());
+        let Some(handle) = handle else {
             return;
         };
         handle.spawn(async move {
@@ -120,6 +125,7 @@ impl MonitorHub {
                 local_server: None,
                 cancel_tx,
                 task: None,
+                runtime_handle: tokio::runtime::Handle::try_current().ok(),
             },
         );
     }
@@ -205,6 +211,7 @@ impl MonitorBroker for MonitorHub {
                     local_server: self.local_server.clone(),
                     cancel_tx,
                     task: None,
+                    runtime_handle: tokio::runtime::Handle::try_current().ok(),
                 },
             );
             if g.monitors.len() > 64 {

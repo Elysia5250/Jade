@@ -214,6 +214,7 @@ async fn loop_hooks_pipeline_permission_recheck_and_stop_reentry() {
             tool_name: None,
 
             reasoning_blocks: Vec::new(),
+            images: Vec::new(),
         }],
         asks: AskBroker::new(),
         steer: Arc::new(Mutex::new(vec![])),

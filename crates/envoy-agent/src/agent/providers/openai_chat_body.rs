@@ -39,7 +39,25 @@ pub(crate) fn chat_messages(model: &str, system: &str, history: &[ChatMessage]) 
     for (index, message) in history.iter().enumerate() {
         match message.role {
             ChatRole::System => {}
-            ChatRole::User => msgs.push(json!({ "role": "user", "content": message.content })),
+            ChatRole::User => {
+                if message.images.is_empty() {
+                    msgs.push(json!({ "role": "user", "content": message.content }));
+                } else {
+                    let mut parts = Vec::new();
+                    if !message.content.is_empty() {
+                        parts.push(json!({ "type": "text", "text": message.content }));
+                    }
+                    for img in &message.images {
+                        parts.push(json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:{};base64,{}", img.mime, img.data_base64)
+                            }
+                        }));
+                    }
+                    msgs.push(json!({ "role": "user", "content": parts }));
+                }
+            }
             ChatRole::Assistant => {
                 let mut msg = assistant_message(message);
                 if let Some(text) = replay_reasoning(model, history, index) {

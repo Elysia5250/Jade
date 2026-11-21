@@ -143,6 +143,74 @@ pub enum AgentEvent {
         reason: String,
         duration_ms: u64,
     },
+    /// One child inside a `delegate` call. The console lists these under the
+    /// parent tool and opens a child's own transcript from the same stream.
+    Subagent {
+        parent_call_id: String,
+        index: u32,
+        total: u32,
+        name: String,
+        description: String,
+        note: SubagentNote,
+    },
+    /// Plan sidechat beside the worker. It does not enter the worker transcript.
+    Side {
+        note: SideNote,
+    },
+}
+
+/// One beat of the plan sidechat. Fields are always present.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SideNote {
+    User {
+        text: String,
+    },
+    Text {
+        text: String,
+    },
+    Tool {
+        call_id: String,
+        name: String,
+        title: String,
+        subtitle: String,
+        running: bool,
+        ok: bool,
+        duration_ms: u64,
+    },
+    Say {
+        text: String,
+    },
+    Done {
+        ok: bool,
+    },
+    Closed,
+}
+
+/// Progress for one delegated child. Fields are always present: postcard is
+/// not self-describing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SubagentNote {
+    Started {
+        prompt: String,
+    },
+    Text {
+        text: String,
+    },
+    Tool {
+        call_id: String,
+        name: String,
+        title: String,
+        subtitle: String,
+        running: bool,
+        ok: bool,
+        duration_ms: u64,
+    },
+    Say {
+        text: String,
+    },
+    Finished {
+        ok: bool,
+    },
 }
 
 fn default_turn_calibration() -> f64 {
@@ -178,6 +246,7 @@ mod tests {
                     tool_name: None,
 
                     reasoning_blocks: Vec::new(),
+                    images: Vec::new(),
                 }],
                 before_tokens: 180_000,
                 after_tokens: 24_000,
@@ -335,6 +404,7 @@ mod tests {
             tool_call_id: Some("call-9".into()),
             tool_name: Some("bash".into()),
             reasoning_blocks: Vec::new(),
+            images: Vec::new(),
         }
     }
 
@@ -469,6 +539,21 @@ mod tests {
                 reason: "policy block".into(),
                 duration_ms: 14,
             },
+            AgentEvent::Subagent {
+                parent_call_id: "call-1".into(),
+                index: 1,
+                total: 2,
+                name: "explore".into(),
+                description: "find auth".into(),
+                note: SubagentNote::Started {
+                    prompt: "map the auth module".into(),
+                },
+            },
+            AgentEvent::Side {
+                note: SideNote::User {
+                    text: "adjust the plan".into(),
+                },
+            },
         ]
     }
 
@@ -497,6 +582,8 @@ mod tests {
             AgentEvent::MonitorsSync { .. } => 20,
             AgentEvent::CheckpointRewound { .. } => 21,
             AgentEvent::HookRan { .. } => 22,
+            AgentEvent::Subagent { .. } => 23,
+            AgentEvent::Side { .. } => 24,
         }
     }
 
@@ -504,7 +591,7 @@ mod tests {
     fn every_agent_event_round_trips_with_no_trailing_bytes() {
         let mut samples = sample_events_early();
         samples.extend(sample_events_late());
-        let mut seen = [false; 23];
+        let mut seen = [false; 25];
         for event in &samples {
             let slot = event_index(event);
             assert!(!seen[slot], "duplicate sample {slot}");
@@ -518,6 +605,71 @@ mod tests {
         {
             Some(AgentEvent::TurnDone { context_tokens, .. }) => assert_eq!(*context_tokens, 42),
             _ => panic!("TurnDone sample missing"),
+        }
+    }
+
+    #[test]
+    fn every_subagent_note_round_trips() {
+        let notes = [
+            SubagentNote::Started {
+                prompt: "map auth".into(),
+            },
+            SubagentNote::Text {
+                text: "looking".into(),
+            },
+            SubagentNote::Tool {
+                call_id: "t1".into(),
+                name: "read".into(),
+                title: "Read".into(),
+                subtitle: "src/lib.rs".into(),
+                running: false,
+                ok: true,
+                duration_ms: 12,
+            },
+            SubagentNote::Say {
+                text: "found it".into(),
+            },
+            SubagentNote::Finished { ok: false },
+        ];
+        for note in notes {
+            let event = AgentEvent::Subagent {
+                parent_call_id: "call-1".into(),
+                index: 2,
+                total: 2,
+                name: "review".into(),
+                description: "check tests".into(),
+                note,
+            };
+            assert_postcard(&event);
+        }
+    }
+
+    #[test]
+    fn every_side_note_round_trips() {
+        let notes = [
+            SideNote::User {
+                text: "plan this".into(),
+            },
+            SideNote::Text {
+                text: "looking".into(),
+            },
+            SideNote::Tool {
+                call_id: "t1".into(),
+                name: "read".into(),
+                title: "read src/lib.rs".into(),
+                subtitle: String::new(),
+                running: false,
+                ok: true,
+                duration_ms: 4,
+            },
+            SideNote::Say {
+                text: "writing the plan".into(),
+            },
+            SideNote::Done { ok: true },
+            SideNote::Closed,
+        ];
+        for note in notes {
+            assert_postcard(&AgentEvent::Side { note });
         }
     }
 }

@@ -19,9 +19,12 @@ pub(super) fn segment_needs_net(argv: &[String]) -> bool {
         return false;
     };
     match bin {
-        "curl" | "wget" | "ssh" | "scp" | "sftp" | "nc" | "ncat" | "telnet" | "ping" | "dig"
-        | "nslookup" | "host" | "apt" | "apt-get" | "dnf" | "yum" | "pacman" | "brew"
+        "curl" | "wget" | "ssh" | "scp" | "sftp" | "nc" | "ncat" | "socat" | "telnet" | "ping"
+        | "dig" | "nslookup" | "host" | "apt" | "apt-get" | "dnf" | "yum" | "pacman" | "brew"
         | "rustup" => true,
+        "openssl" => argv
+            .get(1)
+            .is_some_and(|s| matches!(s.as_str(), "s_client" | "ocsp")),
         "git" => argv.get(1).is_some_and(|s| {
             matches!(
                 s.as_str(),

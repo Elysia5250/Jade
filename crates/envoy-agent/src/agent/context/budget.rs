@@ -128,6 +128,10 @@ pub fn plan_for_cap(model_id: &str, cap: &ModelCap, tier: CompactionTier) -> Bud
         }
     };
 
+    // Lower-bound guard for non-forced `prepare_context` calls (not an active
+    // trigger in `agent/loop.rs`, which waits for `compact_at` so prompt-cache
+    // prefixes stay intact through the 60%–85% band, then runs Stage 1 masking
+    // before falling back to Stage 2 summarization).
     let prune_at = (compact_at * 60 / 100).max(8_192);
     let tail_keep_tokens = (compact_at / 10).clamp(10_000, 48_000).min(compact_at / 3);
 

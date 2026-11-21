@@ -13,19 +13,22 @@ pub(crate) struct EnvDiskSnapshot {
     skills: Option<String>,
     memory: Option<String>,
     agents: Option<String>,
+    workspace: Option<String>,
 }
 
 impl EnvDiskSnapshot {
-    pub(crate) fn capture(data_dir: &Path, cwd: &Path, depth: u8) -> Self {
+    pub(crate) fn capture(data_dir: &Path, cwd: &Path, depth: u8, local: bool) -> Self {
         let skills = crate::skills::prompt_skills(data_dir, cwd);
         let skills = crate::skills::format_skills_catalog(&skills).map(|catalog| {
             format!("## Available skills (load full steps on demand with `skill`)\n{catalog}")
         });
+        let workspace = super::snapshot::for_local(cwd, local);
         if depth != 0 {
             return Self {
                 skills,
                 memory: None,
                 agents: None,
+                workspace,
             };
         }
         let memory = crate::memory::prompt_block(data_dir, cwd);
@@ -38,11 +41,15 @@ impl EnvDiskSnapshot {
             skills,
             memory,
             agents,
+            workspace,
         }
     }
 
     pub(crate) fn note(&self, data_dir: &Path, session_id: &str, depth: u8) -> Option<String> {
         let mut parts = Vec::new();
+        if let Some(workspace) = &self.workspace {
+            parts.push(workspace.clone());
+        }
         if let Some(skills) = &self.skills {
             parts.push(skills.clone());
         }
@@ -65,6 +72,40 @@ impl EnvDiskSnapshot {
     }
 }
 
+const VOICE: &str = r#"
+
+## Voice
+One shell per reply. Slot labels, punctuation, and `say` use the language of the user's most recent message. Omit empty slots. No headings, rules, blockquotes, italics, nested lists, or emoji.
+Pinned labels. For any other language, translate each English label once and keep that wording.
+
+| Slot | 中文 | English |
+| --- | --- | --- |
+| Delivery lead | 已完成 | Done |
+| Error lead | 失败点 | Failed |
+| Plan lead | 目标 | Goal |
+| Answer lead | 结论 | Answer |
+| Saw it | 已核对 | Verified |
+| Reasoned | 推断 | Inferred |
+| Not checked | 未核对 | Unchecked |
+| Still true | 已成立 | Holds |
+| One action | 下一步 | Next |
+- Line: one sentence, no bold label and no list. Chinese ends with `。`. English ends with `.`
+- Card: one bold lead, one clause, a blank line, then 1-4 bullets. One backtick path per bullet, parent and filename only (`agent/prompt.rs`), plus `:line` when a line matters. Chinese bullets use `：` with no space after it. English bullets use `: `. A fenced command replaces the list; tag the language; each line stays within 64 columns. Error cards use the Failed lead and only Holds, Inferred, Unchecked, and Next. At most one apology, and only in that card, with what still holds and the next action. No greeting, no capability preface, no second apology.
+- Steps: bold Goal lead, one clause, a blank line, then 2-4 numbered steps. Choices go only in `ask`.
+
+Chinese card: `**已完成** 会话锁在 daemon。` then `- **已核对** `agent/prompt.rs`：系统提示在这里拼。`
+English card: `**Done** The session lock lives in the daemon.` then `- **Verified** `agent/prompt.rs`: the system prompt is built here.`
+Tables only when the user asked to compare: at most 3 columns and 4 data rows. A cell is at most 8 Chinese characters or 16 Latin letters and contains no path.
+
+`say` is plain text, one line, no period, no path, no Markdown, display width at most 48. Chinese: `正在<动作>，接着<下一拍>`, or to open `收到，先<动作>`. English: `Doing <action>, then <next>`, or to open `On it, first <action>`. Other languages use that present-tense shape.
+"#;
+
+const SUBAGENT_VOICE: &str = r#"
+
+## Voice
+The final report is one card in the language of the task. Lead with **已完成** / **Done** or **失败点** / **Failed**, then 1-4 bullets. Each bullet is one predicate and one path written `parent/file.rs:line`. Labels: 已核对/Verified, 推断/Inferred, 未核对/Unchecked, 已成立/Holds, 下一步/Next. For any other language, translate each English label once and keep that wording. No greeting and no hedge words.
+"#;
+
 pub(crate) fn build_system_prompt(target: &str, cwd: &Path) -> String {
     let mut prompt = format!(
         "You are Envoy, a terminal coding and systems agent.\n\
@@ -73,17 +114,19 @@ pub(crate) fn build_system_prompt(target: &str, cwd: &Path) -> String {
          {}\n\
          ## Rules\n\
          - Reply in the same language as the user's most recent message. If the user writes Chinese, answer in Chinese; never switch to English just because the code or tool output is English.\n\
-         - Be precise and concise. Do the work; never substitute a summary of what you would do for actually doing it.\n\
+         - Do the work; never substitute a summary of what you would do for actually doing it.\n\
          - If a request is ambiguous, ask one short question before acting.\n\
-         - If a command is destructive (delete, overwrite, force-push, chmod -R, kill), call `ask` before doing it. Do not ask in prose. Give 2-5 options, mark exactly one `recommended`, and keep the safe option recommended. If nobody answers, the tool fails and you continue without a choice.\n\
+         - If a command is destructive (delete, overwrite, force-push, chmod -R, kill), call `ask` before doing it. Do not ask in prose. Give 2-4 options. The question is at most 22 Chinese characters or 44 Latin letters; each label at most 8 Chinese characters or 16 Latin letters; each description at most 18 Chinese characters or 36 Latin letters, or omit it. Mark exactly one `recommended`, and keep the safe option recommended. If nobody answers, the tool fails and you continue without a choice.\n\
          - Prefer `read`/`edit`/`ls`/`glob`/`grep` over shell commands when inspecting or editing files. Relative paths resolve against the working directory. Tool arguments come from the tool schema.\n\
+         {}\
          - Use `exec` with a small wait for long commands, then `job` to follow or cancel. Report exact commands, job ids and exit codes; never invent tool output.\n\
-         - Answer in Markdown. Use tables for comparisons, but keep them narrow enough for a terminal.\n\
-         - Call `say` with one present-tense sentence when you change phase, start work that will take a while, or the plan changes. Use the user's language, for example `现在在对列表缩进，接着改代码块对齐`. Put `say` in the same response as the next real tool; do not spend a turn on it alone. Do not call it for every file read, and do not restate the request.\n\
-         - Use `ask` when a decision is genuinely ambiguous. Give 2-5 options and mark exactly one `recommended`. `recommended` only highlights an option; it does not decide for the user.",
+         - Whenever a user sends a message or answers an `ask` and your first response calls a tool, always emit one `say` in the same response as the next real tool (for example `收到，先查看相关代码` or `On it, first read the prompt`). Also call `say` when you change phase, start work that will take a while, or the plan changes (for example `正在对列表缩进，接着改代码块对齐` or `Doing the list indent, then the code-block alignment`). Do not spend a turn on `say` alone, do not call it for every file read, and do not restate the request.\n\
+         - Use `ask` when a decision is genuinely ambiguous. Give 2-4 options. The question is at most 22 Chinese characters or 44 Latin letters; each label at most 8 Chinese characters or 16 Latin letters; each description at most 18 Chinese characters or 36 Latin letters, or omit it. Mark exactly one `recommended`. `recommended` only highlights an option; it does not decide for the user.",
         cwd.display(),
-        host_line(target)
+        host_line(target),
+        super::snapshot::ORIENTATION_RULE
     );
+    prompt.push_str(VOICE);
     if let Some(extra) = project_instructions(cwd) {
         prompt.push_str("\n\n## Project instructions\n");
         prompt.push_str(&extra);
@@ -100,13 +143,16 @@ pub(crate) fn build_subagent_system_prompt(target: &str, cwd: &Path, role_prompt
          ## Rules\n\
          - Stay strictly within the assigned task and available tools.\n\
          - Never invent file paths, symbols, or tool outputs.\n\
-         - Reply with concise, factual results in the language of the task.\n\n\
+         - Reply with concise, factual results in the language of the task.\n\
+         {}\n\
          ## Role Instructions\n\
          {}",
         cwd.display(),
         host_line(target),
+        super::snapshot::ORIENTATION_RULE,
         role_prompt.trim(),
     );
+    prompt.push_str(SUBAGENT_VOICE);
     if let Some(extra) = project_instructions(cwd) {
         prompt.push_str("\n\n## Project instructions\n");
         prompt.push_str(&extra);
@@ -159,7 +205,7 @@ pub(crate) fn environment_note_for_depth(
     session_id: &str,
     depth: u8,
 ) -> Option<String> {
-    EnvDiskSnapshot::capture(data_dir, cwd, depth).note(data_dir, session_id, depth)
+    EnvDiskSnapshot::capture(data_dir, cwd, depth, true).note(data_dir, session_id, depth)
 }
 
 struct VolatileTail {
@@ -288,6 +334,7 @@ fn env_message(content: String) -> ChatMessage {
         tool_call_id: None,
         tool_name: None,
         reasoning_blocks: Vec::new(),
+        images: Vec::new(),
     }
 }
 
@@ -300,6 +347,7 @@ fn ack_message() -> ChatMessage {
         tool_call_id: None,
         tool_name: None,
         reasoning_blocks: Vec::new(),
+        images: Vec::new(),
     }
 }
 
@@ -413,6 +461,44 @@ mod tests {
         assert!(prompt.contains("recommended"));
         assert!(!prompt.contains("recommended option is taken"));
         assert!(!prompt.contains("isolates `/tmp`"));
+        assert!(prompt.contains("## Voice"));
+        assert!(prompt.contains("No headings"));
+        for slot in [
+            "已完成",
+            "失败点",
+            "目标",
+            "Done",
+            "Failed",
+            "Goal",
+            "Verified",
+        ] {
+            assert!(prompt.contains(slot), "missing {slot}");
+        }
+        assert!(prompt.contains("translate each English label once"));
+        assert!(prompt.contains("正在"));
+        assert!(prompt.contains("Doing"));
+        assert!(desc.contains("plain text"), "{desc}");
+        assert!(desc.contains("正在"), "{desc}");
+        assert!(desc.contains("Doing"), "{desc}");
+        let ask = openai_tools_json()
+            .into_iter()
+            .find(|tool| tool["function"]["name"] == "ask")
+            .expect("ask");
+        assert_eq!(
+            ask["function"]["parameters"]["properties"]["options"]["maxItems"].as_u64(),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn subagent_report_uses_a_card_with_one_path() {
+        let prompt =
+            build_subagent_system_prompt("local", std::path::Path::new("/tmp"), "Role body.");
+        assert!(prompt.contains("Role body."));
+        assert!(prompt.contains("one card"));
+        assert!(prompt.contains("parent/file.rs:line"));
+        assert!(prompt.contains("Verified"));
+        assert!(prompt.contains("workspace snapshot"));
     }
 
     #[test]
@@ -512,6 +598,7 @@ mod tests {
             tool_call_id: Some("c1".into()),
             tool_name: Some("exec".into()),
             reasoning_blocks: Vec::new(),
+            images: Vec::new(),
         });
         for _ in 0..3 {
             sync_environment(&mut messages, Some("base env\n- todo 1"));

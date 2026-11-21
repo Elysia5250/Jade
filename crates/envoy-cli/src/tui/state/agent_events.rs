@@ -37,6 +37,7 @@ impl App {
                 self.session.current.touch();
                 self.ui.follow = true;
                 self.agent.running = true;
+                self.agent.turn_started_at = Some(Instant::now());
             }
             AgentEvent::AssistantStart { model } => {
                 if let Some(TranscriptItem::Assistant {
@@ -151,6 +152,7 @@ impl App {
                 duration_ms,
                 exit_code,
             } => {
+                let mut delegate_done = None;
                 if let Some(&item_id) = self.agent.active_tool_items.get(&call_id) {
                     if let Some(TranscriptItem::Tool {
                         status,
@@ -177,7 +179,13 @@ impl App {
                         if ok && name != "exec" && output.len() > 14 {
                             *collapsed = true;
                         }
+                        if name == "delegate" {
+                            delegate_done = Some(ok);
+                        }
                     }
+                }
+                if let Some(ok) = delegate_done {
+                    self.settle_delegate(&call_id, ok);
                 }
                 self.session.current.touch();
                 self.persist_session();
@@ -208,6 +216,8 @@ impl App {
                     recommended,
                     selected: recommended,
                     deadline: Instant::now() + Duration::from_millis(timeout_ms),
+                    touched: false,
+                    paused_left: None,
                 });
                 self.ui.follow = true;
             }
@@ -252,6 +262,7 @@ impl App {
                 self.session.current.touch();
                 self.persist_session();
                 self.agent.running = false;
+                self.agent.turn_started_at = None;
                 self.agent.active_assistant_id = None;
                 self.agent.active_tool_items.clear();
                 self.agent.pending_ask = None;
@@ -269,11 +280,22 @@ impl App {
                 }
                 self.session.current.touch();
                 self.persist_session();
+                self.stop_running_subagents();
                 self.agent.running = false;
+                self.agent.turn_started_at = None;
                 self.agent.active_assistant_id = None;
                 self.agent.active_tool_items.clear();
                 self.agent.pending_ask = None;
             }
+            AgentEvent::Subagent {
+                parent_call_id,
+                index,
+                name,
+                description,
+                note,
+                ..
+            } => self.apply_subagent(parent_call_id, index, name, description, note),
+            AgentEvent::Side { note } => self.apply_side_note(note),
             AgentEvent::Compacting { auto, handoff } => {
                 let msg = if handoff {
                     "generating handoff summary."
@@ -283,6 +305,7 @@ impl App {
                     "compacting context."
                 };
                 self.agent.running = true;
+                self.agent.turn_started_at.get_or_insert_with(Instant::now);
                 self.set_toast(msg, false);
             }
             AgentEvent::Compacted {
@@ -305,6 +328,7 @@ impl App {
                 self.push_notice(note, false);
                 if !auto {
                     self.agent.running = false;
+                    self.agent.turn_started_at = None;
                     self.set_toast("context compacted", false);
                 }
                 self.session.current.touch();
@@ -334,6 +358,7 @@ impl App {
                         tool_name: None,
 
                         reasoning_blocks: Vec::new(),
+                        images: Vec::new(),
                     },
                     ChatMessage {
                         role: ChatRole::Assistant,
@@ -344,6 +369,7 @@ impl App {
                         tool_name: None,
 
                         reasoning_blocks: Vec::new(),
+                        images: Vec::new(),
                     },
                 ];
                 let notice_id = fresh.alloc_id();

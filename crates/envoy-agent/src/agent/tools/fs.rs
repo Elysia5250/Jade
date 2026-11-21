@@ -89,18 +89,49 @@ async fn read_snapshot_text(
     }
 }
 
+fn prepare_local_write_args(
+    target: &str,
+    cwd: &Path,
+    args: &Value,
+    expected_canonical: Option<&Path>,
+) -> Result<(String, Value)> {
+    let raw_path = args["path"].as_str().context("missing `path`")?;
+    let local = target.is_empty() || target == "local";
+    if !local {
+        return Ok((tools_core::resolve_path(cwd, raw_path), args.clone()));
+    }
+    let resolved = crate::permissions::paths::resolve_path_pair(cwd, raw_path);
+    if let Some(expected) = expected_canonical {
+        if resolved.canonical != expected {
+            anyhow::bail!(
+                "refusing write: `{raw_path}` resolved to {} after authorizing {}",
+                resolved.canonical.display(),
+                expected.display()
+            );
+        }
+    }
+    let canon = resolved.canonical.display().to_string();
+    let mut effective = args.clone();
+    if let Some(obj) = effective.as_object_mut() {
+        obj.insert("path".into(), Value::String(canon.clone()));
+    }
+    Ok((canon, effective))
+}
+
 pub(crate) async fn write_tool(
     remote: &Remote<Box<dyn AgentDialer>>,
     target: &str,
     cwd: &Path,
     args: &Value,
+    expected_canonical: Option<&Path>,
 ) -> Result<(String, Option<FileEditSnapshot>)> {
-    let raw_path = args["path"].as_str().context("missing `path`")?;
-    let snap_path = tools_core::resolve_path(cwd, raw_path);
+    let (snap_path, effective_args) =
+        prepare_local_write_args(target, cwd, args, expected_canonical)?;
     let content = args["content"].as_str().context("missing `content`")?;
     let (existed_before, before, restorable_before) =
         read_snapshot_text(remote, target, &snap_path).await;
-    let (path, bytes) = tools_core::write_raw(remote, target, Some(cwd), args, false).await?;
+    let (path, bytes) =
+        tools_core::write_raw(remote, target, Some(cwd), &effective_args, false).await?;
     let after = if content.len() as u64 <= SNAPSHOT_CAP {
         content.to_string()
     } else {
@@ -123,12 +154,13 @@ pub(crate) async fn edit_tool(
     target: &str,
     cwd: &Path,
     args: &Value,
+    expected_canonical: Option<&Path>,
 ) -> Result<(String, Option<FileEditSnapshot>)> {
-    let raw_path = args["path"].as_str().context("missing `path`")?;
-    let snap_path = tools_core::resolve_path(cwd, raw_path);
+    let (snap_path, effective_args) =
+        prepare_local_write_args(target, cwd, args, expected_canonical)?;
     let (existed_before, before, restorable_before) =
         read_snapshot_text(remote, target, &snap_path).await;
-    let (path, n) = tools_core::edit_raw(remote, target, Some(cwd), args).await?;
+    let (path, n) = tools_core::edit_raw(remote, target, Some(cwd), &effective_args).await?;
     let (_existed_after, after, _) = read_snapshot_text(remote, target, &path).await;
     Ok((
         format!("edited {path}: {n} replacement(s)"),

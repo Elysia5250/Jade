@@ -32,13 +32,30 @@ pub(super) fn draw_editor(
         ),
     };
     let v_pad = if area.height >= 6 { 1 } else { 0 };
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(frame_color))
         .padding(Padding::new(1, 1, v_pad, v_pad))
         .title_bottom(title.into_right_aligned_line())
         .style(Style::default().bg(theme.panel));
+    if !app.ui.pending_images.is_empty() {
+        let names: Vec<String> = app
+            .ui
+            .pending_images
+            .iter()
+            .map(|img| super::super::clipboard::format_image_label(img, None))
+            .collect();
+        let badge = format!(
+            " [{} image(s): {} · Backspace to remove] ",
+            app.ui.pending_images.len(),
+            truncate_width(&names.join(", "), 48)
+        );
+        block = block.title_top(Span::styled(
+            badge,
+            Style::default().fg(theme.ok).add_modifier(Modifier::BOLD),
+        ));
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width < 4 || inner.height == 0 {
@@ -66,6 +83,9 @@ pub(super) fn draw_editor(
         let placeholder = match app.ui.mode {
             InputMode::Agent if !app.inputs.catalog.signed_in => {
                 "Sign in first (/login or press Enter to connect a provider)"
+            }
+            InputMode::Agent if !app.ui.pending_images.is_empty() => {
+                "Add a message for attached image(s), or press Enter to send…"
             }
             InputMode::Agent => "Message Envoy…",
             InputMode::Shell => "Run a shell command…",

@@ -10,7 +10,7 @@ use crate::agent::AgentEvent;
 use crate::agent::AskBroker;
 use crate::hooks::HookEngine;
 use crate::permissions::{PermissionEngine, PermissionMode};
-use crate::session::ChatMessage;
+use crate::session::{ChatMessage, ImageAttachment};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -82,6 +82,7 @@ pub struct Live {
     pub(crate) hooks: Arc<HookEngine>,
     pub(crate) hook_state: Arc<Mutex<BTreeMap<String, Value>>>,
     pub(crate) pending_session_context: Vec<String>,
+    pub(crate) pending_turn_images: Vec<ImageAttachment>,
     pub(crate) turn_seq: u64,
     pub(crate) session_started: bool,
     pub(crate) session_ended: bool,
@@ -93,6 +94,19 @@ pub struct Live {
     pub(crate) subs: Vec<mpsc::Sender<SeqEvent>>,
     pub(crate) turn: Option<tokio::task::JoinHandle<()>>,
     pub(crate) pump: Option<tokio::task::JoinHandle<()>>,
+    /// Plan conversation beside the worker. It never claims [`LivePhase::RunningTurn`].
+    pub(crate) side: Option<super::side::SideLane>,
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        if let Some(turn) = self.turn.take() {
+            turn.abort();
+        }
+        if let Some(pump) = self.pump.take() {
+            pump.abort();
+        }
+    }
 }
 
 impl Live {
@@ -144,6 +158,7 @@ impl Live {
             hooks,
             hook_state: Arc::new(Mutex::new(BTreeMap::new())),
             pending_session_context: Vec::new(),
+            pending_turn_images: Vec::new(),
             turn_seq: 0,
             session_started: false,
             session_ended: false,
@@ -155,6 +170,7 @@ impl Live {
             subs: Vec::new(),
             turn: None,
             pump: None,
+            side: None,
         }
     }
 
@@ -169,7 +185,9 @@ impl Live {
             seq,
             event: slim_event(event),
         };
-        let bytes = envoy_proto::codec::payload_len(&stored);
+        let Ok(bytes) = envoy_proto::codec::payload_len(&stored) else {
+            return;
+        };
         self.events.push(stored);
         self.event_sizes.push(bytes);
         self.event_bytes += bytes;
@@ -226,6 +244,8 @@ impl Live {
     pub(crate) fn release(&mut self) {
         self.phase = LivePhase::Idle;
         self.running = false;
+        self.turn = None;
+        self.pump = None;
     }
 
     /// Drop the oldest idle sessions until there is room for one more insert.

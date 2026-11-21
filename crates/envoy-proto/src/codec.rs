@@ -14,9 +14,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 const READ_CHUNK: usize = 64 * 1024;
 const DISCARD_CHUNK: usize = 8 * 1024;
 
-/// Byte length of `msg` once postcard-encoded. `0` if it cannot be encoded.
-pub fn payload_len<T: Serialize>(msg: &T) -> usize {
-    postcard::to_stdvec(msg).map(|buf| buf.len()).unwrap_or(0)
+/// Byte length of `msg` once postcard-encoded.
+pub fn payload_len<T: Serialize>(msg: &T) -> Result<usize> {
+    Ok(postcard::to_stdvec(msg)?.len())
 }
 
 pub async fn write_framed<W, T>(w: &mut W, msg: &T) -> Result<()>

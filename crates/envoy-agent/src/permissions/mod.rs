@@ -6,6 +6,7 @@
 
 pub mod audit;
 mod match_rule;
+mod net_allowlist;
 pub mod paths;
 mod prompt;
 pub mod rules;
@@ -155,12 +156,22 @@ impl PermissionEngine {
         is_workspace_trusted(&self.data_dir, &self.cwd)
     }
 
+    /// True when the active sandbox can protect `.envoy/` from being overwritten
+    /// by the agent (or the target is remote). On Landlock-only hosts, project
+    /// policies are not loaded because the agent could otherwise rewrite them.
+    fn can_trust_project_policy(&self) -> bool {
+        if !self.target.is_empty() && self.target != "local" {
+            return true;
+        }
+        envoy_core::sandbox::capabilities().can_protect_subpaths
+    }
+
     pub fn loaded_policies(&self) -> rules::LoadedPolicies {
         let session = self.session_allows.lock().unwrap().clone();
         rules::load_policies(
             &self.data_dir,
             &self.cwd,
-            self.is_trusted(),
+            self.is_trusted() && self.can_trust_project_policy(),
             self.managed_override.as_deref(),
             &session,
         )
@@ -181,6 +192,21 @@ impl PermissionEngine {
         self.evaluate_with_mcp(tool, args, None)
     }
 
+    /// True when the effective sandbox for this engine actually enforces the
+    /// workspace boundary (local target, not overridden to `off`/`danger-full-access`,
+    /// and host backend supports full workspace/secret/net isolation).
+    fn sandbox_enforces_workspace(&self) -> bool {
+        if !self.target.is_empty() && self.target != "local" {
+            return false;
+        }
+        match self.sandbox_override() {
+            Some(SandboxOverride::Off | SandboxOverride::DangerFullAccess) => false,
+            Some(SandboxOverride::ReadOnly | SandboxOverride::WorkspaceWrite) | None => {
+                envoy_core::sandbox::capabilities().enforces_workspace_boundary()
+            }
+        }
+    }
+
     pub fn evaluate_with_mcp(
         &self,
         tool: &str,
@@ -188,14 +214,17 @@ impl PermissionEngine {
         mcp_identity: Option<(&str, &str)>,
     ) -> Decision {
         let policies = self.loaded_policies();
-        rules::evaluate_tool_call_with_mcp(
+        rules::evaluate_tool_call_with_options(
             &self.data_dir,
             &self.cwd,
             self.mode(),
             &policies,
             tool,
             args,
-            mcp_identity,
+            rules::EvalOptions {
+                mcp_identity,
+                sandbox_enforces_workspace: self.sandbox_enforces_workspace(),
+            },
         )
     }
 
@@ -221,23 +250,33 @@ impl PermissionEngine {
         let policies = self.loaded_policies();
         let mode = self.mode();
         let read_only_mode = mode == PermissionMode::Plan;
-        let decision = rules::evaluate_tool_call_with_mcp(
+        let decision = rules::evaluate_tool_call_with_options(
             &self.data_dir,
             &self.cwd,
             mode,
             &policies,
             tool,
             args,
-            mcp_identity,
+            rules::EvalOptions {
+                mcp_identity,
+                sandbox_enforces_workspace: self.sandbox_enforces_workspace(),
+            },
         );
         let detail = summarize_call(tool, args);
 
         let skip_perms = self.skip_permissions() && mode != PermissionMode::Plan;
         let sandbox_ovr = self.sandbox_override();
+        let resolved_path = matches!(tool, "write" | "edit")
+            .then(|| {
+                args["path"]
+                    .as_str()
+                    .map(|p| paths::resolve_path_pair(&self.cwd, p).canonical)
+            })
+            .flatten();
 
         match decision.effect {
             Effect::Deny => {
-                audit::record_decision(
+                log_audit(
                     &self.data_dir,
                     audit::PermissionAuditEntry {
                         ts_ms: audit::now_ms(),
@@ -249,8 +288,9 @@ impl PermissionEngine {
                         decision: "deny",
                         resolution: "policy_deny",
                         reason: &decision.reason,
-                        sandbox: "none",
+                        sandbox: "none".into(),
                     },
+                    tx,
                 );
                 bail!("permission denied: {}", decision.reason);
             }
@@ -265,7 +305,7 @@ impl PermissionEngine {
                     read_only_mode,
                     sandbox_ovr,
                 );
-                audit::record_decision(
+                log_audit(
                     &self.data_dir,
                     audit::PermissionAuditEntry {
                         ts_ms: audit::now_ms(),
@@ -279,8 +319,12 @@ impl PermissionEngine {
                         reason: &decision.reason,
                         sandbox: sandbox_label(&sandbox),
                     },
+                    tx,
                 );
-                Ok(ToolAuth { sandbox })
+                Ok(ToolAuth {
+                    sandbox,
+                    resolved_path,
+                })
             }
             Effect::Ask if skip_perms => {
                 let mut extra_rw = policies.extra_rw.clone();
@@ -293,7 +337,7 @@ impl PermissionEngine {
                     read_only_mode,
                     sandbox_ovr,
                 );
-                audit::record_decision(
+                log_audit(
                     &self.data_dir,
                     audit::PermissionAuditEntry {
                         ts_ms: audit::now_ms(),
@@ -307,11 +351,15 @@ impl PermissionEngine {
                         reason: &decision.reason,
                         sandbox: sandbox_label(&sandbox),
                     },
+                    tx,
                 );
-                Ok(ToolAuth { sandbox })
+                Ok(ToolAuth {
+                    sandbox,
+                    resolved_path,
+                })
             }
             Effect::Ask if asks.is_non_interactive() => {
-                audit::record_decision(
+                log_audit(
                     &self.data_dir,
                     audit::PermissionAuditEntry {
                         ts_ms: audit::now_ms(),
@@ -323,8 +371,9 @@ impl PermissionEngine {
                         decision: "ask",
                         resolution: "headless_ask_denied",
                         reason: &decision.reason,
-                        sandbox: "none",
+                        sandbox: "none".into(),
                     },
+                    tx,
                 );
                 bail!(
                     "tool `{tool}` requires interactive approval ({}); re-run with --permission-mode auto or --dangerously-skip-permissions",
@@ -336,7 +385,7 @@ impl PermissionEngine {
                 let choice = match prompt_res {
                     Ok(c) => c,
                     Err(e) => {
-                        audit::record_decision(
+                        log_audit(
                             &self.data_dir,
                             audit::PermissionAuditEntry {
                                 ts_ms: audit::now_ms(),
@@ -348,8 +397,9 @@ impl PermissionEngine {
                                 decision: "ask",
                                 resolution: "timeout_or_error",
                                 reason: &decision.reason,
-                                sandbox: "none",
+                                sandbox: "none".into(),
                             },
+                            tx,
                         );
                         return Err(e);
                     }
@@ -394,7 +444,7 @@ impl PermissionEngine {
                         )
                     }
                     ApprovalChoice::Deny => {
-                        audit::record_decision(
+                        log_audit(
                             &self.data_dir,
                             audit::PermissionAuditEntry {
                                 ts_ms: audit::now_ms(),
@@ -406,8 +456,9 @@ impl PermissionEngine {
                                 decision: "ask",
                                 resolution: "user_denied",
                                 reason: &decision.reason,
-                                sandbox: "none",
+                                sandbox: "none".into(),
                             },
+                            tx,
                         );
                         bail!("user denied `{tool}` ({})", decision.reason);
                     }
@@ -429,7 +480,7 @@ impl PermissionEngine {
                         sandbox_ovr,
                     )
                 };
-                audit::record_decision(
+                log_audit(
                     &self.data_dir,
                     audit::PermissionAuditEntry {
                         ts_ms: audit::now_ms(),
@@ -443,8 +494,12 @@ impl PermissionEngine {
                         reason: &decision.reason,
                         sandbox: sandbox_label(&sandbox),
                     },
+                    tx,
                 );
-                Ok(ToolAuth { sandbox })
+                Ok(ToolAuth {
+                    sandbox,
+                    resolved_path,
+                })
             }
         }
     }
@@ -458,6 +513,7 @@ fn sandbox_for(
     read_only_mode: bool,
     override_policy: Option<SandboxOverride>,
 ) -> SandboxPolicy {
+    let extra_rw = paths::sanitize_extra_rw(cwd, extra_rw);
     match override_policy {
         Some(SandboxOverride::Off) => SandboxPolicy::Off,
         Some(SandboxOverride::DangerFullAccess) => SandboxPolicy::DangerFullAccess,
@@ -474,7 +530,7 @@ fn sandbox_for(
             }
             SandboxPolicy::WorkspaceWrite {
                 cwd: cwd.display().to_string(),
-                extra_rw: extra_rw.to_vec(),
+                extra_rw,
                 allow_net,
             }
         }
@@ -485,28 +541,47 @@ fn sandbox_for(
         None if skip_perms => SandboxPolicy::DangerFullAccess,
         None => SandboxPolicy::WorkspaceWrite {
             cwd: cwd.display().to_string(),
-            extra_rw: extra_rw.to_vec(),
+            extra_rw,
             allow_net,
         },
     }
 }
 
-fn sandbox_label(s: &SandboxPolicy) -> &'static str {
+fn log_audit(
+    data_dir: &Path,
+    entry: audit::PermissionAuditEntry<'_>,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+) {
+    if let Err(err) = audit::record_decision(data_dir, entry) {
+        let _ = tx.send(AgentEvent::Say {
+            text: format!("warning: failed to record permission audit log: {err}"),
+            kind: "warn".into(),
+        });
+    }
+}
+
+fn sandbox_label(s: &SandboxPolicy) -> String {
     match s {
-        SandboxPolicy::Off => "off",
+        SandboxPolicy::Off => "off".into(),
         SandboxPolicy::ReadOnly {
             allow_net: false, ..
-        } => "ro:offline",
+        } => "ro:offline".into(),
         SandboxPolicy::ReadOnly {
             allow_net: true, ..
-        } => "ro:net",
+        } => "ro:net".into(),
         SandboxPolicy::WorkspaceWrite {
-            allow_net: false, ..
-        } => "ws:offline",
-        SandboxPolicy::WorkspaceWrite {
-            allow_net: true, ..
-        } => "ws:net",
-        SandboxPolicy::DangerFullAccess => "danger-full-access",
+            allow_net,
+            extra_rw,
+            ..
+        } => {
+            let base = if *allow_net { "ws:net" } else { "ws:offline" };
+            if extra_rw.is_empty() {
+                base.into()
+            } else {
+                format!("{base}[extra_rw={}]", extra_rw.join(","))
+            }
+        }
+        SandboxPolicy::DangerFullAccess => "danger-full-access".into(),
     }
 }
 

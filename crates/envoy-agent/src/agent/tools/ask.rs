@@ -39,7 +39,7 @@ pub(crate) async fn ask_tool(
     let timeout_s = args["timeout_s"].as_u64().unwrap_or(120).clamp(5, 3600);
     let _gate = asks.acquire_prompt().await;
     let id = asks.next_id();
-    let (send, recv) = oneshot::channel();
+    let (send, mut recv) = oneshot::channel();
     asks.register(id, send);
     let _ = tx.send(AgentEvent::Ask {
         id,
@@ -48,10 +48,11 @@ pub(crate) async fn ask_tool(
         recommended,
         timeout_ms: timeout_s * 1000,
     });
-
-    let answer = tokio::time::timeout(Duration::from_secs(timeout_s), recv).await;
+    let answer = asks
+        .wait_for_answer(id, Duration::from_secs(timeout_s), &mut recv)
+        .await;
     asks.forget(id);
-    let Ok(Ok(label)) = answer else {
+    let Some(label) = answer else {
         let _ = tx.send(AgentEvent::AskClosed { id });
         bail!("user did not answer");
     };

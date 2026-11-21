@@ -163,9 +163,11 @@ pub(crate) async fn run_with_writers<WOut: Write, WErr: Write>(
 
     let perm_mode = match args.permission_mode.as_deref() {
         Some(raw) => PermissionMode::parse(raw).with_context(|| {
-            format!("unknown permission mode `{raw}` (expected: default, accept-edits, plan, auto)")
+            format!(
+                "unknown permission mode `{raw}` (expected: default, accept-edits, plan, auto, turbo)"
+            )
         })?,
-        None if args.dangerously_skip_permissions => PermissionMode::Auto,
+        None if args.dangerously_skip_permissions => PermissionMode::Turbo,
         None => PermissionMode::Default,
     };
 

@@ -129,7 +129,7 @@ pub(crate) fn builtin_agents() -> Vec<SubagentSpec> {
             timeout_s: 120,
             system_prompt: "You are a fast read-only codebase exploration subagent.\n\
                 Inspect files strictly with `glob`, `grep`, `ls`, and `read`.\n\
-                Return exact file paths, line ranges, symbol names, and concise factual findings.\n\
+                Report symbols and findings in the final card.\n\
                 Never fabricate file contents or claim to have modified anything."
                 .into(),
             scope: AgentScope::Builtin,
@@ -160,7 +160,7 @@ pub(crate) fn builtin_agents() -> Vec<SubagentSpec> {
             timeout_s: 180,
             system_prompt: "You are a rigorous code-review subagent.\n\
                 Check correctness, edge cases, permission/security boundaries, concurrency hazards, and missing tests.\n\
-                Cite exact file paths, line numbers, severity, and concrete fixes."
+                Put each finding in the final card with its severity and a concrete fix."
                 .into(),
             scope: AgentScope::Builtin,
             source_path: None,

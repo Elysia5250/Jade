@@ -9,8 +9,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const INDEX_TTL: Duration = Duration::from_secs(5);
-const MAX_INDEXED_FILES: usize = 5000;
-const MAX_WALK_DEPTH: usize = 16;
 
 #[derive(Default)]
 pub(crate) struct WorkspaceIndex {
@@ -18,6 +16,7 @@ pub(crate) struct WorkspaceIndex {
     files: Vec<String>,
     file_set: HashSet<String>,
     by_basename: HashMap<String, Vec<String>>,
+    tree: String,
     built_at: Option<Instant>,
 }
 
@@ -38,8 +37,9 @@ impl WorkspaceIndex {
         self.files.clear();
         self.file_set.clear();
         self.by_basename.clear();
-        let mut seen = HashSet::new();
-        walk_workspace(cwd, cwd, 0, &mut seen, &mut self.files);
+        let scan = envoy_core::scan_workspace(cwd);
+        self.tree = scan.tree;
+        self.files = scan.files;
         for rel in &self.files {
             self.file_set.insert(rel.clone());
             if let Some(name) = Path::new(rel).file_name().and_then(|s| s.to_str()) {
@@ -171,6 +171,10 @@ impl WorkspaceIndex {
             .map(|(_, _, _, p)| p.to_string())
             .collect()
     }
+
+    pub(crate) fn tree(&self) -> &str {
+        &self.tree
+    }
 }
 
 pub(crate) fn is_subsequence(needle: &str, haystack: &str) -> bool {
@@ -187,139 +191,6 @@ pub(crate) fn is_subsequence(needle: &str, haystack: &str) -> bool {
         }
     }
     false
-}
-
-fn walk_workspace(
-    root: &Path,
-    dir: &Path,
-    depth: usize,
-    seen: &mut HashSet<(u64, u64)>,
-    out: &mut Vec<String>,
-) {
-    if depth > MAX_WALK_DEPTH || out.len() >= MAX_INDEXED_FILES {
-        return;
-    }
-    if let Some(id) = directory_id(dir) {
-        if !seen.insert(id) {
-            return;
-        }
-    }
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut dirs = Vec::new();
-    for entry in entries.flatten() {
-        if out.len() >= MAX_INDEXED_FILES {
-            break;
-        }
-        consider_entry(root, &entry, seen, out, &mut dirs);
-    }
-    for sub in dirs {
-        if out.len() >= MAX_INDEXED_FILES {
-            break;
-        }
-        walk_workspace(root, &sub, depth + 1, seen, out);
-    }
-}
-
-fn consider_entry(
-    root: &Path,
-    entry: &std::fs::DirEntry,
-    seen: &mut HashSet<(u64, u64)>,
-    out: &mut Vec<String>,
-    dirs: &mut Vec<std::path::PathBuf>,
-) {
-    let path = entry.path();
-    let name = entry.file_name();
-    let name_str = name.to_string_lossy();
-    let Ok(kind) = entry.file_type() else {
-        return;
-    };
-    if kind.is_symlink() {
-        consider_symlink(root, &path, &name_str, seen, out, dirs);
-        return;
-    }
-    if kind.is_dir() {
-        if !skipped_dir(&name_str) {
-            dirs.push(path);
-        }
-        return;
-    }
-    if kind.is_file() && claim_file(&path, seen) {
-        push_rel(root, &path, out);
-    }
-}
-
-fn consider_symlink(
-    root: &Path,
-    path: &Path,
-    name: &str,
-    seen: &mut HashSet<(u64, u64)>,
-    out: &mut Vec<String>,
-    dirs: &mut Vec<std::path::PathBuf>,
-) {
-    let Ok(meta) = std::fs::metadata(path) else {
-        return;
-    };
-    let Some(id) = meta_id(&meta) else {
-        return;
-    };
-    if meta.is_dir() {
-        if skipped_dir(name) || seen.contains(&id) {
-            return;
-        }
-        dirs.push(path.to_path_buf());
-        return;
-    }
-    if meta.is_file() && seen.insert(id) {
-        push_rel(root, path, out);
-    }
-}
-
-fn claim_file(path: &Path, seen: &mut HashSet<(u64, u64)>) -> bool {
-    match std::fs::symlink_metadata(path)
-        .ok()
-        .as_ref()
-        .and_then(meta_id)
-    {
-        Some(id) => seen.insert(id),
-        None => true,
-    }
-}
-
-fn push_rel(root: &Path, path: &Path, out: &mut Vec<String>) {
-    if let Ok(rel) = path.strip_prefix(root) {
-        out.push(rel.to_string_lossy().replace('\\', "/"));
-    }
-}
-
-fn skipped_dir(name: &str) -> bool {
-    matches!(
-        name,
-        ".git" | "target" | "node_modules" | ".venv" | "dist" | "build" | ".next"
-    )
-}
-
-fn directory_id(dir: &Path) -> Option<(u64, u64)> {
-    let meta = std::fs::metadata(dir).ok()?;
-    if meta.is_dir() {
-        meta_id(&meta)
-    } else {
-        None
-    }
-}
-
-fn meta_id(meta: &std::fs::Metadata) -> Option<(u64, u64)> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Some((meta.dev(), meta.ino()))
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        None
-    }
 }
 
 fn match_in_changed_with(

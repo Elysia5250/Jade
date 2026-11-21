@@ -107,13 +107,14 @@ pub fn load_policies(
     }
 
     // Project policy is only loaded once the user has explicitly trusted `cwd`.
+    // Repository-controlled policy files may never widen sandbox `extra_rw` roots.
     if trusted {
         if let Some(p) = read_json::<PolicyFile>(&project_policy_path(cwd)) {
-            extra_rw.extend(p.extra_rw.iter().cloned());
             push_policy_rules(RuleScope::Project, &p, &mut rules);
         }
     }
 
+    let extra_rw = super::paths::sanitize_extra_rw(cwd, &extra_rw);
     rules.extend(session_rules.iter().cloned());
     LoadedPolicies {
         rules,
@@ -199,6 +200,12 @@ fn push_policy_rules(scope: RuleScope, file: &PolicyFile, out: &mut Vec<Permissi
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct EvalOptions<'a> {
+    pub mcp_identity: Option<(&'a str, &'a str)>,
+    pub sandbox_enforces_workspace: bool,
+}
+
 pub fn evaluate_tool_call(
     data_dir: &Path,
     cwd: &Path,
@@ -207,19 +214,30 @@ pub fn evaluate_tool_call(
     tool: &str,
     args: &Value,
 ) -> Decision {
-    evaluate_tool_call_with_mcp(data_dir, cwd, mode, policies, tool, args, None)
+    evaluate_tool_call_with_options(
+        data_dir,
+        cwd,
+        mode,
+        policies,
+        tool,
+        args,
+        EvalOptions {
+            mcp_identity: None,
+            sandbox_enforces_workspace: sandbox_backend_isolated(),
+        },
+    )
 }
 
-pub fn evaluate_tool_call_with_mcp(
+pub fn evaluate_tool_call_with_options(
     data_dir: &Path,
     cwd: &Path,
     mode: PermissionMode,
     policies: &LoadedPolicies,
     tool: &str,
     args: &Value,
-    mcp_identity: Option<(&str, &str)>,
+    opts: EvalOptions<'_>,
 ) -> Decision {
-    let ctx = InspectContext::build(data_dir, cwd, tool, args, mcp_identity);
+    let ctx = InspectContext::build(data_dir, cwd, tool, args, opts.mcp_identity);
 
     if let Some(err) = &policies.managed_error {
         return deny(
@@ -273,6 +291,38 @@ pub fn evaluate_tool_call_with_mcp(
         }
     }
 
+    // 3b. Relaxed modes stop prompting for everything the OS sandbox already
+    // contains: `turbo` always, `auto` once an enforcing workspace sandbox is
+    // actually active (not overridden to `off`/`danger-full-access`), the call
+    // stays inside the workspace (or temp dir) for mutating/exec tools, and
+    // does not request non-allowlisted outbound network access.
+    // Protected paths still fall through to the guard below, explicit deny
+    // rules above still win, and a managed-policy load error still fails closed.
+    let auto_unallowlisted_net = mode == PermissionMode::Auto
+        && matches!(tool, "exec" | "webfetch")
+        && ctx.needs_net
+        && !ctx.net_allowlisted;
+    let auto_outside_workspace = mode == PermissionMode::Auto
+        && ctx.outside_workspace
+        && !ctx.is_temp_target
+        && matches!(tool, "write" | "edit" | "exec");
+    let relaxed = mode == PermissionMode::Turbo
+        || (mode == PermissionMode::Auto
+            && opts.sandbox_enforces_workspace
+            && !auto_unallowlisted_net
+            && !auto_outside_workspace
+            && !ctx.uses_sudo);
+    if relaxed && !ctx.protected_hit {
+        return allow(
+            if mode == PermissionMode::Turbo {
+                "turbo mode allows every tool call"
+            } else {
+                "auto mode with an enforcing sandbox"
+            },
+            &ctx,
+        );
+    }
+
     // 4. Protected-path & symlink-escape guard (cannot be silently auto-allowed by mode).
     if ctx.protected_hit
         && matches!(
@@ -323,14 +373,19 @@ pub fn evaluate_tool_call_with_mcp(
     }
 
     // 9. Mode baseline
-    mode_baseline(mode, tool, &ctx)
+    mode_baseline(mode, tool, &ctx, opts.sandbox_enforces_workspace)
 }
 
 fn sandbox_backend_isolated() -> bool {
     envoy_core::sandbox::capabilities().enforces_workspace_boundary()
 }
 
-fn mode_baseline(mode: PermissionMode, tool: &str, ctx: &InspectContext) -> Decision {
+fn mode_baseline(
+    mode: PermissionMode,
+    tool: &str,
+    ctx: &InspectContext,
+    sandbox_enforces_workspace: bool,
+) -> Decision {
     match tool {
         "say" | "ask" | "todo" | "skill" | "delegate" | "monitor" => {
             allow("interactive control tool", ctx)
@@ -338,7 +393,9 @@ fn mode_baseline(mode: PermissionMode, tool: &str, ctx: &InspectContext) -> Deci
         "read" | "ls" | "glob" | "grep" | "job" => {
             if ctx.outside_workspace {
                 match mode {
-                    PermissionMode::Auto => allow("auto mode read outside workspace", ctx),
+                    PermissionMode::Auto | PermissionMode::Turbo => {
+                        allow("relaxed mode read outside workspace", ctx)
+                    }
                     _ => ask("read/search outside workspace", ctx),
                 }
             } else {
@@ -346,8 +403,10 @@ fn mode_baseline(mode: PermissionMode, tool: &str, ctx: &InspectContext) -> Deci
             }
         }
         "write" | "edit" => {
-            if mode == PermissionMode::Auto && (!ctx.outside_workspace || ctx.is_temp_target) {
-                allow("auto mode workspace edit", ctx)
+            if matches!(mode, PermissionMode::Auto | PermissionMode::Turbo)
+                && (!ctx.outside_workspace || ctx.is_temp_target)
+            {
+                allow("relaxed mode workspace edit", ctx)
             } else if ctx.outside_workspace {
                 ask("write outside workspace", ctx)
             } else if mode == PermissionMode::AcceptEdits
@@ -359,32 +418,20 @@ fn mode_baseline(mode: PermissionMode, tool: &str, ctx: &InspectContext) -> Deci
             }
         }
         "webfetch" => match mode {
-            PermissionMode::Auto => allow("auto mode web fetch", ctx),
+            PermissionMode::Turbo => allow("turbo mode web fetch", ctx),
+            _ if ctx.net_allowlisted => allow("allowlisted web fetch", ctx),
             _ => ask("external web fetch", ctx),
         },
         "exec" => {
-            // Auto means "a strong sandbox exists, so ask less". Without one,
-            // exec falls back to the Default asks.
-            let isolated = sandbox_backend_isolated();
-            if mode == PermissionMode::Auto && isolated {
-                // Catastrophic covers a few commands (rm of a root path) that
-                // the destructive matcher misses. Outside-workspace targets and
-                // destructive commands must still ask.
-                if ctx.destructive || ctx.catastrophic {
-                    return ask("destructive shell command", ctx);
-                }
-                if ctx.outside_workspace {
-                    return ask("shell command references path outside workspace", ctx);
-                }
-                return allow("auto mode workspace command", ctx);
-            }
+            // `turbo`, and `auto` with an enforcing sandbox, already returned
+            // Allow above. What is left is conservatively ask-first.
             if ctx.destructive {
                 return ask("destructive shell command", ctx);
             }
             if ctx.outside_workspace {
                 return ask("shell command references path outside workspace", ctx);
             }
-            if ctx.needs_net {
+            if ctx.needs_net && !ctx.net_allowlisted {
                 return ask("shell command requests outbound network", ctx);
             }
             match mode {
@@ -396,7 +443,11 @@ fn mode_baseline(mode: PermissionMode, tool: &str, ctx: &InspectContext) -> Deci
                     }
                 }
                 PermissionMode::Auto | PermissionMode::Default | PermissionMode::AcceptEdits => {
-                    if ctx.shell_readonly || (isolated && mode != PermissionMode::Auto) {
+                    // Only reached without an enforcing sandbox for `auto`, and
+                    // always for `default` / `accept-edits`.
+                    if ctx.shell_readonly
+                        || (sandbox_enforces_workspace && mode != PermissionMode::Auto)
+                    {
                         allow(
                             if ctx.shell_readonly {
                                 "read-only shell command inside workspace"
@@ -409,11 +460,12 @@ fn mode_baseline(mode: PermissionMode, tool: &str, ctx: &InspectContext) -> Deci
                         ask("shell command execution", ctx)
                     }
                 }
+                PermissionMode::Turbo => allow("turbo mode allows every tool call", ctx),
             }
         }
         mcp if mcp.starts_with("mcp__") => match mode {
             PermissionMode::Plan => deny("plan mode blocks external MCP tool calls", ctx),
-            PermissionMode::Auto => allow("auto mode MCP tool", ctx),
+            PermissionMode::Auto | PermissionMode::Turbo => allow("relaxed mode MCP tool", ctx),
             PermissionMode::Default | PermissionMode::AcceptEdits => ask("MCP tool execution", ctx),
         },
         _ => ask("unrecognized tool", ctx),

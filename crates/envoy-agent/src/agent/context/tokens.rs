@@ -82,6 +82,7 @@ pub fn estimate_message_tokens(msg: &ChatMessage) -> u64 {
     // The display string is a transcript copy. Only structured blocks are
     // replayed to the provider, so only those move the compaction trigger.
     total += replayed_reasoning_tokens(&msg.reasoning_blocks);
+    total += (msg.images.len() as u64) * 1_000;
     for tc in &msg.tool_calls {
         total += 10;
         total += estimate_text_tokens(&tc.name);
@@ -203,6 +204,7 @@ mod tests {
             tool_name: None,
 
             reasoning_blocks: Vec::new(),
+            images: Vec::new(),
         };
         assert!(estimate_message_tokens(&msg) >= 20);
         let mut with_reasoning = msg.clone();

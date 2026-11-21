@@ -117,8 +117,13 @@ fn consecutive_failed_commands_and_non_edit_tools_fold_into_one_line() {
         "consecutive failed commands and non-edit tools should fold together:\n{text}"
     );
     assert!(
-        text.contains("Explored 1 file, ran 1 command, 3 more (failed)"),
+        text.contains("Explored 1 file, ran 1 command, 2 more (failed)"),
         "expected combined folded summary with failed badge:\n{text}"
+    );
+    // `delegate` is a subagent card, not folded activity, so it keeps its own row.
+    assert!(
+        text.contains("delegate explore workspace"),
+        "delegate should render as its own subagent card:\n{text}"
     );
 
     let hit = app
@@ -314,6 +319,11 @@ fn markdown_blocks_and_transcript_phases_have_vertical_breathing_room() {
         rows[say_row - 1].trim().is_empty() && rows[say_row + 1].trim().is_empty(),
         "Say milestone should have blank rows above and below:\n{}",
         rows.join("\n")
+    );
+    assert!(
+        rows[say_row].contains("◇") && !rows[say_row].contains("◆"),
+        "say uses a hollow diamond:\n{}",
+        rows[say_row]
     );
 
     let _ = std::fs::remove_dir_all(&dir);

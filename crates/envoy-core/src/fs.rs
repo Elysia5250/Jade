@@ -80,24 +80,34 @@ const MAX_EDIT_BYTES: u64 = 16 * 1024 * 1024;
 /// cannot silently rewrite several places. Preserves the file's mode.
 /// Refuses symlinks, directories, devices, and files over [`MAX_EDIT_BYTES`].
 pub async fn edit_file(path: &str, old: &str, new: &str, replace_all: bool) -> Result<usize> {
+    use tokio::io::AsyncReadExt as _;
     if old.is_empty() {
         anyhow::bail!("`old` must not be empty");
     }
     let path = resolve(path);
-    let sym = tokio::fs::symlink_metadata(&path)
+    let mut opts = tokio::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let mut file = opts.open(&path).await.map_err(|err| {
+        #[cfg(unix)]
+        if err.raw_os_error() == Some(libc::ELOOP) {
+            return anyhow::anyhow!(
+                "{} is not a regular file (refusing symlink, device, or directory)",
+                path.display()
+            );
+        }
+        anyhow::Error::new(err).context(format!("open {}", path.display()))
+    })?;
+    let meta = file
+        .metadata()
         .await
         .with_context(|| format!("stat {}", path.display()))?;
-    if !sym.file_type().is_file() {
+    if !meta.file_type().is_file() {
         anyhow::bail!(
             "{} is not a regular file (refusing symlink, device, or directory)",
             path.display()
         );
-    }
-    let meta = tokio::fs::metadata(&path)
-        .await
-        .with_context(|| format!("stat {}", path.display()))?;
-    if !meta.file_type().is_file() {
-        anyhow::bail!("{} is not a regular file", path.display());
     }
     if meta.len() > MAX_EDIT_BYTES {
         anyhow::bail!(
@@ -106,9 +116,11 @@ pub async fn edit_file(path: &str, old: &str, new: &str, replace_all: bool) -> R
             meta.len()
         );
     }
-    let bytes = tokio::fs::read(&path)
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.read_to_end(&mut bytes)
         .await
         .with_context(|| format!("read {}", path.display()))?;
+    drop(file);
     let text = String::from_utf8(bytes).map_err(|_| {
         anyhow::anyhow!(
             "{} is not UTF-8 text; use `write` for binary files",
@@ -135,42 +147,15 @@ pub async fn edit_file(path: &str, old: &str, new: &str, replace_all: bool) -> R
     Ok(if replace_all { matches } else { 1 })
 }
 
-/// Write through a sibling `.part` and rename into place.
+/// Write through a directory-fd pinned sibling `.part` and `renameat` into place.
 pub async fn write_atomic(path: &Path, data: &[u8], mode: Option<u32>) -> Result<()> {
-    use tokio::io::AsyncWriteExt;
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            tokio::fs::create_dir_all(parent).await.ok();
-        }
-    }
-    let part = part_path(path);
-    let mut opts = tokio::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    opts.mode(mode.unwrap_or(0o600));
-    let mut file = opts
-        .open(&part)
-        .await
-        .with_context(|| format!("create {}", part.display()))?;
-    if let Err(err) = file.write_all(data).await {
-        drop(file);
-        let _ = tokio::fs::remove_file(&part).await;
-        return Err(err).with_context(|| format!("write {}", part.display()));
-    }
-    if let Err(err) = file.flush().await {
-        drop(file);
-        let _ = tokio::fs::remove_file(&part).await;
-        return Err(err).with_context(|| format!("flush {}", part.display()));
-    }
-    drop(file);
-    if let Some(m) = mode {
-        set_mode(&part, m);
-    }
-    if let Err(err) = tokio::fs::rename(&part, path).await {
-        let _ = tokio::fs::remove_file(&part).await;
-        return Err(err).with_context(|| format!("rename into {}", path.display()));
-    }
-    Ok(())
+    let path = path.to_path_buf();
+    let data = data.to_vec();
+    tokio::task::spawn_blocking(move || {
+        crate::fs_atomic::write_atomic_pinned(&path, &data, mode, false, false)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("atomic write task failed: {e}"))?
 }
 
 /// Create a directory tree restricted to owner-only (`0700` on Unix).
@@ -193,41 +178,10 @@ pub fn ensure_private_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Atomically write `data` to `path` via a unique sibling temp file with explicit mode.
+/// Atomically write `data` to `path` via a directory-fd pinned sibling temp file
+/// with explicit `fchmod` mode and `fsync`.
 pub fn write_atomic_sync(path: &Path, data: &[u8], mode: u32) -> Result<()> {
-    use std::io::Write;
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating parent dir {}", parent.display()))?;
-        }
-    }
-    let part = part_path(path);
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(mode);
-    }
-    let mut file = opts
-        .open(&part)
-        .with_context(|| format!("creating {}", part.display()))?;
-    let write_res = file.write_all(data).and_then(|()| file.sync_all());
-    drop(file);
-    if let Err(err) = write_res {
-        let _ = std::fs::remove_file(&part);
-        return Err(err).with_context(|| format!("writing {}", part.display()));
-    }
-    if let Err(err) = set_mode_strict(&part, mode) {
-        let _ = std::fs::remove_file(&part);
-        return Err(err);
-    }
-    if let Err(err) = std::fs::rename(&part, path) {
-        let _ = std::fs::remove_file(&part);
-        return Err(err).with_context(|| format!("renaming into {}", path.display()));
-    }
-    Ok(())
+    crate::fs_atomic::write_atomic_pinned(path, data, Some(mode), true, true)
 }
 
 /// Open an append-only file restricted to owner-only (`0600` on Unix).

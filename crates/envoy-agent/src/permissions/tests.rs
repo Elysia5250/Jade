@@ -55,9 +55,15 @@ fn explicit_deny_beats_allow_and_managed_beats_local() {
     let d3 = eng.evaluate("exec", &json!({"command": "ls && rm -rf build"}));
     assert_eq!(d3.effect, Effect::Deny, "{d3:?}");
 
-    // Unparseable shell falls back to Ask.
+    // Unparseable shell is contained by an enforcing sandbox, so `auto` lets
+    // it through; without one it must Ask.
     let d4 = eng.evaluate("exec", &json!({"command": "echo 'unterminated"}));
-    assert_eq!(d4.effect, Effect::Ask, "{d4:?}");
+    let want = if envoy_core::sandbox::capabilities().enforces_workspace_boundary() {
+        Effect::Allow
+    } else {
+        Effect::Ask
+    };
+    assert_eq!(d4.effect, want, "{d4:?}");
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -222,7 +228,7 @@ async fn headless_fast_fails_ask_while_skip_permissions_and_sandbox_override_wor
 }
 
 #[tokio::test]
-async fn auto_mode_approves_routine_dev_ops_while_keeping_safety_guards() {
+async fn auto_mode_approves_everything_once_the_sandbox_is_enforcing() {
     let root = tmpdir("auto-mode");
     let data = root.join("data");
     let work = root.join("work");
@@ -242,15 +248,28 @@ async fn auto_mode_approves_routine_dev_ops_while_keeping_safety_guards() {
     let asks = AskBroker::new_headless();
     let (tx, _rx) = mpsc::unbounded_channel();
 
-    // Network exec Allows in Auto only when a strong sandbox backend exists.
-    // Destructive commands always Ask. Without one, other exec asks
-    // like Default. Protected paths always Ask.
+    // Non-allowlisted network exec always Asks in Auto (even with an enforcing
+    // sandbox). Allowlisted hosts (e.g. github.com) Allow with `allow_net: true`
+    // once a strong sandbox backend enforces the workspace boundary.
+    let err = eng
+        .authorize_tool_call(
+            "exec",
+            &json!({"command": "curl https://example.com"}),
+            &asks,
+            &tx,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("requires interactive approval"),
+        "{err}"
+    );
     let isolated = envoy_core::sandbox::capabilities().enforces_workspace_boundary();
     if isolated {
         let net_auth = eng
             .authorize_tool_call(
                 "exec",
-                &json!({"command": "curl https://example.com"}),
+                &json!({"command": "curl -fsSL https://github.com/org/repo/releases/download/v1/app.tar.gz"}),
                 &asks,
                 &tx,
             )
@@ -264,28 +283,18 @@ async fn auto_mode_approves_routine_dev_ops_while_keeping_safety_guards() {
                     ..
                 }
             ),
-            "auto mode allowed net exec should enable allow_net: {:?}",
+            "allowlisted net exec in auto mode should enable allow_net: {:?}",
             net_auth.sandbox
         );
-    } else {
-        let err = eng
-            .authorize_tool_call(
-                "exec",
-                &json!({"command": "curl https://example.com"}),
-                &asks,
-                &tx,
-            )
-            .await
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("requires interactive approval"),
-            "{err}"
-        );
     }
+    // With an enforcing sandbox, Auto stops prompting: the sandbox is the
+    // boundary. Without one, the old conservative asks stay.
+    let isolated = envoy_core::sandbox::capabilities().enforces_workspace_boundary();
+    let want = if isolated { Effect::Allow } else { Effect::Ask };
     for command in ["rm -rf build", "git reset --hard", "kill 1"] {
         assert_eq!(
             eng.evaluate("exec", &json!({"command": command})).effect,
-            Effect::Ask,
+            want,
             "{command}"
         );
     }
@@ -305,6 +314,11 @@ async fn auto_mode_approves_routine_dev_ops_while_keeping_safety_guards() {
     assert_eq!(
         eng.evaluate("webfetch", &json!({"url": "https://example.com"}))
             .effect,
+        Effect::Ask
+    );
+    assert_eq!(
+        eng.evaluate("webfetch", &json!({"url": "https://github.com/org/repo"}))
+            .effect,
         Effect::Allow
     );
     assert_eq!(
@@ -313,7 +327,8 @@ async fn auto_mode_approves_routine_dev_ops_while_keeping_safety_guards() {
         Effect::Allow
     );
 
-    // Safety guards still trigger Ask in Auto
+    // Protected paths are the documented floor; everything else the sandbox
+    // contains is allowed once isolation is enforcing.
     assert_eq!(
         eng.evaluate("exec", &json!({"command": "sudo ls"})).effect,
         Effect::Ask
@@ -439,4 +454,114 @@ fn shell_parse_failure_returns_err() {
     assert!(analyze_shell("echo 'unclosed").is_err());
     assert!(analyze_shell("echo $(ls").is_err());
     assert!(analyze_shell("   ").is_err());
+}
+
+#[test]
+fn turbo_mode_never_prompts_but_deny_rules_still_win() {
+    let root = tmpdir("turbo");
+    let data = root.join("data");
+    let work = root.join("work");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(work.join(".envoy")).unwrap();
+    std::fs::write(work.join(".envoy/permissions.json"), "{}").unwrap();
+    std::fs::write(work.join(".env"), "SECRET=1").unwrap();
+
+    let eng = PermissionEngine::new(
+        data.clone(),
+        work.clone(),
+        "s-turbo".into(),
+        "local".into(),
+        PermissionMode::Turbo,
+    );
+
+    // Every baseline ask, guard, and unparseable command is allowed.
+    for (tool, args) in [
+        ("exec", json!({"command": "sudo ls"})),
+        ("exec", json!({"command": "rm -rf /"})),
+        ("exec", json!({"command": "kill 1"})),
+        ("exec", json!({"command": "echo 'unterminated"})),
+        (
+            "exec",
+            json!({"command": "for f in *.md; do echo $f; done"}),
+        ),
+        (
+            "write",
+            json!({"path": "/tmp/turbo-out.txt", "content": "x"}),
+        ),
+        ("webfetch", json!({"url": "https://example.com"})),
+        ("mcp__files__read", json!({"path": "a"})),
+    ] {
+        let d = eng.evaluate(tool, &args);
+        assert_eq!(d.effect, Effect::Allow, "{tool} {args}: {d:?}");
+    }
+
+    // Protected paths are the one floor turbo keeps.
+    assert_eq!(
+        eng.evaluate("read", &json!({"path": ".env"})).effect,
+        Effect::Ask
+    );
+
+    // The hard floor is untouched: an explicit deny still denies.
+    rules::save_rule(
+        &data,
+        &work,
+        RuleScope::User,
+        Effect::Deny,
+        "Bash(git push*)",
+    )
+    .unwrap();
+    let d = eng.evaluate("exec", &json!({"command": "git push origin main"}));
+    assert_eq!(d.effect, Effect::Deny, "{d:?}");
+    assert_eq!(
+        eng.evaluate("exec", &json!({"command": "git status"}))
+            .effect,
+        Effect::Allow
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn turbo_mode_labels_and_cycles() {
+    assert_eq!(PermissionMode::parse("turbo"), Some(PermissionMode::Turbo));
+    assert_eq!(PermissionMode::parse("yolo"), Some(PermissionMode::Turbo));
+    assert_eq!(PermissionMode::Turbo.label(), "turbo");
+    assert_eq!(PermissionMode::Turbo.short_badge(), "perm:turbo");
+    assert_eq!(PermissionMode::Auto.cycle(), PermissionMode::Turbo);
+    assert_eq!(PermissionMode::Turbo.cycle(), PermissionMode::Default);
+}
+
+#[tokio::test]
+async fn turbo_mode_keeps_the_workspace_sandbox() {
+    let root = tmpdir("turbo-sandbox");
+    let data = root.join("data");
+    let work = root.join("work");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(&work).unwrap();
+    let eng = PermissionEngine::new(
+        data,
+        work,
+        "s-turbo-sb".into(),
+        "local".into(),
+        PermissionMode::Turbo,
+    );
+    // Allowing every rule decision does not widen the OS sandbox.
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let auth = eng
+        .authorize_tool_call(
+            "exec",
+            &json!({"command": "cargo build"}),
+            &AskBroker::new_headless(),
+            &tx,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !matches!(auth.sandbox, SandboxPolicy::DangerFullAccess),
+        "turbo must not disable the sandbox: {:?}",
+        auth.sandbox
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
 }
