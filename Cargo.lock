@@ -881,7 +881,7 @@ checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
 
 [[package]]
 name = "jade-agent"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -903,7 +903,7 @@ dependencies = [
 
 [[package]]
 name = "jade-cli"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "jade-core"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "globset",
@@ -941,7 +941,7 @@ dependencies = [
 
 [[package]]
 name = "jade-proto"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "postcard",
@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "jade-service"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "futures",
