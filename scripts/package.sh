@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Build the release artifacts that scripts/install.sh expects:
 #
-#   dist/envoy-v<version>-<target>.tar.gz
-#   dist/envoy-v<version>-<target>.tar.gz.sha256
+#   dist/jade-v<version>-<target>.tar.gz
+#   dist/jade-v<version>-<target>.tar.gz.sha256
 #   dist/latest                     # contains <version>
 #
 # Upload the whole dist/ directory to any static host, then point the
 # installer at it:
 #
-#   ./scripts/install.sh --base-url https://YOUR_HOST/envoy/releases
+#   ./scripts/install.sh --base-url https://YOUR_HOST/jade/releases
 #
 # Cross builds: pass --target and have the Rust target installed.
 set -euo pipefail
@@ -30,19 +30,19 @@ VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/p' Cargo.toml | sed -n 's/^vers
 
 if [[ -z "$TARGET" ]]; then
     TARGET="$(rustc -vV | awk '/^host: /{print $2}')"
-    BUILD_ARGS=(--release -p envoy-cli)
+    BUILD_ARGS=(--release -p jade-cli)
 else
-    BUILD_ARGS=(--release -p envoy-cli --target "$TARGET")
+    BUILD_ARGS=(--release -p jade-cli --target "$TARGET")
 fi
 
-echo "==> building envoy $VERSION for $TARGET"
+echo "==> building jade $VERSION for $TARGET"
 cargo build "${BUILD_ARGS[@]}"
 
-BIN="target/${TARGET}/release/envoy"
-[[ -f "$BIN" ]] || BIN="target/release/envoy"
+BIN="target/${TARGET}/release/jade"
+[[ -f "$BIN" ]] || BIN="target/release/jade"
 [[ -f "$BIN" ]] || { echo "binary not found at $BIN" >&2; exit 1; }
 
-NAME="envoy-v${VERSION}-${TARGET}"
+NAME="jade-v${VERSION}-${TARGET}"
 DIST="$ROOT/dist"
 CHANNEL="$DIST/v${VERSION}"
 STAGE="$DIST/stage/$NAME"
@@ -50,7 +50,7 @@ rm -rf "$STAGE"
 rm -f "$CHANNEL/$NAME.tar.gz" "$CHANNEL/$NAME.tar.gz.sha256"
 mkdir -p "$STAGE" "$CHANNEL"
 
-install -m 0755 "$BIN" "$STAGE/envoy"
+install -m 0755 "$BIN" "$STAGE/jade"
 if [[ -f LICENSE ]]; then
     cp LICENSE "$STAGE/LICENSE"
 fi
@@ -70,4 +70,4 @@ echo "artifacts:"
 find "$DIST" -type f | sort
 echo
 echo "upload the contents of dist/ to \$BASE/ (so \$BASE/latest and \$BASE/v${VERSION}/... exist)"
-echo "install:  ./scripts/install.sh --base-url https://YOUR_HOST/envoy/releases --version $VERSION"
+echo "install:  ./scripts/install.sh --base-url https://YOUR_HOST/jade/releases --version $VERSION"

@@ -9,11 +9,11 @@ Terminal coding agents typically run the LLM turn loop inside the foreground TUI
 
 ## Decision
 
-The `envoy` daemon (`envoy-agent::runtime::Runtime`) is the sole owner of:
+The `jade` daemon (`jade-agent::runtime::Runtime`) is the sole owner of:
 - active turn execution, cancellation, and completion,
 - prompt steering and follow-up queues,
 - interactive `AskBroker` approval/question state,
-- detached job execution (`envoy-core::Jobs`), and
+- detached job execution (`jade-core::Jobs`), and
 - a monotonically increasing per-session event sequence (`SeqEvent`).
 
 Clients attach over `agent.sock` with their last applied sequence number and replay missed events. If the daemon restarts and sequence continuity is lost, it emits `SessionReset` and clients recover from a fresh snapshot. `enter` always sends `Prompt` to the daemon, which authoritatively decides whether to start a new turn or steer the active one.

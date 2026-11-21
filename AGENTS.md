@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This repository is the Envoy coding agent: a daemon-owned single agent loop,
+This repository is the Jade coding agent: a daemon-owned single agent loop,
 a terminal console, a remote executor, and a small protocol crate. Keep the
 map short; deeper design notes live in `docs/`.
 
@@ -9,15 +9,15 @@ map short; deeper design notes live in `docs/`.
 ```bash
 cargo test --workspace
 cargo check --workspace --all-targets
-cargo build --release -p envoy-cli
+cargo build --release -p jade-cli
 python3 scripts/check-file-sizes.py
 ```
 
 The local release flow is:
 
 ```bash
-install -m 0755 target/release/envoy ~/.envoy/bin/envoy
-systemctl --user restart envoy
+install -m 0755 target/release/jade ~/.jade/bin/jade
+systemctl --user restart jade
 ```
 
 Use `docs/MANUAL-TEST.md` for the PTY checklist (two turns, steer, queue,
@@ -25,15 +25,15 @@ recall, interrupt, daemon survival).
 
 ## Source layout
 
-- `crates/envoy-proto`: wire types and framing. No domain logic, no UI.
-- `crates/envoy-core`: job store and execution primitives. No UI, no provider
+- `crates/jade-proto`: wire types and framing. No domain logic, no UI.
+- `crates/jade-core`: job store and execution primitives. No UI, no provider
   SDKs.
-- `crates/envoy-service`: daemon/server, conduit adapter, remote RPC. No TUI.
-- `crates/envoy-agent`: daemon-owned `runtime/`, `agent/` loop (providers,
+- `crates/jade-service`: daemon/server, conduit adapter, remote RPC. No TUI.
+- `crates/jade-agent`: daemon-owned `runtime/`, `agent/` loop (providers,
   tools, prompt, context compaction), `permissions/`, `hooks/`, `skills/`,
   `mcp/`, `auth/`, `session`, `memory`, `worktree`, and `daemon`. No `ratatui`
   or TUI types.
-- `crates/envoy-cli`: `envoy` binary entrypoint, CLI dispatch, `headless/`,
+- `crates/jade-cli`: `jade` binary entrypoint, CLI dispatch, `headless/`,
   and the `tui/` console client. `tui/view/` reads snapshots from `inputs`
   and must not perform I/O, call providers, or mutate daemon state. `drive`
   redraws on events and animation ticks.
@@ -77,7 +77,7 @@ on the TUI or on a concrete provider.
   the call does not request non-allowlisted outbound network), non-protected
   calls short-circuit to `allow` right after deny rules.
 - Canonicalize paths, resolve symlinks, protect `.git`, `.ssh`, `.env`,
-  `.envoy`, `.codex`, `.agents`, and `.aws` (protected paths always `ask` even
+  `.jade`, `.codex`, `.agents`, and `.aws` (protected paths always `ask` even
   in `auto`/`turbo`).
 - Shell checks split compound commands and wrappers; parse failure means `ask`
   (outside the relaxed-mode short-circuit above).

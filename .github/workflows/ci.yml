@@ -28,7 +28,7 @@ jobs:
       - name: Source size guard
         run: python3 scripts/check-file-sizes.py
       - name: Python syntax
-        run: python3 -m py_compile scripts/check-file-sizes.py benchmarks/terminal-bench/envoy_agent.py
+        run: python3 -m py_compile scripts/check-file-sizes.py benchmarks/terminal-bench/jade_agent.py
       - name: Shellcheck
         run: shellcheck scripts/*.sh
       - name: Format check

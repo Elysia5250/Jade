@@ -1,4 +1,4 @@
-# Envoy (`envoy/`)
+# Jade (`jade/`)
 
 A daemon-owned coding agent with a thin terminal client. The daemon owns the
 turn, the queue, and detached jobs. Closing the console does not stop them.
@@ -11,8 +11,8 @@ in either direction.
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Elysia5250/envoy/main/scripts/install.sh | sh
-envoy status          # first run starts the local daemon
+curl -fsSL https://raw.githubusercontent.com/Elysia5250/Jade/main/scripts/install.sh | sh
+jade status          # first run starts the local daemon
 ```
 
 macOS and Linux, x86_64 and aarch64. No root and no TUN: the agent speaks over
@@ -24,7 +24,7 @@ the full matrix are in [docs/INSTALL.md](./docs/INSTALL.md).
 **Interaction and execution are separate layers.**
 
 ```
-client ──short RPC──▶ envoy-service ──▶ Jobs (daemon)  ──▶ child process group
+client ──short RPC──▶ jade-service ──▶ Jobs (daemon)  ──▶ child process group
    submit / jobs / status          │        queue + concurrency
    logs(cursor) / cancel           │        log file per job
                                    └──▶ nothing waits on the client
@@ -44,29 +44,29 @@ watch can live for minutes without blocking anything else.
 
 | Layer | Where | Responsibility |
 |---|---|---|
-| Agent | `envoy-agent` runtime | Turns, tools, permissions, skills, hooks, MCP, and compaction. The console (`envoy-cli`) only renders state and sends requests. |
-| Interaction | `envoy-service` (server/client) | One short request per stream: submit, list, status, log cursor, cancel, file ops |
-| Execution | `envoy-core::job` / `exec` / `log` | Job table, queueing, process groups, timeouts, cancellation, log records |
-| Policy | `envoy-core::config` | `agent.json`: enabled + caller allowlist + `max_jobs` |
-| Transport | `envoy-service::transport` | `AgentDialer` / `AgentStream` / `AgentHost`; Unix socket now, conduit later |
-| Transport adapter | `envoy-service::conduit` | HTTP/WebSocket client of `conduit run`; no conduit crate, no second engine |
+| Agent | `jade-agent` runtime | Turns, tools, permissions, skills, hooks, MCP, and compaction. The console (`jade-cli`) only renders state and sends requests. |
+| Interaction | `jade-service` (server/client) | One short request per stream: submit, list, status, log cursor, cancel, file ops |
+| Execution | `jade-core::job` / `exec` / `log` | Job table, queueing, process groups, timeouts, cancellation, log records |
+| Policy | `jade-core::config` | `agent.json`: enabled + caller allowlist + `max_jobs` |
+| Transport | `jade-service::transport` | `AgentDialer` / `AgentStream` / `AgentHost`; Unix socket now, conduit later |
+| Transport adapter | `jade-service::conduit` | HTTP/WebSocket client of `conduit run`; no conduit crate, no second engine |
 
 ## Crates
 
-- `envoy-proto`: wire protocol (`Op`, `Reply`, `ClientMsg`, `Job`, `JobState`,
+- `jade-proto`: wire protocol (`Op`, `Reply`, `ClientMsg`, `Job`, `JobState`,
   `JobResult`, `LogRecord`) and length-prefixed postcard framing.
-- `envoy-core`: job table (`Jobs`), detached execution (`exec`), append-only job
+- `jade-core`: job table (`Jobs`), detached execution (`exec`), append-only job
   logs with resume cursors (`log`), filesystem primitives (`fs`), the OS sandbox
   (`sandbox`), search (`search`), policy (`config`), audit trail.
-- `envoy-service`: `AgentServer::serve_stream` (one request per stream), a
+- `jade-service`: `AgentServer::serve_stream` (one request per stream), a
   client (`Remote<D>`, plus stream-level helpers), transport traits, and the
   `conduit` runtime adapter (`ConduitClient`, `ConduitDialer`, `WsByteStream`,
   accept pool).
-- `envoy-agent`: daemon lifecycle, the agent loop (tools, providers,
+- `jade-agent`: daemon lifecycle, the agent loop (tools, providers,
   permissions, hooks, skills, MCP, auth, memory, worktree, sessions, and
   context compaction), and the `agent.sock` control runtime.
-- `envoy-cli` (`envoy`): binary entrypoint, CLI dispatch, headless mode
-  (`envoy ask` / `envoy -p`), and the terminal console (`tui/`).
+- `jade-cli` (`jade`): binary entrypoint, CLI dispatch, headless mode
+  (`jade ask` / `jade -p`), and the terminal console (`tui/`).
 
 The old `bridge/` crate (which linked the conduit crates and started a second
 engine) has been removed — it conflicts with `conduit run` owning the device
@@ -76,14 +76,14 @@ identity and TUN. It remains in git history up to `55944b0`.
 
 ```bash
 cd ~/your-project
-envoy                                  # opens the console in this directory
-envoy -c                               # continue the most recent session for this directory
-envoy login                            # or type /login inside the console (API Key / OAuth)
-envoy auth list                        # list stored credentials
-envoy models                           # list available models
+jade                                  # opens the console in this directory
+jade -c                               # continue the most recent session for this directory
+jade login                            # or type /login inside the console (API Key / OAuth)
+jade auth list                        # list stored credentials
+jade models                           # list available models
 ```
 
-That is the main entry point: bare `envoy` starts the terminal console in
+That is the main entry point: bare `jade` starts the terminal console in
 **Agent** mode, with the current directory as the working directory. Without
 `--cwd`, `-c`, `--session`, or `--new-session`, the console opens the home
 screen first; the current directory stays the first row. `/login`
@@ -95,27 +95,27 @@ daemon job.
 Scripted use (the daemon auto-starts; jobs outlive your terminal):
 
 ```bash
-envoy ask "where is the daemon socket" # one headless turn, no console
-envoy run "make -j8 && echo built"     # queue, follow, exit with its code
-envoy submit "cargo test"             # print a job id and return
-envoy jobs
-envoy logs 7 --follow                 # reattach at any time
-envoy logs 7 --offset 4096            # page a finished job's output
-envoy cancel 7
+jade ask "where is the daemon socket" # one headless turn, no console
+jade run "make -j8 && echo built"     # queue, follow, exit with its code
+jade submit "cargo test"             # print a job id and return
+jade jobs
+jade logs 7 --follow                 # reattach at any time
+jade logs 7 --offset 4096            # page a finished job's output
+jade cancel 7
 
-envoy read  /etc/hosts                # files stream over the same socket
-envoy write notes.txt "hello"         # atomic: .part + rename
-envoy ls    ~/src
-envoy copy local a.bin local /tmp/b.bin
+jade read  /etc/hosts                # files stream over the same socket
+jade write notes.txt "hello"         # atomic: .part + rename
+jade ls    ~/src
+jade copy local a.bin local /tmp/b.bin
 ```
 
-`envoy run` is `submit` + `logs --follow`. With a single argument it runs
+`jade run` is `submit` + `logs --follow`. With a single argument it runs
 through `sh -c`; multiple arguments are executed verbatim (no shell) unless
 `--shell` is passed.
 
 ## Terminal console
 
-`envoy` / `envoy ui` is a quiet console. The transcript and the prompt are
+`jade` / `jade ui` is a quiet console. The transcript and the prompt are
 the screen. One status line is the only chrome.
 
 - **Status line**: mode (`agent` or `shell`), workspace, and — once a model is
@@ -142,7 +142,7 @@ the screen. One status line is the only chrome.
   Plus/Pro Browser PKCE & Headless Device Flow, Anthropic Claude Pro/Max PKCE,
   GitHub Copilot Device Flow), and custom OpenAI/Anthropic-compatible endpoints
   (Ollama, vLLM, relays). The added vendors publish API keys, not a third-party
-  OAuth flow this client can use. Credentials are saved to `~/.envoy/auth.json`
+  OAuth flow this client can use. Credentials are saved to `~/.jade/auth.json`
   (`0600`).
 
 | Key | Action |
@@ -186,11 +186,11 @@ change it). `/worktree [name [rev]]` creates or enters a git worktree beside
 the repository at `<repo>.worktrees/<name>`. `/worktree merge [name]` merges
 that branch into the branch checked out in the main worktree and switches the
 session there. `/worktree remove <name>` removes a clean tree and does not
-force it. The agent reads `AGENTS.md` (or `ENVOY.md`) from that directory as
+force it. The agent reads `AGENTS.md` (or `JADE.md`) from that directory as
 project instructions, replies in the language of your message, and renders
 Markdown with real tables, lists and inline emphasis. Tool output is stripped
 of ANSI escapes before it reaches the transcript. Sessions are saved under
-`~/.envoy/sessions/` (`envoy -c` resumes the latest session for the current
+`~/.jade/sessions/` (`jade -c` resumes the latest session for the current
 directory). It talks to the same daemon over
 short RPCs — a UI exit never affects a running job. When conduit is connected,
 `/machine` and `ctrl+p` list only peers advertising service 16. The status
@@ -204,8 +204,8 @@ conduit peer:
 - Files and search: `read`, `write`, `edit`, `ls`, `glob`, `grep`.
 - Shell: `exec`, `job`, `monitor`.
 - Web: `webfetch`.
-- Skills: `skill`. The prompt lists `~/.envoy/skills`, the data directory's
-  `skills`, and — once the workspace is trusted — `.envoy/skills`.
+- Skills: `skill`. The prompt lists `~/.jade/skills`, the data directory's
+  `skills`, and — once the workspace is trusted — `.jade/skills`.
   `~/.agents/skills`, `~/.claude/skills`, and the project's `.agents/skills`
   and `.claude/skills` stay loadable by name with `/skill` or the `skill` tool.
   The home screen can turn a discovered user skill on or off in `skills.json`
@@ -225,7 +225,7 @@ that enforces the workspace boundary is available (`bwrap` or Seatbelt);
 `turbo` always allows and writes the badge in red. Deny rules still win in both.
 After an allow, the OS sandbox is the boundary. `/permissions` and `/plan`
 change the session. Decisions are appended to
-`~/.envoy/audit/permissions.jsonl`.
+`~/.jade/audit/permissions.jsonl`.
 
 Context is compacted in two stages. Older tool output is folded first, then the
 old head is summarized across tool-call boundaries. `/compact`, `/handoff`, and
@@ -233,22 +233,22 @@ old head is summarized across tool-call boundaries. `/compact`, `/handoff`, and
 compacts once and retries. `/rewind` restores workspace files and the
 conversation to a checkpoint.
 
-`envoy ask "…"` runs one prompt without the console. A console turn and a
+`jade ask "…"` runs one prompt without the console. A console turn and a
 headless turn both default to 100 tool steps.
 
 ## MCP tools
 
-`envoy mcp serve` exposes eight primitives: `exec`, `read`, `write`, `edit`,
+`jade mcp serve` exposes eight primitives: `exec`, `read`, `write`, `edit`,
 `ls`, `glob`, `grep`, and `job` (`list` / `status` / `logs` / `cancel`).
 
 The MCP server does not expose `delegate`, skills, monitors, or permission
-editing. `copy` stays a CLI command. Remote allowlisting (`envoy enable` /
-`envoy allow`) stays CLI-only. Calls still pass the daemon's permission check.
+editing. `copy` stays a CLI command. Remote allowlisting (`jade enable` /
+`jade allow`) stays CLI-only. Calls still pass the daemon's permission check.
 In a non-interactive MCP session an `ask` fails instead of prompting.
 
 ## Policy and trust
 
-`~/.envoy/agent.json`:
+`~/.jade/agent.json`:
 
 ```json
 { "enabled": false, "allow": [], "max_jobs": 4 }
@@ -257,25 +257,25 @@ In a non-interactive MCP session an `ask` fails instead of prompting.
 - **Local** (same-user daemon socket, mode `0600`) always works: `enabled` and
   the allowlist govern *remote* callers, and a local shell can run the same
   commands anyway.
-- **One daemon per data directory**: `envoy serve` takes an exclusive `flock`
-  on `<data-dir>/envoy.lock` before touching the socket, so a second instance
+- **One daemon per data directory**: `jade serve` takes an exclusive `flock`
+  on `<data-dir>/jade.lock` before touching the socket, so a second instance
   fails fast instead of unlisting the live socket and sharing `jobs/state.json`.
-- `envoy serve --local-only` skips the conduit accept pool (alias:
+- `jade serve --local-only` skips the conduit accept pool (alias:
   `--no-conduit`).
 - **Remote** callers are identified by the transport. Over conduit that is the
   mTLS-authenticated `device_id`, so the allowlist is not a string the caller
   invents:
 
 ```bash
-envoy enable
-envoy allow 3fa9c1d2a0b7e451      # remote device id from `envoy devices`, not a tool rule
+jade enable
+jade allow 3fa9c1d2a0b7e451      # remote device id from `jade devices`, not a tool rule
 ```
 
 ## Multi-machine: conduit
 
 `conduit run` is the single network daemon on each machine: it owns the device
 key, the QUIC/relay sessions, and optionally the TUN device. It exposes all of
-that on `~/.conduit/control.sock` as HTTP/1.1 + JSON and WebSocket. **envoy is
+that on `~/.conduit/control.sock` as HTTP/1.1 + JSON and WebSocket. **jade is
 just a client of that socket** — no conduit crate, no second engine, no shared
 data directory.
 
@@ -284,30 +284,30 @@ data directory.
 conduit run
 
 # terminal 2 (each machine): the agent daemon; parks 3 idle accept slots
-envoy serve
+jade serve
 
 # anywhere in the account
-envoy devices                    # names, dns names, virtual ips, status
-envoy --on laptop run "uname -a"
-envoy --on laptop submit "cargo build --release"
-envoy --on 100.64.0.2 logs 12 --follow
+jade devices                    # names, dns names, virtual ips, status
+jade --on laptop run "uname -a"
+jade --on laptop submit "cargo build --release"
+jade --on 100.64.0.2 logs 12 --follow
 ```
 
 How it is wired:
 
 - **Outbound** — `GET /v1/services/16/open/{target}` upgrades to a WebSocket and
-  becomes a transparent byte stream carrying envoy protocol v2. Conduit resolves
+  becomes a transparent byte stream carrying jade protocol v2. Conduit resolves
   `device_id`, `dns_name`, `virtual_ip`, or a unique device name, and answers
   `400/404/409/503` with `{"error": "..."}` so the CLI prints the real reason.
-- **Inbound** — `envoy serve` keeps a few idle
-  `GET /v1/services/16/accept?name=envoy` connections. When a peer opens a
+- **Inbound** — `jade serve` keeps a few idle
+  `GET /v1/services/16/accept?name=jade` connections. When a peer opens a
   stream, conduit sends one text frame naming the mTLS-authenticated
-  `peer_device_id`, then switches to binary passthrough; envoy wraps it in
+  `peer_device_id`, then switches to binary passthrough; jade wraps it in
   `WsByteStream` and calls `serve_stream(peer_device_id, stream)`.
 - **Identity** — the allowlist therefore matches a device id conduit has
   already authenticated, not a caller-supplied string.
-- **Discovery** — `GET /v1/status` and `GET /v1/devices` drive `envoy status`
-  and `envoy devices` (its `AGENT` column is "advertises service 16").
+- **Discovery** — `GET /v1/status` and `GET /v1/devices` drive `jade status`
+  and `jade devices` (its `AGENT` column is "advertises service 16").
   `GET /v1/events` feeds the TUI's live `agents/peers` count and its machine
   picker. A peer that does not advertise 16 is filtered out instead of being
   dialled and failing.
@@ -321,14 +321,14 @@ The control socket path comes from `--conduit-socket`, `CONDUIT_CONTROL_SOCK`,
 
 This path has been exercised end to end against the real thing: local
 `conduit-coord`, two devices joined into one account, two `conduit run
---no-tun` daemons, two `envoy serve` instances, then `envoy --on <device> run`
+--no-tun` daemons, two `jade serve` instances, then `jade --on <device> run`
 over the WebSocket bridge — including the mTLS caller id in the job owner and
 the allowlist refusal path.
 
 **Agent traffic never uses L3.** conduit's `100.64.0.0/10` + `*.conduit` is for
 your own tools (ssh, curl, databases, grain); the agent protocol stays on the
 WebSocket bridge, where every stream carries an mTLS-authenticated device id.
-That is also why `envoy` has no `--listen-vpn` and no IP→device reverse
+That is also why `jade` has no `--listen-vpn` and no IP→device reverse
 mapping.
 
 ## Test
@@ -338,7 +338,7 @@ cargo test --workspace
 ```
 
 The control-socket contract is covered by a mock `conduit` server
-(`crates/envoy-service/tests/conduit_control.rs`): outbound upgrade and a full
+(`crates/jade-service/tests/conduit_control.rs`): outbound upgrade and a full
 job round trip, the accept pool with the handoff metadata and allowlist refusal,
 HTTP error propagation, and `/v1/status` + `/v1/devices` parsing. The real
 bridge is exercised manually with two local devices; see

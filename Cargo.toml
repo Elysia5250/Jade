@@ -1,11 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/envoy-proto",
-    "crates/envoy-core",
-    "crates/envoy-service",
-    "crates/envoy-agent",
-    "crates/envoy-cli",
+    "crates/jade-proto",
+    "crates/jade-core",
+    "crates/jade-service",
+    "crates/jade-agent",
+    "crates/jade-cli",
 ]
 
 [workspace.package]

@@ -1,22 +1,22 @@
 #!/bin/sh
-# envoy installer — download a release, put it on PATH, done.
+# jade installer — download a release, put it on PATH, done.
 #
-#   curl -fsSL https://raw.githubusercontent.com/Elysia5250/envoy/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Elysia5250/Jade/main/scripts/install.sh | sh
 #   curl -fsSL ... | sh -s -- --version 0.1.0
-#   ./install.sh --base-url https://my.host/envoy/releases
+#   ./install.sh --base-url https://my.host/jade/releases
 #
-# By default this resolves the latest GitHub Release of Elysia5250/envoy.
-# After install, `envoy` works in a new shell and starts its daemon on first
+# By default this resolves the latest GitHub Release of Elysia5250/Jade.
+# After install, `jade` works in a new shell and starts its daemon on first
 # use (no service manager required).
 set -eu
 
-DEFAULT_REPO="Elysia5250/envoy"
+DEFAULT_REPO="Elysia5250/Jade"
 
-REPO="${ENVOY_REPO:-$DEFAULT_REPO}"
+REPO="${JADE_REPO:-$DEFAULT_REPO}"
 # Empty means "use GitHub Releases for $REPO"; set it for a static mirror.
-BASE="${ENVOY_RELEASE_BASE:-}"
-VERSION="${ENVOY_VERSION:-}"
-DIR="${ENVOY_INSTALL_DIR:-$HOME/.envoy/bin}"
+BASE="${JADE_RELEASE_BASE:-}"
+VERSION="${JADE_VERSION:-}"
+DIR="${JADE_INSTALL_DIR:-$HOME/.jade/bin}"
 ADD_PATH=1
 INSTALL_SERVICE=0
 
@@ -27,17 +27,17 @@ die() { printf '\033[1;31merror\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
     cat <<'EOF'
-envoy installer
+jade installer
 
   --version <v>      install a specific version (default: the latest release)
   --base-url <url>   static release mirror (default: GitHub Releases)
   --repo <owner/name> GitHub repository to resolve releases from
-  --dir <path>       install directory (default: ~/.envoy/bin)
+  --dir <path>       install directory (default: ~/.jade/bin)
   --no-path          do not modify shell startup files
   --service          also install login autostart (launchd / systemd --user)
   -h, --help         this text
 
-Environment: ENVOY_VERSION, ENVOY_REPO, ENVOY_RELEASE_BASE, ENVOY_INSTALL_DIR
+Environment: JADE_VERSION, JADE_REPO, JADE_RELEASE_BASE, JADE_INSTALL_DIR
 EOF
 }
 
@@ -96,9 +96,9 @@ else
     asset_base="$BASE/v$VERSION"
 fi
 
-name="envoy-v${VERSION}-${target}"
+name="jade-v${VERSION}-${target}"
 url="$asset_base/${name}.tar.gz"
-tmp="$(mktemp -d 2>/dev/null || mktemp -d -t envoy)"
+tmp="$(mktemp -d 2>/dev/null || mktemp -d -t jade)"
 trap 'rm -rf "$tmp"' EXIT
 
 step "downloading $url"
@@ -120,17 +120,17 @@ fi
 
 step "extracting"
 tar -xzf "$tmp/$name.tar.gz" -C "$tmp" || die "cannot extract the release archive"
-[ -f "$tmp/$name/envoy" ] || die "archive does not contain $name/envoy"
+[ -f "$tmp/$name/jade" ] || die "archive does not contain $name/jade"
 
 step "installing to $DIR"
 mkdir -p "$DIR"
 # Write beside the destination, then rename. `cp` onto a running binary is ETXTBSY.
-newbin="$DIR/.envoy.new.$$"
-cp "$tmp/$name/envoy" "$newbin"
+newbin="$DIR/.jade.new.$$"
+cp "$tmp/$name/jade" "$newbin"
 chmod 0755 "$newbin"
-mv -f "$newbin" "$DIR/envoy"
+mv -f "$newbin" "$DIR/jade"
 
-installed="$("$DIR/envoy" --version 2>/dev/null || true)"
+installed="$("$DIR/jade" --version 2>/dev/null || true)"
 [ -n "$installed" ] || die "the installed binary does not run on this machine"
 say "$installed"
 
@@ -141,7 +141,7 @@ add_to_rc() {
         return 0
     fi
     mkdir -p "$(dirname "$rc")"
-    printf '\n# added by the envoy installer\n%s\n' "$line" >>"$rc"
+    printf '\n# added by the jade installer\n%s\n' "$line" >>"$rc"
     say "added to $rc"
 }
 
@@ -169,19 +169,19 @@ fi
 
 if [ "$INSTALL_SERVICE" = 1 ]; then
     step "installing login autostart"
-    "$DIR/envoy" daemon install || warn "autostart install failed; \`envoy\` will still start the daemon on first use"
+    "$DIR/jade" daemon install || warn "autostart install failed; \`jade\` will still start the daemon on first use"
 fi
 
 cat <<EOF
 
-$(printf '\033[1;32m✓\033[0m') envoy $VERSION installed
+$(printf '\033[1;32m✓\033[0m') jade $VERSION installed
 
-  new shell:   envoy --version
-  right now:   $DIR/envoy status
-  first run:   envoy status          (auto-starts the daemon)
-  try it:      envoy run "uname -a"
-               envoy ui
+  new shell:   jade --version
+  right now:   $DIR/jade status
+  first run:   jade status          (auto-starts the daemon)
+  try it:      jade run "uname -a"
+               jade ui
 
-Autostart at login:  envoy daemon install
-Uninstall:           rm -f "$DIR/envoy"; rm -rf "$HOME/.envoy"
+Autostart at login:  jade daemon install
+Uninstall:           rm -f "$DIR/jade"; rm -rf "$HOME/.jade"
 EOF

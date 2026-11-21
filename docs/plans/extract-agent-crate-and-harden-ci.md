@@ -1,4 +1,4 @@
-# Plan: extract `envoy-agent` crate and harden CI
+# Plan: extract `jade-agent` crate and harden CI
 
 - Status: complete
 - Owner: Elysia
@@ -12,9 +12,9 @@ re-checking invariants by hand:
 
 1. CI runs `fmt`, `clippy -D warnings`, and tests on both Linux and macOS
    (covering `seatbelt.rs` and Darwin paths).
-2. `envoy-cli` no longer owns the entire agent/runtime/permissions/MCP stack:
-   those live in a dedicated library crate (`crates/envoy-agent`), enforcing
-   the one-way boundary `envoy-proto -> envoy-core -> envoy-service -> envoy-agent -> envoy-cli`
+2. `jade-cli` no longer owns the entire agent/runtime/permissions/MCP stack:
+   those live in a dedicated library crate (`crates/jade-agent`), enforcing
+   the one-way boundary `jade-proto -> jade-core -> jade-service -> jade-agent -> jade-cli`
    at compile time and speeding up TUI-only rebuilds.
 3. Files currently sitting close to the 700-line hard limit (600–690 lines) are
    split along named boundaries before future features push them over.
@@ -27,26 +27,26 @@ re-checking invariants by hand:
 - `.github/workflows/ci.yml` currently only runs on `ubuntu-latest` with
   `check-file-sizes.py`, `cargo test --workspace`, and `cargo check --workspace --all-targets`.
 - `cargo fmt --all -- --check` currently reports diffs in **66 files**.
-- `cargo clippy --workspace --all-targets` currently stops at `envoy-service`
+- `cargo clippy --workspace --all-targets` currently stops at `jade-service`
   with:
-  - `envoy-core` (2 warnings): `job.rs:293` (`type_complexity`),
+  - `jade-core` (2 warnings): `job.rs:293` (`type_complexity`),
     `seatbelt.rs:23` (`single_element_loop`).
-  - `envoy-service` (3 errors, 3 warnings): `client.rs:313`, `remote.rs:34`,
+  - `jade-service` (3 errors, 3 warnings): `client.rs:313`, `remote.rs:34`,
     `remote.rs:66` (`clippy::never_loop` — deny by default); `conduit/ws.rs:46`,
     `conduit/ws.rs:150`, `server.rs:506`.
-  - `envoy-cli` clippy warnings remain to be audited once `envoy-service` passes.
+  - `jade-cli` clippy warnings remain to be audited once `jade-service` passes.
 - Running `cargo test --workspace` on macOS already surfaces a real
   macOS-only test failure that Linux CI missed:
   `tui::tests_ux::welcome_shows_resumes_tag_and_n_starts_fresh_session` fails
   at `tests_ux.rs:200` because macOS's long `/private/var/folders/.../T/...`
   temp path truncates the `resumes` tag in the rendered welcome frame.
-- Also noted during `cargo test`: 3 existing compiler warnings in `envoy-cli`
+- Also noted during `cargo test`: 3 existing compiler warnings in `jade-cli`
   (`auth/mod.rs:25,31` unused imports, `agent/effort.rs:162` dead code).
 
-### 2. Crate split feasibility (`envoy-cli` -> `envoy-agent` + `envoy-cli`)
-- `crates/envoy-cli/src/` currently holds **156 of 179** `.rs` files in the
+### 2. Crate split feasibility (`jade-cli` -> `jade-agent` + `jade-cli`)
+- `crates/jade-cli/src/` currently holds **156 of 179** `.rs` files in the
   workspace.
-- Static module dependency audit of `crates/envoy-cli/src/` confirms a clean
+- Static module dependency audit of `crates/jade-cli/src/` confirms a clean
   cut already exists:
   - **Runtime/agent cluster (11 modules)**: `agent`, `auth`, `daemon`, `hooks`,
     `mcp`, `memory`, `permissions`, `runtime`, `session`, `skills`, `worktree`.
@@ -54,63 +54,63 @@ re-checking invariants by hand:
     `cli_ops`, or `main`.
   - Internal cross-dependencies exist *within* the cluster (e.g., `agent` <->
     `auth` / `hooks` / `permissions` / `memory`), so extracting the cluster as
-    one `envoy-agent` library crate avoids fighting internal cycles while
+    one `jade-agent` library crate avoids fighting internal cycles while
     immediately enforcing the `agent -> tui` boundary via Cargo.
-  - `envoy-cli` keeps only: `main.rs`, `cli_args.rs`, `cli_ops.rs`,
+  - `jade-cli` keeps only: `main.rs`, `cli_args.rs`, `cli_ops.rs`,
     `cli_tests.rs`, `headless/`, and `tui/`.
-  - `ratatui` and `unicode-width` stay in `envoy-cli` only; `reqwest`,
-    `tree-sitter`, `sha2`, `similar`, etc. move to `envoy-agent`.
+  - `ratatui` and `unicode-width` stay in `jade-cli` only; `reqwest`,
+    `tree-sitter`, `sha2`, `similar`, etc. move to `jade-agent`.
 
 ### 3. Redline files near the 700-line hard limit (non-test, >= 600 lines)
-- `crates/envoy-cli/src/tui/mod.rs` — 681 lines
-- `crates/envoy-cli/src/permissions/shell.rs` — 667 lines
-- `crates/envoy-cli/src/tui/markdown.rs` — 662 lines
-- `crates/envoy-cli/src/agent/loop.rs` — 648 lines
-- `crates/envoy-cli/src/auth/routing.rs` — 643 lines
-- `crates/envoy-service/src/client.rs` — 640 lines
-- `crates/envoy-cli/src/permissions/rules.rs` — 634 lines
-- `crates/envoy-core/src/job.rs` — 630 lines
-- `crates/envoy-cli/src/auth/mod.rs` — 629 lines
-- `crates/envoy-cli/src/tui/view/modals.rs` — 628 lines
-- `crates/envoy-cli/src/agent/context/catalog.rs` — 627 lines
-- `crates/envoy-cli/src/hooks/exec.rs` — 603 lines
+- `crates/jade-cli/src/tui/mod.rs` — 681 lines
+- `crates/jade-cli/src/permissions/shell.rs` — 667 lines
+- `crates/jade-cli/src/tui/markdown.rs` — 662 lines
+- `crates/jade-cli/src/agent/loop.rs` — 648 lines
+- `crates/jade-cli/src/auth/routing.rs` — 643 lines
+- `crates/jade-service/src/client.rs` — 640 lines
+- `crates/jade-cli/src/permissions/rules.rs` — 634 lines
+- `crates/jade-core/src/job.rs` — 630 lines
+- `crates/jade-cli/src/auth/mod.rs` — 629 lines
+- `crates/jade-cli/src/tui/view/modals.rs` — 628 lines
+- `crates/jade-cli/src/agent/context/catalog.rs` — 627 lines
+- `crates/jade-cli/src/hooks/exec.rs` — 603 lines
 
 ## Progress
 
 ### Phase 0: Quick hygiene (done)
-- [x] Remove legacy `crates/envoy-cli/src/llm.rs` shim and switch remaining 4
+- [x] Remove legacy `crates/jade-cli/src/llm.rs` shim and switch remaining 4
       call sites to `crate::agent`.
 - [x] Mark `docs/plans/modularize-agent-and-console.md` as `complete` and
       clarify root `ARCHITECTURE.md` vs `docs/architecture.md`.
 
 ### Phase 1: CI guardrails (clippy + fmt + macOS) — done
-- [x] Fix `clippy::never_loop` errors and warnings in `envoy-core` and
-      `envoy-service`.
+- [x] Fix `clippy::never_loop` errors and warnings in `jade-core` and
+      `jade-service`.
 - [x] Run `cargo clippy --workspace --all-targets -- -D warnings` and fix
-      remaining lints in `envoy-cli`.
+      remaining lints in `jade-cli`.
 - [x] Run `cargo fmt --all` and split `tui/tests_ux.rs` -> `tui/tests_ux_layout.rs`
       so formatting stays under the 700-line hard limit.
 - [x] Fix macOS-only test failures:
   - `welcome_shows_resumes_tag_and_n_starts_fresh_session`: truncate long
     workspace paths in `tui/view/welcome.rs` before the `  (resumes)` tag.
-  - `envoy-service/src/client.rs` `tmpdir`: add atomic sequence + pid to
+  - `jade-service/src/client.rs` `tmpdir`: add atomic sequence + pid to
     prevent parallel macOS tests colliding on 1µs `SystemTime` timestamps.
-  - `envoy-service/tests/{conduit_control,stress_server}.rs` `tmpdir`: use
+  - `jade-service/tests/{conduit_control,stress_server}.rs` `tmpdir`: use
     short `/tmp` paths so Unix socket paths stay under macOS `SUN_LEN` (104 bytes).
 - [x] Update `.github/workflows/ci.yml`:
   - add `cargo fmt --all -- --check`
   - add `cargo clippy --workspace --all-targets -- -D warnings`
   - add `macos-latest` matrix runner to test `seatbelt.rs` and Darwin paths.
 
-### Phase 2: Extract `crates/envoy-agent` — done
-- [x] Create `crates/envoy-agent/Cargo.toml` and add it to workspace `Cargo.toml`.
+### Phase 2: Extract `crates/jade-agent` — done
+- [x] Create `crates/jade-agent/Cargo.toml` and add it to workspace `Cargo.toml`.
 - [x] Move the 11 runtime/agent modules (`agent`, `auth`, `daemon`, `hooks`,
       `mcp`, `memory`, `permissions`, `runtime`, `session`, `skills`, `worktree`)
-      from `envoy-cli` into `envoy-agent/src/lib.rs` (mechanical move, no
+      from `jade-cli` into `jade-agent/src/lib.rs` (mechanical move, no
       behavior change; promoted only the 6 cross-crate items to `pub`).
-- [x] Update `envoy-cli` imports (`crate::...` -> `envoy_agent::...`) and prune
+- [x] Update `jade-cli` imports (`crate::...` -> `jade_agent::...`) and prune
       agent-only dependencies (`tree-sitter`, `tree-sitter-rust`, `sha2`, `libc`)
-      from `crates/envoy-cli/Cargo.toml`.
+      from `crates/jade-cli/Cargo.toml`.
 - [x] Update `AGENTS.md` and `docs/architecture.md` module map to reflect the
       5-crate layout.
 
@@ -137,8 +137,8 @@ re-checking invariants by hand:
   engineering work on benchmark runs.
 - **Root `ARCHITECTURE.md` preserved**: It is a cross-repo archive shared with
   `conduit` and `grain`; `docs/architecture.md` remains the live internal map
-  for `envoy`.
-- **Single `envoy-agent` crate first**: Do not try to split `agent`,
+  for `jade`.
+- **Single `jade-agent` crate first**: Do not try to split `agent`,
   `permissions`, `runtime`, `mcp`, and `skills` into five tiny crates up front;
   extracting the cohesive 11-module cluster gives 90% of the compile-time and
   boundary benefits with minimal churn.

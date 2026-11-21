@@ -9,7 +9,7 @@ Long coding sessions accumulate large tool outputs (`read`, `grep`, `exec`) that
 
 ## Decision
 
-Context compaction (`envoy-agent::agent::context`) runs in two stages governed by vendor-native harness budgets (`/budget`):
+Context compaction (`jade-agent::agent::context`) runs in two stages governed by vendor-native harness budgets (`/budget`):
 1. **Stage 1 (Prune):** Fold older tool outputs into compact placeholders while leaving recent tail turns completely untouched.
 2. **Stage 2 (Summary):** When still over budget, summarize the older conversation head across **atomic `assistant(tool_calls) + tool` boundaries**, keeping a recent tail verbatim and preserving the stable system-prompt prefix for prompt-cache hits.
 3. **Overflow fallback:** If a provider still rejects a prompt as too long, the loop calibrates the model's recorded cap (`model_caps.json`), runs one automatic compaction pass, and retries once.

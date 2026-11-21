@@ -4,17 +4,17 @@
 
 | 界面 | 形态 | 适合 |
 |---|---|---|
-| `envoy` CLI | 终端 | 日常操作、脚本、演示 |
-| `envoy`（裸命令） | 终端 TUI | 交互式会话、看任务、跟日志、取消 |
-| `envoy mcp serve` | stdio JSON-RPC | Claude/Cursor 等 MCP 客户端 |
+| `jade` CLI | 终端 | 日常操作、脚本、演示 |
+| `jade`（裸命令） | 终端 TUI | 交互式会话、看任务、跟日志、取消 |
+| `jade mcp serve` | stdio JSON-RPC | Claude/Cursor 等 MCP 客户端 |
 | Unix socket | 二进制协议 | 自己写前端时的底层接口 |
 
 下面按"单机 5 分钟 / 语义验证 / 多机"三段走，每段都给了预期输出。全程不需要联网。
 
 ```bash
 cargo build --release
-export ENVOY_DATA_DIR=/tmp/envoy-test     # 别污染 ~/.envoy
-B=target/release/envoy                     # 或 target/debug/envoy
+export JADE_DATA_DIR=/tmp/jade-test     # 别污染 ~/.jade
+B=target/release/jade                     # 或 target/debug/jade
 ```
 
 ---
@@ -22,7 +22,7 @@ B=target/release/envoy                     # 或 target/debug/envoy
 ## A. 单机 5 分钟
 
 ```bash
-$B daemon start          # => daemon started (.../envoy.sock)
+$B daemon start          # => daemon started (.../jade.sock)
 $B status                # => enabled/allow/max_jobs/daemon/jobs/protocol
 
 $B run "echo hello; echo err >&2; exit 3"
@@ -39,10 +39,10 @@ $B jobs
 $B logs N --follow        # 换个终端也行
 $B cancel N               # 另一个终端；logs 那边打印 [#N exit 137]
 
-$B write /tmp/envoy-test/x.txt "hello"
-$B read  /tmp/envoy-test/x.txt            # => hello，stderr 报 bytes/mode
-$B ls    /tmp/envoy-test
-$B copy  local /tmp/envoy-test/x.txt local /tmp/envoy-test/y.txt
+$B write /tmp/jade-test/x.txt "hello"
+$B read  /tmp/jade-test/x.txt            # => hello，stderr 报 bytes/mode
+$B ls    /tmp/jade-test
+$B copy  local /tmp/jade-test/x.txt local /tmp/jade-test/y.txt
 
 $B daemon stop
 ```
@@ -101,7 +101,7 @@ $B daemon stop && $B daemon start
 # 把 max_jobs 改成 1
 python3 - <<'EOF'
 import json,os
-p=os.path.join(os.environ["ENVOY_DATA_DIR"],"agent.json")
+p=os.path.join(os.environ["JADE_DATA_DIR"],"agent.json")
 c=json.load(open(p)); c["max_jobs"]=1; json.dump(c,open(p,"w"),indent=2)
 EOF
 $B submit "sleep 5" ; $B submit "echo second"
@@ -125,9 +125,9 @@ $B jobs | tail -1        # => done(127)，结果说明是 daemon 重启导致
 ### B4.5 单实例锁
 
 ```bash
-$B serve &            # 第一个实例拿到 <data-dir>/envoy.lock
+$B serve &            # 第一个实例拿到 <data-dir>/jade.lock
 sleep 1
-$B serve              # => Error: another envoy daemon already owns ... ; 第二个直接退出
+$B serve              # => Error: another jade daemon already owns ... ; 第二个直接退出
 $B daemon status      # => running
 ```
 
@@ -137,12 +137,12 @@ $B daemon status      # => running
 
 ```bash
 $B daemon stop
-curl --unix-socket /tmp/envoy-test/envoy.sock http://x/ 2>&1 | head -1
+curl --unix-socket /tmp/jade-test/jade.sock http://x/ 2>&1 | head -1
 # 不能直接裸 HTTP，仅用于确认 socket 存在；门禁本身用 MCP/远程测试
 ```
 
 本机 socket 调用恒放行（同用户本就能跑同样命令）；`enabled` 和 allowlist 只约束远程调用方。
-要验证拒绝路径见 H 段：目标机 `envoy disable` 后远程调用应返回 `refused: agent disabled ...`。
+要验证拒绝路径见 H 段：目标机 `jade disable` 后远程调用应返回 `refused: agent disabled ...`。
 
 ---
 
@@ -159,38 +159,38 @@ conduit join CODE                        # 第二台
 conduit run                              # 常驻
 
 # 两台都做：agent 守护进程 + 3 个空闲 accept 槽
-envoy serve
-# => envoy daemon listening on ~/.envoy/envoy.sock
+jade serve
+# => jade daemon listening on ~/.jade/jade.sock
 #    conduit: watching ~/.conduit/control.sock (3 accept slot(s))
 ```
 
 发现设备（任一台）：
 
 ```bash
-envoy devices
+jade devices
 # => ID / NAME / DNS / VIP / STATUS / AGENT / ME
 # => AGENT=yes 表示该机器当前通告了 service 16（可被调度）
-envoy status
+jade status
 # => conduit: connected (...), this device workstations (3fa9...)
 #    network:  direct · tun tun0 · 1 peer(s) · vip 100.64.0.1
-#    service:  envoy online=true listeners=3
+#    service:  jade online=true listeners=3
 ```
 
-目标机放行（用 `envoy devices` 里的 `device_id`）：
+目标机放行（用 `jade devices` 里的 `device_id`）：
 
 ```bash
-envoy enable
-envoy allow 91ff0e2c88aabb11
+jade enable
+jade allow 91ff0e2c88aabb11
 ```
 
 发起方：
 
 ```bash
-envoy --on laptop run "uname -a"
-envoy --on 100.64.0.2 jobs          # 也接受 virtual ip
-envoy --on laptop submit "cargo build --release"
-envoy --on laptop logs 3 --follow
-envoy --on laptop cancel 3
+jade --on laptop run "uname -a"
+jade --on 100.64.0.2 jobs          # 也接受 virtual ip
+jade --on laptop submit "cargo build --release"
+jade --on laptop logs 3 --follow
+jade --on laptop cancel 3
 ```
 
 预期失败路径（都应该是清晰报错，而不是裸 EOF）：
@@ -198,23 +198,23 @@ envoy --on laptop cancel 3
 | 场景 | 预期 |
 |---|---|
 | `conduit run` 没起 | `connecting to conduit at .../control.sock (is conduit run up?)` |
-| 目标机 `envoy disable` | `... refused: agent disabled on this device (envoy enable)` |
+| 目标机 `jade disable` | `... refused: agent disabled on this device (jade enable)` |
 | 目标机没 allow 你 | `... refused: caller <device_id> is not allowlisted here` |
 | 名字写错 | `... refused: device not found: X [device_not_found, HTTP 404]` |
 | 两台设备同名 | `... refused: ambiguous device name 'X' ... [ambiguous_target, HTTP 409]` |
 | 目标机离线 | `... refused: ... [peer_offline, HTTP 503]` |
-| 目标机没跑 `envoy serve` | `... refused: <name> does not advertise service 16 [service_not_registered, HTTP 503]`（约 1–3 秒内生效，依赖 discovery） |
+| 目标机没跑 `jade serve` | `... refused: <name> does not advertise service 16 [service_not_registered, HTTP 503]`（约 1–3 秒内生效，依赖 discovery） |
 
 TUI 多机切换（conduit 已连接时）：
 
 ```bash
-envoy ui
+jade ui
 # 状态行在目标不是 local 时显示机器名；ctrl+p → "Switch to laptop (…)" 回车即切目标
 # 切换后任务发往新目标；`/sidebar` 里的 job 列表跟着换
 ```
 
 > conduit 的 `/v1/services/{id}/open|accept` 与 `/v1/events` 已落地，本清单已在
-> 本地 coord + 两台设备上真机跑通。`crates/envoy-service/tests/conduit_control.rs`
+> 本地 coord + 两台设备上真机跑通。`crates/jade-service/tests/conduit_control.rs`
 > 另外用 mock 覆盖出站整链路、accept 交接与 allowlist、404/409 透传、
 > status/devices 解析。
 
@@ -226,5 +226,5 @@ envoy ui
 - **没有路径围栏**：相对路径落目标机 `$HOME`，绝对路径就是整机可读；"允许调用 ≈ 该用户的全部文件权限"。
 - **只有一个默认并发组**：`--group` 可以分组，但每个组的并发上限目前都落到 `max_jobs`。
 - **L3 直连不做**：契约已把 agent 通道收敛到 `control.sock` 的 WS 桥；TUN 只给用户自己的工具。
-- **`envoy/bridge/` 已弃用**：它链接 conduit crate 并起第二个引擎，与 `conduit run` 冲突。
+- **`jade/bridge/` 已弃用**：它链接 conduit crate 并起第二个引擎，与 `conduit run` 冲突。
 - **TUI 的机器列表来自 `/v1/devices` + `/v1/events`**；conduit 没起时只显示 `local`。

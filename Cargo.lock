@@ -403,91 +403,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
-name = "envoy-agent"
-version = "0.4.1"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "envoy-core",
- "envoy-proto",
- "envoy-service",
- "futures",
- "getrandom 0.3.4",
- "libc",
- "postcard",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "similar",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "envoy-cli"
-version = "0.4.1"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "clap",
- "envoy-agent",
- "envoy-core",
- "envoy-proto",
- "envoy-service",
- "getrandom 0.3.4",
- "ratatui",
- "serde",
- "serde_json",
- "similar",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "unicode-width 0.2.0",
-]
-
-[[package]]
-name = "envoy-core"
-version = "0.4.1"
-dependencies = [
- "anyhow",
- "envoy-proto",
- "globset",
- "ignore",
- "libc",
- "regex",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "envoy-proto"
-version = "0.4.1"
-dependencies = [
- "anyhow",
- "postcard",
- "serde",
- "tokio",
-]
-
-[[package]]
-name = "envoy-service"
-version = "0.4.1"
-dependencies = [
- "anyhow",
- "envoy-core",
- "envoy-proto",
- "futures",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "tracing",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -963,6 +878,91 @@ name = "itoa"
 version = "1.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bd1574e617a9a6c1f8f8181bd7e841e1f20e4277607ef28945765188d6284d4"
+
+[[package]]
+name = "jade-agent"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "futures",
+ "getrandom 0.3.4",
+ "jade-core",
+ "jade-proto",
+ "jade-service",
+ "libc",
+ "postcard",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "similar",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "jade-cli"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "getrandom 0.3.4",
+ "jade-agent",
+ "jade-core",
+ "jade-proto",
+ "jade-service",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "similar",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "jade-core"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "globset",
+ "ignore",
+ "jade-proto",
+ "libc",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "jade-proto"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "postcard",
+ "serde",
+ "tokio",
+]
+
+[[package]]
+name = "jade-service"
+version = "0.4.1"
+dependencies = [
+ "anyhow",
+ "futures",
+ "jade-core",
+ "jade-proto",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+]
 
 [[package]]
 name = "js-sys"

@@ -34,7 +34,7 @@ context compaction and permissions behind their own modules.
 
 ## Next
 
-Complete. Follow-on structural work (extracting `envoy-agent`, hardening CI,
+Complete. Follow-on structural work (extracting `jade-agent`, hardening CI,
 and trimming files near the 700-line cap) is tracked in
 `docs/plans/extract-agent-crate-and-harden-ci.md`.
 

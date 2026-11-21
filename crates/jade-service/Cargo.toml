@@ -1,0 +1,18 @@
+[package]
+name = "jade-service"
+description = "Transport-agnostic wire server and client for the standalone Jade"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+jade-core = { path = "../jade-core" }
+jade-proto = { path = "../jade-proto" }
+anyhow.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-tungstenite = "0.26"
+tracing.workspace = true

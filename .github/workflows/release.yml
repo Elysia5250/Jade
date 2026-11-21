@@ -1,7 +1,7 @@
 name: release
 
 # Push a tag to publish: the installer resolves the latest release and expects
-# assets named envoy-v<version>-<target>.tar.gz (+ .sha256).
+# assets named jade-v<version>-<target>.tar.gz (+ .sha256).
 on:
   push:
     tags: ["v*"]
@@ -47,15 +47,15 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: Build
-        run: cargo build --release --locked -p envoy-cli
+        run: cargo build --release --locked -p jade-cli
 
       - name: Package
         shell: bash
         run: |
           set -euo pipefail
-          name="envoy-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          name="jade-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir -p "stage/$name"
-          cp target/release/envoy "stage/$name/envoy"
+          cp target/release/jade "stage/$name/jade"
           if [ -f LICENSE ]; then
             cp LICENSE "stage/$name/LICENSE"
           fi
@@ -70,6 +70,6 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            envoy-*.tar.gz
-            envoy-*.tar.gz.sha256
+            jade-*.tar.gz
+            jade-*.tar.gz.sha256
           fail_on_unmatched_files: true
