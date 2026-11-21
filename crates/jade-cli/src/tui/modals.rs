@@ -96,6 +96,7 @@ pub(crate) struct ModelsModal {
 pub(crate) struct SessionsModal {
     pub(crate) sessions: Vec<SessionSummary>,
     pub(crate) selected: usize,
+    pub(crate) confirm_delete: Option<String>,
 }
 
 pub(crate) struct RewindModal {

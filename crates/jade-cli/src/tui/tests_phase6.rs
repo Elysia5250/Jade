@@ -351,6 +351,7 @@ async fn p6_2e_bound_port_short_modal_screens_and_mouse_actions() {
         Modal::Sessions(SessionsModal {
             sessions: Vec::new(),
             selected: 0,
+            confirm_delete: None,
         }),
         Modal::Rewind(RewindModal {
             checkpoints: Vec::new(),

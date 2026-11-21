@@ -75,8 +75,12 @@ pub(crate) struct UiState {
     /// Unsent draft stashed while walking the send history.
     pub(crate) history_draft: Option<String>,
     pub(crate) menu_selected: usize,
+    pub(crate) cd_navigated: bool,
+    pub(crate) cd_dismissed: bool,
     pub(crate) at_dismissed_at: Option<usize>,
     pub(crate) modal: Option<Modal>,
+    pub(crate) modal_rect: Option<Rect>,
+    pub(crate) modal_cursor: usize,
     pub(crate) theme: usize,
     pub(crate) leader_at: Option<Instant>,
     /// Set by the first `Esc` of a double-`Esc` interrupt.
@@ -85,6 +89,8 @@ pub(crate) struct UiState {
     pub(crate) welcome: Option<Welcome>,
     pub(crate) inspector: InspectorState,
     pub(crate) hit_regions: Vec<HitRegion>,
+    pub(crate) hover_target: Option<HitTarget>,
+    pub(crate) hover_rect: Option<Rect>,
     pub(crate) transcript_area: Rect,
     pub(crate) mouse_capture: bool,
     pub(crate) selection: Option<MouseSelection>,

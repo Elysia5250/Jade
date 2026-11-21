@@ -1,12 +1,16 @@
 //! Jade Hub: always-returnable mission control for sessions, workspaces, and settings.
 use super::*;
+use crate::tui::line_edit::{self, EditOutcome};
 
 mod controls;
 mod folder;
 mod mcp;
 mod memory;
+mod panels;
 mod sessions;
 mod skills;
+
+pub(in crate::tui) use folder::build_path_browser_entries;
 
 impl App {
     pub(in crate::tui) fn open_welcome(&mut self) {
@@ -36,14 +40,19 @@ impl App {
             selected_workspace: 0,
             selected_control: 0,
             search: String::new(),
+            search_cursor: 0,
             searching: false,
             confirm_delete: None,
             rename_target: None,
+            browse_dir: std::fs::canonicalize(&self.session.current.cwd)
+                .unwrap_or_else(|_| self.session.current.cwd.clone()),
             path: String::new(),
+            path_cursor: 0,
             path_selected: 0,
             error: None,
             folder_parent: None,
             draft: String::new(),
+            draft_cursor: 0,
             list_selected: 0,
             skills: Vec::new(),
             notes: Vec::new(),
@@ -68,14 +77,14 @@ impl App {
         }
         if let Some(welcome) = self.ui.welcome.as_mut() {
             if welcome.mode.is_naming() {
-                welcome.draft.push_str(&clean);
+                line_edit::insert_str(&mut welcome.draft, &mut welcome.draft_cursor, &clean);
                 welcome.error = None;
             } else if welcome.mode.is_path_input() {
-                welcome.path.push_str(&clean);
+                line_edit::insert_str(&mut welcome.path, &mut welcome.path_cursor, &clean);
                 welcome.path_selected = 0;
                 welcome.error = None;
             } else if welcome.searching {
-                welcome.search.push_str(&clean);
+                line_edit::insert_str(&mut welcome.search, &mut welcome.search_cursor, &clean);
                 sessions::clamp_hub_selection(welcome);
             }
         }
@@ -105,172 +114,6 @@ impl App {
         }
     }
 
-    pub(super) fn enter_workspace_path(&mut self, raw: &str) -> Action {
-        let candidate = resolve_cd_path(&self.session.current.cwd, raw.trim());
-        let path = std::fs::canonicalize(&candidate).unwrap_or(candidate);
-        if !path.is_dir() {
-            if let Some(welcome) = self.ui.welcome.as_mut() {
-                welcome.error = Some(format!("not a directory: {}", path.display()));
-            }
-            return Action::None;
-        }
-        self.activate_workspace(path);
-        Action::None
-    }
-
-    fn handle_welcome_naming(&mut self, key: KeyEvent) -> Action {
-        match key.code {
-            KeyCode::Esc => {
-                if let Some(welcome) = self.ui.welcome.as_mut() {
-                    welcome.mode = match welcome.mode {
-                        WelcomeMode::NewFolderName => WelcomeMode::NewFolderPickParent,
-                        WelcomeMode::SkillsNew => WelcomeMode::Skills,
-                        WelcomeMode::MemoryNew => WelcomeMode::Memory,
-                        _ => WelcomeMode::Home,
-                    };
-                    welcome.draft.clear();
-                    welcome.rename_target = None;
-                    welcome.error = None;
-                }
-                Action::None
-            }
-            KeyCode::Backspace => {
-                if let Some(welcome) = self.ui.welcome.as_mut() {
-                    welcome.draft.pop();
-                    welcome.error = None;
-                }
-                Action::None
-            }
-            KeyCode::Enter => self.submit_welcome_name(),
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(welcome) = self.ui.welcome.as_mut() {
-                    welcome.draft.push(c);
-                    welcome.error = None;
-                }
-                Action::None
-            }
-            _ => Action::None,
-        }
-    }
-
-    fn submit_welcome_name(&mut self) -> Action {
-        let Some(welcome) = self.ui.welcome.as_ref() else {
-            return Action::None;
-        };
-        let mode = welcome.mode;
-        let draft = welcome.draft.clone();
-        let parent = welcome.folder_parent.clone();
-        let rename_id = welcome.rename_target.clone();
-        match mode {
-            WelcomeMode::NewFolderName => self.submit_new_folder(parent, &draft),
-            WelcomeMode::RenameSession => self.submit_rename_session(rename_id, &draft),
-            WelcomeMode::SkillsNew => self.submit_new_skill(&draft),
-            WelcomeMode::MemoryNew => self.submit_new_memory(&draft),
-            _ => Action::None,
-        }
-    }
-
-    fn submit_new_folder(&mut self, parent: Option<PathBuf>, draft: &str) -> Action {
-        let Some(parent) = parent else {
-            if let Some(w) = self.ui.welcome.as_mut() {
-                w.error = Some("not a directory".into());
-            }
-            return Action::None;
-        };
-        match folder::create_workspace_dir(&parent, draft) {
-            Ok(path) => {
-                self.activate_workspace_with_mode(path, false);
-                Action::None
-            }
-            Err(err) => {
-                if let Some(w) = self.ui.welcome.as_mut() {
-                    w.error = Some(err);
-                }
-                Action::None
-            }
-        }
-    }
-
-    fn submit_rename_session(&mut self, id: Option<String>, draft: &str) -> Action {
-        let Some(id) = id else {
-            return Action::None;
-        };
-        match rename_session(&self.data_dir, &id, draft) {
-            Ok(()) => {
-                if self.session.current.id == id {
-                    self.session.current.title = draft.trim().chars().take(64).collect();
-                }
-                if let Some(w) = self.ui.welcome.as_mut() {
-                    w.mode = WelcomeMode::Home;
-                    w.draft.clear();
-                    w.rename_target = None;
-                    w.error = None;
-                }
-                self.reload_hub_lists();
-                self.set_toast("session renamed", false);
-            }
-            Err(err) => {
-                if let Some(w) = self.ui.welcome.as_mut() {
-                    w.error = Some(format!("{err:#}"));
-                }
-            }
-        }
-        Action::None
-    }
-
-    fn submit_new_skill(&mut self, draft: &str) -> Action {
-        match jade_agent::skills::prefs::create_user_skill(&self.data_dir, draft) {
-            Ok(path) => {
-                let name = draft.trim().to_string();
-                if let Some(w) = self.ui.welcome.as_mut() {
-                    w.mode = WelcomeMode::Skills;
-                    w.draft.clear();
-                    w.error = None;
-                }
-                self.reload_welcome_skills();
-                if let Some(w) = self.ui.welcome.as_mut() {
-                    if let Some(idx) = w.skills.iter().position(|skill| skill.name == name) {
-                        w.list_selected = idx;
-                    }
-                }
-                Action::EditFile(path)
-            }
-            Err(err) => {
-                if let Some(w) = self.ui.welcome.as_mut() {
-                    w.error = Some(err);
-                }
-                Action::None
-            }
-        }
-    }
-
-    fn submit_new_memory(&mut self, draft: &str) -> Action {
-        match jade_agent::memory::create(&self.data_dir, &self.session.current.cwd, draft) {
-            Ok(note) => {
-                let id = note.id.clone();
-                let path = note.path.clone();
-                if let Some(w) = self.ui.welcome.as_mut() {
-                    w.mode = WelcomeMode::Memory;
-                    w.draft.clear();
-                    w.error = None;
-                }
-                self.reload_welcome_notes();
-                if let Some(w) = self.ui.welcome.as_mut() {
-                    if let Some(idx) = w.notes.iter().position(|item| item.id == id) {
-                        w.list_selected = idx;
-                    }
-                }
-                Action::EditFile(path)
-            }
-            Err(err) => {
-                if let Some(w) = self.ui.welcome.as_mut() {
-                    w.error = Some(err);
-                }
-                Action::None
-            }
-        }
-    }
-
     fn handle_hub_home(&mut self, key: KeyEvent) -> Action {
         if self.ui.welcome.as_ref().is_some_and(|w| w.searching) {
             return self.handle_hub_search_key(key);
@@ -283,6 +126,7 @@ impl App {
                         handled = true;
                     } else if !w.search.is_empty() {
                         w.search.clear();
+                        w.search_cursor = 0;
                         sessions::clamp_hub_selection(w);
                         handled = true;
                     }
@@ -347,20 +191,19 @@ impl App {
                 KeyCode::Esc => {
                     w.searching = false;
                     w.search.clear();
+                    w.search_cursor = 0;
                     sessions::clamp_hub_selection(w);
                 }
                 KeyCode::Enter => {
                     w.searching = false;
                 }
-                KeyCode::Backspace => {
-                    w.search.pop();
-                    sessions::clamp_hub_selection(w);
+                _ => {
+                    if line_edit::handle_key(&mut w.search, &mut w.search_cursor, key)
+                        == EditOutcome::Changed
+                    {
+                        sessions::clamp_hub_selection(w);
+                    }
                 }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    w.search.push(c);
-                    sessions::clamp_hub_selection(w);
-                }
-                _ => {}
             }
         }
         Action::None
@@ -379,8 +222,8 @@ impl App {
             KeyCode::Char('n') => self.start_new_session_from_hub(),
             KeyCode::Char('/') => {
                 if let Some(w) = self.ui.welcome.as_mut() {
-                    w.tab = HubTab::Sessions;
                     w.searching = true;
+                    w.search_cursor = w.search.chars().count();
                     w.confirm_delete = None;
                     w.error = None;
                 }
@@ -443,26 +286,35 @@ impl App {
     }
 
     pub(in crate::tui) fn scroll_hub(&mut self, delta: isize) {
-        let filtered_len = self.filtered_hub_sessions().len();
+        let filtered_sessions = self.filtered_hub_sessions().len();
+        let filtered_workspaces = self.filtered_hub_workspaces().len();
         let Some(w) = self.ui.welcome.as_mut() else {
             return;
         };
         w.confirm_delete = None;
         w.error = None;
-        match w.focus {
+        let moved_left = match w.focus {
             HubFocus::Controls => {
                 let len = HubControl::ALL.len();
                 w.selected_control = step_index(w.selected_control, delta, len);
+                false
             }
-            HubFocus::Left => match w.tab {
-                HubTab::Sessions => {
-                    w.selected_session = step_index(w.selected_session, delta, filtered_len);
+            HubFocus::Left => {
+                match w.tab {
+                    HubTab::Sessions => {
+                        w.selected_session =
+                            step_index(w.selected_session, delta, filtered_sessions);
+                    }
+                    HubTab::Workspaces => {
+                        w.selected_workspace =
+                            step_index(w.selected_workspace, delta, filtered_workspaces);
+                    }
                 }
-                HubTab::Workspaces => {
-                    let len = w.workspaces.len();
-                    w.selected_workspace = step_index(w.selected_workspace, delta, len);
-                }
-            },
+                true
+            }
+        };
+        if moved_left {
+            self.recount_welcome();
         }
     }
 
@@ -474,6 +326,7 @@ impl App {
             w.confirm_delete = None;
             w.error = None;
         }
+        self.recount_welcome();
     }
 
     pub(in crate::tui) fn hub_click_session(&mut self, filtered_idx: usize) -> Option<Action> {
@@ -491,6 +344,8 @@ impl App {
         }
         if already {
             self.activate_selected_session();
+        } else {
+            self.recount_welcome();
         }
         None
     }
@@ -507,6 +362,8 @@ impl App {
         }
         if already {
             self.activate_selected_workspace(true);
+        } else {
+            self.recount_welcome();
         }
     }
 
@@ -522,8 +379,13 @@ impl App {
     }
 
     pub(in crate::tui) fn hub_open_path_panel(&mut self) {
+        let base = self.selected_hub_cwd();
+        let browse = std::fs::canonicalize(&base).unwrap_or(base);
         if let Some(w) = self.ui.welcome.as_mut() {
             w.mode = WelcomeMode::OpenPath;
+            w.browse_dir = browse;
+            w.path.clear();
+            w.path_cursor = 0;
             w.path_selected = 0;
             w.confirm_delete = None;
             w.error = None;
@@ -531,9 +393,13 @@ impl App {
     }
 
     pub(in crate::tui) fn hub_open_new_folder_panel(&mut self) {
+        let base = self.selected_hub_cwd();
+        let browse = std::fs::canonicalize(&base).unwrap_or(base);
         if let Some(w) = self.ui.welcome.as_mut() {
             w.mode = WelcomeMode::NewFolderPickParent;
+            w.browse_dir = browse;
             w.path.clear();
+            w.path_cursor = 0;
             w.path_selected = 0;
             w.confirm_delete = None;
             w.error = None;
@@ -551,6 +417,7 @@ impl App {
                 other => other,
             };
             welcome.draft.clear();
+            welcome.draft_cursor = 0;
             welcome.error = None;
         }
     }
@@ -559,6 +426,8 @@ impl App {
         if let Some(welcome) = self.ui.welcome.as_mut() {
             welcome.mode = WelcomeMode::Home;
             welcome.draft.clear();
+            welcome.draft_cursor = 0;
+            welcome.confirm_delete = None;
             welcome.error = None;
         }
         self.recount_welcome();

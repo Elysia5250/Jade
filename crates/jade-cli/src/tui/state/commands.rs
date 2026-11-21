@@ -542,6 +542,9 @@ impl App {
     }
 
     pub(in crate::tui) fn cd_completions(&self) -> Vec<(String, String)> {
+        if self.ui.cd_dismissed {
+            return Vec::new();
+        }
         let Some(raw) = self.cd_query() else {
             return Vec::new();
         };

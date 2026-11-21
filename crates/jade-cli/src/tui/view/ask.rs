@@ -26,10 +26,19 @@ pub(super) fn draw_ask(frame: &mut Frame, app: &mut App, theme: &Theme, area: Re
     }
     frame.render_widget(Clear, area);
 
+    let n = ask.options.len().min(9);
+    let num_hint = if n > 1 {
+        format!("/1-{n}")
+    } else {
+        String::new()
+    };
     let title = match ask.paused_left {
-        Some(left) => format!(" ask - {}s paused - up/down Enter ", left.as_secs()),
+        Some(left) => format!(
+            " ask - {}s paused - ↑↓/jk{num_hint} Enter · Ctrl+C cancel ",
+            left.as_secs()
+        ),
         None => format!(
-            " ask - {}s - up/down Enter ",
+            " ask - {}s - ↑↓/jk{num_hint} Enter · Ctrl+C cancel ",
             ask.deadline
                 .saturating_duration_since(Instant::now())
                 .as_secs()
@@ -112,7 +121,7 @@ pub(super) fn draw_ask(frame: &mut Frame, app: &mut App, theme: &Theme, area: Re
         } else {
             ""
         };
-        let label = format!("{marker}{}{rec}", option.label);
+        let label = format!("{marker}{}. {}{rec}", index + 1, option.label);
         lines.push(Line::styled(
             truncate_width(&label, inner.width as usize),
             style,

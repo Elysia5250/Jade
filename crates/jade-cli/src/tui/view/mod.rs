@@ -7,6 +7,7 @@ mod composer_bar;
 mod delegate;
 mod editor;
 mod inspector;
+mod login_modal;
 mod menus;
 mod modals;
 mod queued;
@@ -35,6 +36,7 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     let theme = app.theme();
     let area = frame.area();
     app.ui.hit_regions.clear();
+    app.ui.modal_rect = None;
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -46,6 +48,7 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
         if app.ui.modal.is_some() {
             draw_modal(frame, app, &theme, area);
         }
+        apply_hover_highlight(frame.buffer_mut(), app.ui.hover_rect, &theme);
         return;
     }
 
@@ -220,11 +223,38 @@ pub(super) fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     let buf = frame.buffer_mut();
+    apply_hover_highlight(buf, app.ui.hover_rect, &theme);
     apply_selection_highlight(buf, app.ui.selection.as_ref(), theme.selection);
     if app.ui.selection.as_ref().is_some_and(|sel| sel.active) {
         snapshot_screen_lines(buf, &mut app.ui.screen_lines);
     } else {
         app.ui.screen_lines.clear();
+    }
+}
+
+fn apply_hover_highlight(
+    buf: &mut ratatui::buffer::Buffer,
+    hover_rect: Option<Rect>,
+    theme: &Theme,
+) {
+    let Some(rect) = hover_rect else {
+        return;
+    };
+    let area = buf.area;
+    let y0 = rect.y.max(area.y);
+    let y1 = rect.y.saturating_add(rect.height).min(area.y + area.height);
+    let x0 = rect.x.max(area.x);
+    let x1 = rect.x.saturating_add(rect.width).min(area.x + area.width);
+    for row in y0..y1 {
+        for col in x0..x1 {
+            let cell = &mut buf[(col, row)];
+            if cell.bg != theme.selection && cell.bg != theme.accent {
+                cell.set_bg(theme.hover);
+                if cell.fg == theme.dim {
+                    cell.set_fg(theme.text);
+                }
+            }
+        }
     }
 }
 

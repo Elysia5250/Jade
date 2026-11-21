@@ -12,6 +12,7 @@ pub(crate) struct Theme {
     pub(crate) bad: Color,
     pub(crate) border: Color,
     pub(crate) selection: Color,
+    pub(crate) hover: Color,
     pub(crate) surface: Color,
     /// Full-screen background. Explicit so a transparent terminal or a
     /// wallpaper cannot leak through as random colour bands.
@@ -45,6 +46,7 @@ pub(crate) const THEMES: [(&str, Theme); 3] = [
             bad: Color::Rgb(0xf0, 0x71, 0x78),
             border: Color::Rgb(0x2c, 0x35, 0x47),
             selection: Color::Rgb(0x1f, 0x28, 0x38),
+            hover: Color::Rgb(0x19, 0x21, 0x30),
             surface: Color::Rgb(0x17, 0x1d, 0x29),
             bg: Color::Rgb(0x0d, 0x10, 0x15),
             panel: Color::Rgb(0x13, 0x18, 0x22),
@@ -74,6 +76,7 @@ pub(crate) const THEMES: [(&str, Theme); 3] = [
             bad: Color::Rgb(0xf7, 0x76, 0x8e),
             border: Color::Rgb(0x3b, 0x42, 0x61),
             selection: Color::Rgb(0x28, 0x34, 0x57),
+            hover: Color::Rgb(0x23, 0x2a, 0x45),
             surface: Color::Rgb(0x1e, 0x20, 0x30),
             bg: Color::Rgb(0x1a, 0x1b, 0x26),
             panel: Color::Rgb(0x1f, 0x23, 0x35),
@@ -103,6 +106,7 @@ pub(crate) const THEMES: [(&str, Theme); 3] = [
             bad: Color::Rgb(0xb3, 0x26, 0x1e),
             border: Color::Rgb(0xb5, 0xb8, 0xc2),
             selection: Color::Rgb(0xe4, 0xe7, 0xf2),
+            hover: Color::Rgb(0xec, 0xef, 0xf7),
             surface: Color::Rgb(0xf3, 0xf4, 0xf7),
             bg: Color::Rgb(0xff, 0xff, 0xff),
             panel: Color::Rgb(0xf5, 0xf6, 0xf9),

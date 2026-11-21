@@ -98,7 +98,7 @@ fn return_to_hub_via_home_and_esc_returns_without_resetting_session() {
 #[test]
 fn live_daemon_sessions_pin_to_top_and_search_rename_delete_work() {
     let dir = tmpdir("multisess");
-    let s1 = save_dummy_session(&dir, &dir, "older idle");
+    let s1 = save_dummy_session(&dir, &dir, "alpha-idle");
     let s2 = save_dummy_session(&dir, &dir, "background job");
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
     app.open_welcome();
@@ -123,7 +123,7 @@ fn live_daemon_sessions_pin_to_top_and_search_rename_delete_work() {
 
     // Search filters to s1
     app.handle_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-    for ch in "older".chars() {
+    for ch in "alpha".chars() {
         app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
     }
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -339,6 +339,10 @@ fn memory_create_edit_toggle_and_delete() {
     assert_eq!(app.ui.welcome.as_ref().unwrap().mode, WelcomeMode::Memory);
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(!app.ui.welcome.as_ref().unwrap().notes[0].enabled);
+    // Two-step delete confirmation for memory notes
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+    assert_eq!(app.ui.welcome.as_ref().unwrap().notes.len(), 1);
+    assert!(app.ui.welcome.as_ref().unwrap().confirm_delete.is_some());
     app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
     assert!(app.ui.welcome.as_ref().unwrap().notes.is_empty());
     assert!(!path.exists());

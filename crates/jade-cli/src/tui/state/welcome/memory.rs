@@ -3,7 +3,8 @@ use super::super::*;
 
 impl App {
     pub(super) fn reload_welcome_notes(&mut self) {
-        let notes = jade_agent::memory::list_for(&self.data_dir, &self.session.current.cwd);
+        let cwd = self.selected_hub_cwd();
+        let notes = jade_agent::memory::list_for(&self.data_dir, &cwd);
         if let Some(welcome) = self.ui.welcome.as_mut() {
             let len = notes.len();
             if len == 0 {
@@ -12,6 +13,7 @@ impl App {
                 welcome.list_selected = len - 1;
             }
             welcome.memory_count = len;
+            welcome.memory_enabled_count = notes.iter().filter(|n| n.enabled).count();
             welcome.notes = notes;
         }
     }
@@ -20,22 +22,39 @@ impl App {
         let len = self.ui.welcome.as_ref().map(|w| w.notes.len()).unwrap_or(0);
         match key.code {
             KeyCode::Esc => {
+                if let Some(w) = self.ui.welcome.as_mut() {
+                    if w.confirm_delete.take().is_some() {
+                        return Action::None;
+                    }
+                }
                 self.leave_welcome_panel();
                 Action::None
             }
             KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(w) = self.ui.welcome.as_mut() {
+                    w.confirm_delete = None;
+                }
                 self.bump_welcome_list(-1, len);
                 Action::None
             }
             KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(w) = self.ui.welcome.as_mut() {
+                    w.confirm_delete = None;
+                }
                 self.bump_welcome_list(1, len);
                 Action::None
             }
             KeyCode::Char('n') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(w) = self.ui.welcome.as_mut() {
+                    w.confirm_delete = None;
+                }
                 self.begin_welcome_name();
                 Action::None
             }
             KeyCode::Char('e') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(w) = self.ui.welcome.as_mut() {
+                    w.confirm_delete = None;
+                }
                 self.edit_selected_note()
             }
             KeyCode::Char('d') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -43,6 +62,9 @@ impl App {
                 Action::None
             }
             KeyCode::Enter => {
+                if let Some(w) = self.ui.welcome.as_mut() {
+                    w.confirm_delete = None;
+                }
                 self.toggle_selected_note();
                 Action::None
             }
@@ -63,7 +85,7 @@ impl App {
         }
     }
 
-    fn toggle_selected_note(&mut self) {
+    pub(super) fn toggle_selected_note(&mut self) {
         let Some(note) = self
             .ui
             .welcome
@@ -102,13 +124,28 @@ impl App {
         else {
             return;
         };
+        let armed = self
+            .ui
+            .welcome
+            .as_ref()
+            .and_then(|w| w.confirm_delete.as_deref())
+            == Some(note.id.as_str());
+        if !armed {
+            if let Some(welcome) = self.ui.welcome.as_mut() {
+                welcome.confirm_delete = Some(note.id);
+                welcome.error = None;
+            }
+            return;
+        }
         if let Err(err) = jade_agent::memory::delete(&note) {
             if let Some(welcome) = self.ui.welcome.as_mut() {
                 welcome.error = Some(err);
+                welcome.confirm_delete = None;
             }
             return;
         }
         if let Some(welcome) = self.ui.welcome.as_mut() {
+            welcome.confirm_delete = None;
             welcome.error = None;
         }
         self.reload_welcome_notes();

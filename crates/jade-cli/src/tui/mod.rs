@@ -22,6 +22,7 @@ mod edit_file;
 mod git_info;
 mod highlight;
 mod inputs;
+mod line_edit;
 mod links;
 mod markdown;
 mod markdown_table;
@@ -364,6 +365,7 @@ pub(crate) struct PendingAsk {
     id: u64,
     question: String,
     options: Vec<AskOption>,
+    #[allow(dead_code)]
     recommended: usize,
     selected: usize,
     deadline: Instant,
@@ -404,6 +406,8 @@ mod tests_effort;
 mod tests_inspector;
 #[cfg(test)]
 mod tests_phase6;
+#[cfg(test)]
+mod tests_polish;
 #[cfg(test)]
 mod tests_side;
 #[cfg(test)]

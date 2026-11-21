@@ -85,7 +85,7 @@ pub(crate) struct Inputs {
     pub(crate) catalog: Catalog,
     pub(crate) live_sessions: Vec<jade_agent::runtime::SessionInfo>,
     pub(crate) cd_comps: Vec<(String, String)>,
-    pub(crate) welcome_path_comps: Vec<(String, String)>,
+    pub(crate) welcome_path_entries: Vec<PathBrowserEntry>,
     pub(crate) preview: PreviewBody,
     pub(crate) truncated: bool,
     pub(crate) has_diff: bool,
@@ -107,7 +107,7 @@ impl Default for Inputs {
             catalog: Catalog::default(),
             live_sessions: Vec::new(),
             cd_comps: Vec::new(),
-            welcome_path_comps: Vec::new(),
+            welcome_path_entries: Vec::new(),
             preview: PreviewBody::Absent,
             truncated: false,
             has_diff: false,
@@ -158,23 +158,28 @@ pub(crate) fn sync(app: &mut App) {
 }
 
 fn sync_completions(app: &mut App, cwd: &Path) {
-    if let Some(raw) = app.cd_query().map(str::to_string) {
-        let want = (cwd.to_path_buf(), raw.clone());
-        if app.inputs.cd_key.as_ref() != Some(&want) {
-            app.inputs.cd_comps = complete_directories(cwd, &raw);
-            app.inputs.cd_key = Some(want);
+    if !app.ui.cd_dismissed {
+        if let Some(raw) = app.cd_query().map(str::to_string) {
+            let want = (cwd.to_path_buf(), raw.clone());
+            if app.inputs.cd_key.as_ref() != Some(&want) {
+                app.inputs.cd_comps = complete_directories(cwd, &raw);
+                app.inputs.cd_key = Some(want);
+            }
+        } else if app.inputs.cd_key.take().is_some() {
+            app.inputs.cd_comps.clear();
         }
-    } else if app.inputs.cd_key.take().is_some() {
+    } else if app.inputs.cd_key.take().is_some() || !app.inputs.cd_comps.is_empty() {
         app.inputs.cd_comps.clear();
     }
     if let Some(welcome) = app.ui.welcome.as_ref().filter(|w| w.mode.is_path_input()) {
-        let want = (cwd.to_path_buf(), welcome.path.clone());
+        let want = (welcome.browse_dir.clone(), welcome.path.clone());
         if app.inputs.welcome_path_key.as_ref() != Some(&want) {
-            app.inputs.welcome_path_comps = complete_directories(cwd, &welcome.path);
+            app.inputs.welcome_path_entries =
+                state::welcome::build_path_browser_entries(&welcome.browse_dir, &welcome.path);
             app.inputs.welcome_path_key = Some(want);
         }
     } else if app.inputs.welcome_path_key.take().is_some() {
-        app.inputs.welcome_path_comps.clear();
+        app.inputs.welcome_path_entries.clear();
     }
 }
 
@@ -238,11 +243,20 @@ fn catalog_due(app: &App) -> bool {
         .unwrap_or(true)
 }
 
+fn catalog_cwd(app: &App) -> PathBuf {
+    if app.ui.welcome.is_some() {
+        app.selected_hub_cwd()
+    } else {
+        app.session.current.cwd.clone()
+    }
+}
+
 fn catalog_key(app: &App) -> String {
+    let cwd = catalog_cwd(app);
     format!(
         "{}|{}|{}|{}",
         app.data_dir.display(),
-        app.session.current.cwd.display(),
+        cwd.display(),
         app.session.current.id,
         app.jobs.target
     )
@@ -250,6 +264,7 @@ fn catalog_key(app: &App) -> String {
 
 fn fill_catalog(app: &mut App) {
     let key = catalog_key(app);
+    let cwd = catalog_cwd(app);
     let backend = jade_core::sandbox::probe_backend();
     let git = if target_is_local(&app.jobs.target) {
         git_info::probe_git_info(
@@ -269,7 +284,7 @@ fn fill_catalog(app: &mut App) {
         delegate_level: jade_agent::agent::delegate_pref::load(&app.data_dir),
         sandbox_label: jade_core::sandbox::backend_label().to_string(),
         bwrap_present: matches!(backend, jade_core::sandbox::SandboxBackend::Bwrap(_)),
-        trusted: is_workspace_trusted(&app.data_dir, &app.session.current.cwd),
+        trusted: is_workspace_trusted(&app.data_dir, &cwd),
         daemon_online: daemon::socket_path(&app.data_dir).exists(),
         git_branch: git.branch,
         git_worktree: git.worktree,
@@ -299,7 +314,7 @@ fn fill_catalog(app: &mut App) {
         catalog.tier = budget.tier.to_string();
         catalog.effort_options = opts;
     }
-    let mcp = jade_agent::mcp::config::load_mcp_configs(&app.data_dir, &app.session.current.cwd);
+    let mcp = jade_agent::mcp::config::load_mcp_configs(&app.data_dir, &cwd);
     catalog.mcp = mcp
         .servers
         .iter()
@@ -309,7 +324,7 @@ fn fill_catalog(app: &mut App) {
             disabled: srv.disabled,
         })
         .collect();
-    let skills = jade_agent::skills::discover_skills(&app.data_dir, &app.session.current.cwd);
+    let skills = jade_agent::skills::discover_skills(&app.data_dir, &cwd);
     catalog.skills = skills
         .iter()
         .map(|skill| SkillSnap {
@@ -336,11 +351,7 @@ fn fill_catalog(app: &mut App) {
             .iter()
             .map(|skill| SkillFlag {
                 kind: jade_agent::skills::skill_root_kind(&app.data_dir, skill),
-                injected: jade_agent::skills::skill_is_injected(
-                    &app.data_dir,
-                    &app.session.current.cwd,
-                    skill,
-                ),
+                injected: jade_agent::skills::skill_is_injected(&app.data_dir, &cwd, skill),
             })
             .collect();
     }

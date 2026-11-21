@@ -1,12 +1,20 @@
-//! Sub-panels for the Hub: path picker, naming/rename, skills, memory, and MCP servers.
+//! Sub-panels for the Hub: directory browser, naming/rename, skills, memory, and MCP servers.
 use crate::tui::*;
 
-fn popup_inner(frame: &mut Frame, theme: &Theme, area: Rect, height: u16, title: &str) -> Rect {
+fn popup_inner(
+    frame: &mut Frame,
+    app: &mut App,
+    theme: &Theme,
+    area: Rect,
+    height: u16,
+    title: &str,
+) -> Rect {
     let width = 84u16
         .min(area.width.saturating_sub(4).max(1))
         .min(area.width.max(1));
     let height = height.min(area.height.max(1));
     let popup = centered_rect(area, width, height);
+    app.ui.modal_rect = Some(popup);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -57,79 +65,225 @@ fn push_dim(lines: &mut Vec<Line<'static>>, theme: &Theme, text: &str) {
     ));
 }
 
-pub(super) fn draw_path(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let Some(welcome) = app.ui.welcome.as_ref() else {
+fn place_popup_cursor(
+    frame: &mut Frame,
+    inner: Rect,
+    row_offset: u16,
+    prefix_w: u16,
+    text: &str,
+    cursor: usize,
+) {
+    if inner.width == 0 || row_offset >= inner.height {
         return;
+    }
+    let col = line_edit::cursor_col(text, cursor) as u16;
+    let x = inner.x.saturating_add(prefix_w).saturating_add(col);
+    if x < inner.x.saturating_add(inner.width) {
+        frame.set_cursor_position((x, inner.y + row_offset));
+    }
+}
+
+pub(super) fn draw_path(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
+    let (choosing_parent, browse_dir, path, path_cursor, path_selected, err) = {
+        let Some(w) = app.ui.welcome.as_ref() else {
+            return;
+        };
+        (
+            w.mode == WelcomeMode::NewFolderPickParent,
+            w.browse_dir.clone(),
+            w.path.clone(),
+            w.path_cursor,
+            w.path_selected,
+            w.error.clone(),
+        )
     };
-    let choosing_parent = welcome.mode == WelcomeMode::NewFolderPickParent;
+    let entries = app.inputs.welcome_path_entries.clone();
+    let dir_count = entries
+        .iter()
+        .filter(|e| matches!(e, PathBrowserEntry::Dir { .. }))
+        .count();
     let title = if choosing_parent {
-        "new folder · parent"
+        format!("new folder · parent ({dir_count} dirs)")
     } else {
-        "open path"
+        format!("open workspace ({dir_count} dirs)")
     };
-    let inner = popup_inner(frame, theme, area, 16, title);
-    let mut lines = vec![Line::from(vec![
-        Span::styled("  > ", Style::default().fg(theme.accent)),
-        Span::raw(welcome.path.clone()),
-    ])];
-    let comps = &app.inputs.welcome_path_comps;
-    let sel = welcome.path_selected.min(comps.len().saturating_sub(1));
-    let window = 7usize;
-    let start = if sel >= window { sel + 1 - window } else { 0 };
-    for (offset, (label, _)) in comps.iter().skip(start).take(window).enumerate() {
-        let idx = start + offset;
-        let marker = if idx == sel { "  › " } else { "    " };
-        let style = if idx == sel {
+    let inner = popup_inner(frame, app, theme, area, 18, &title);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let width = inner.width as usize;
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("  dir ", Style::default().fg(theme.dim)),
+        Span::styled(
+            truncate_width(&collapse_home(&browse_dir), width.saturating_sub(7)),
             Style::default()
-                .fg(theme.accent)
+                .fg(theme.secondary)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  > ", Style::default().fg(theme.accent)),
+        Span::raw(if path.is_empty() {
+            String::new()
+        } else {
+            path.clone()
+        }),
+        if path.is_empty() {
+            Span::styled(
+                "type to filter or enter path (~/... or /...)",
+                Style::default().fg(theme.dim),
+            )
+        } else {
+            Span::raw("")
+        },
+    ]));
+    lines.push(Line::from(""));
+
+    let reserved = 4 + usize::from(err.is_some());
+    let window = (inner.height as usize)
+        .saturating_sub(reserved)
+        .clamp(1, 10);
+    let sel = path_selected.min(entries.len().saturating_sub(1));
+    let start = if sel >= window { sel + 1 - window } else { 0 };
+
+    for (offset, entry) in entries.iter().skip(start).take(window).enumerate() {
+        let idx = start + offset;
+        let row_y = inner.y + lines.len() as u16;
+        if row_y < inner.y + inner.height {
+            app.ui.hit_regions.push(HitRegion {
+                rect: Rect {
+                    x: inner.x,
+                    y: row_y,
+                    width: inner.width,
+                    height: 1,
+                },
+                target: HitTarget::HubPathEntry(idx),
+            });
+        }
+        let label = match entry {
+            PathBrowserEntry::OpenCurrent(p) => {
+                let verb = if choosing_parent {
+                    "create inside"
+                } else {
+                    "open"
+                };
+                format!("✓ .  {verb} {}", collapse_home(p))
+            }
+            PathBrowserEntry::Parent(_) => "← ../  parent directory".to_string(),
+            PathBrowserEntry::Dir { display, .. } => format!("  {display}"),
+            PathBrowserEntry::TypedPath { display, .. } => format!("→ {display}"),
+        };
+        let is_sel = idx == sel;
+        let marker = if is_sel { "  › " } else { "    " };
+        let fg = match entry {
+            PathBrowserEntry::OpenCurrent(_) => {
+                if is_sel {
+                    theme.ok
+                } else {
+                    theme.text
+                }
+            }
+            PathBrowserEntry::Parent(_) => {
+                if is_sel {
+                    theme.secondary
+                } else {
+                    theme.dim
+                }
+            }
+            _ => {
+                if is_sel {
+                    theme.accent
+                } else {
+                    theme.text
+                }
+            }
+        };
+        let style = if is_sel {
+            Style::default()
+                .fg(fg)
+                .bg(theme.selection)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme.dim)
+            Style::default().fg(fg)
         };
-        lines.push(Line::styled(format!("{marker}{label}"), style));
+        let shown = pad_to_width(&truncate_width(&format!("{marker}{label}"), width), width);
+        lines.push(Line::styled(shown, style));
     }
-    if let Some(err) = &welcome.error {
+
+    if let Some(err) = &err {
         lines.push(Line::styled(
             format!("  {err}"),
             Style::default().fg(theme.bad),
         ));
     }
+    let pos_hint = if entries.len() > window {
+        format!("  ({}/{})", sel + 1, entries.len())
+    } else {
+        String::new()
+    };
     push_dim(
         &mut lines,
         theme,
-        if choosing_parent {
-            "  ↑/↓ select   tab completes   enter choose   esc back"
-        } else {
-            "  ↑/↓ select   tab completes   enter open   esc back"
-        },
+        &format!("  ↑↓ select · Enter enter/open · ←/Bksp up · →/Tab enter · Esc back{pos_hint}"),
     );
     frame.render_widget(Paragraph::new(lines), inner);
+    if app.ui.modal.is_none() {
+        place_popup_cursor(frame, inner, 1, 4, &path, path_cursor);
+    }
 }
 
-pub(super) fn draw_naming(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let Some(welcome) = app.ui.welcome.as_ref() else {
-        return;
+pub(super) fn draw_naming(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
+    let (mode, folder_parent, draft, draft_cursor, err) = {
+        let Some(w) = app.ui.welcome.as_ref() else {
+            return;
+        };
+        (
+            w.mode,
+            w.folder_parent.clone(),
+            w.draft.clone(),
+            w.draft_cursor,
+            w.error.clone(),
+        )
     };
-    let (title, label, hint) = match welcome.mode {
-        WelcomeMode::NewFolderName => ("new folder", "folder name", "enter create   esc back"),
-        WelcomeMode::RenameSession => ("rename session", "title", "enter save   esc back"),
-        WelcomeMode::SkillsNew => ("new skill", "skill name", "enter create   esc back"),
-        _ => ("new memory", "title", "enter create   esc back"),
+    let (title, label, hint) = match mode {
+        WelcomeMode::NewFolderName => (
+            "new folder",
+            "folder name",
+            "Enter create · Ctrl+U clear · Esc back",
+        ),
+        WelcomeMode::RenameSession => (
+            "rename session",
+            "title",
+            "Enter save · Ctrl+U clear · Esc back",
+        ),
+        WelcomeMode::SkillsNew => (
+            "new skill",
+            "skill name",
+            "Enter create · Ctrl+U clear · Esc back",
+        ),
+        _ => (
+            "new memory",
+            "title",
+            "Enter create · Ctrl+U clear · Esc back",
+        ),
     };
-    let inner = popup_inner(frame, theme, area, 10, title);
+    let inner = popup_inner(frame, app, theme, area, 10, title);
     let mut lines = Vec::new();
-    if let Some(parent) = &welcome.folder_parent {
-        if welcome.mode == WelcomeMode::NewFolderName {
+    if let Some(parent) = &folder_parent {
+        if mode == WelcomeMode::NewFolderName {
             push_dim(&mut lines, theme, &format!("  {}", collapse_home(parent)));
         }
     }
     lines.push(Line::from(""));
+    let input_row = lines.len() as u16;
+    let prefix = format!("  {label}  > ");
     lines.push(Line::from(vec![
         Span::styled(format!("  {label}  "), Style::default().fg(theme.dim)),
         Span::styled(">", Style::default().fg(theme.accent)),
-        Span::raw(format!(" {}", welcome.draft)),
+        Span::raw(format!(" {draft}")),
     ]));
-    if let Some(err) = &welcome.error {
+    if let Some(err) = &err {
         lines.push(Line::styled(
             format!("  {err}"),
             Style::default().fg(theme.bad),
@@ -138,37 +292,62 @@ pub(super) fn draw_naming(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
     lines.push(Line::from(""));
     push_dim(&mut lines, theme, &format!("  {hint}"));
     frame.render_widget(Paragraph::new(lines), inner);
+    if app.ui.modal.is_none() {
+        place_popup_cursor(
+            frame,
+            inner,
+            input_row,
+            display_width(&prefix) as u16,
+            &draft,
+            draft_cursor,
+        );
+    }
 }
 
-pub(super) fn draw_skills(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let Some(welcome) = app.ui.welcome.as_ref() else {
-        return;
+pub(super) fn draw_skills(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
+    let (skills, list_selected, err) = {
+        let Some(w) = app.ui.welcome.as_ref() else {
+            return;
+        };
+        (w.skills.clone(), w.list_selected, w.error.clone())
     };
-    let height = panel_height(welcome.skills.len(), area.height);
-    let inner = popup_inner(frame, theme, area, height, "skills");
+    let height = panel_height(skills.len(), area.height);
+    let inner = popup_inner(frame, app, theme, area, height, "skills");
     let width = inner.width as usize;
     let mut lines = Vec::new();
     push_dim(
         &mut lines,
         theme,
-        "  enter toggle   n new   e edit   esc back",
+        "  Enter toggle · n new · e edit · Esc back",
     );
     lines.push(Line::from(""));
-    if welcome.skills.is_empty() {
+    if skills.is_empty() {
         push_dim(&mut lines, theme, "  no user skills");
     } else {
-        let total = welcome.skills.len();
-        let sel = welcome.list_selected.min(total - 1);
+        let total = skills.len();
+        let sel = list_selected.min(total - 1);
         let window = 10usize;
         let start = if sel >= window { sel + 1 - window } else { 0 };
         let mut prev = "";
-        for (offset, skill) in welcome.skills.iter().skip(start).take(window).enumerate() {
+        for (offset, skill) in skills.iter().skip(start).take(window).enumerate() {
             let idx = start + offset;
             let flag = app.inputs.catalog.welcome_flags.get(idx);
             let kind = flag.map(|flag| flag.kind).unwrap_or("user");
             if kind != prev {
                 push_dim(&mut lines, theme, &format!("  {kind}"));
                 prev = kind;
+            }
+            let row_y = inner.y + lines.len() as u16;
+            if row_y < inner.y + inner.height {
+                app.ui.hit_regions.push(HitRegion {
+                    rect: Rect {
+                        x: inner.x,
+                        y: row_y,
+                        width: inner.width,
+                        height: 1,
+                    },
+                    target: HitTarget::HubListItem(idx),
+                });
             }
             let on = if flag.is_some_and(|flag| flag.injected) {
                 "on"
@@ -184,7 +363,7 @@ pub(super) fn draw_skills(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
             );
         }
     }
-    if let Some(err) = &welcome.error {
+    if let Some(err) = &err {
         lines.push(Line::styled(
             format!("  {err}"),
             Style::default().fg(theme.bad),
@@ -193,29 +372,49 @@ pub(super) fn draw_skills(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-pub(super) fn draw_memory(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let Some(welcome) = app.ui.welcome.as_ref() else {
-        return;
+pub(super) fn draw_memory(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
+    let (notes, list_selected, confirm_delete, err) = {
+        let Some(w) = app.ui.welcome.as_ref() else {
+            return;
+        };
+        (
+            w.notes.clone(),
+            w.list_selected,
+            w.confirm_delete.clone(),
+            w.error.clone(),
+        )
     };
-    let height = panel_height(welcome.notes.len(), area.height);
-    let inner = popup_inner(frame, theme, area, height, "memory");
+    let height = panel_height(notes.len(), area.height);
+    let inner = popup_inner(frame, app, theme, area, height, "memory");
     let width = inner.width as usize;
     let mut lines = Vec::new();
     push_dim(
         &mut lines,
         theme,
-        "  enter toggle   n new   e edit   d delete   esc back",
+        "  Enter toggle · n new · e edit · d delete · Esc back",
     );
     lines.push(Line::from(""));
-    if welcome.notes.is_empty() {
+    if notes.is_empty() {
         push_dim(&mut lines, theme, "  no notes");
     } else {
-        let total = welcome.notes.len();
-        let sel = welcome.list_selected.min(total - 1);
+        let total = notes.len();
+        let sel = list_selected.min(total - 1);
         let window = 10usize;
         let start = if sel >= window { sel + 1 - window } else { 0 };
-        for (offset, note) in welcome.notes.iter().skip(start).take(window).enumerate() {
+        for (offset, note) in notes.iter().skip(start).take(window).enumerate() {
             let idx = start + offset;
+            let row_y = inner.y + lines.len() as u16;
+            if row_y < inner.y + inner.height {
+                app.ui.hit_regions.push(HitRegion {
+                    rect: Rect {
+                        x: inner.x,
+                        y: row_y,
+                        width: inner.width,
+                        height: 1,
+                    },
+                    target: HitTarget::HubListItem(idx),
+                });
+            }
             let flag = if note.enabled { "on " } else { "off" };
             push_choice(
                 &mut lines,
@@ -226,7 +425,17 @@ pub(super) fn draw_memory(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
             );
         }
     }
-    if let Some(err) = &welcome.error {
+    if let Some(id) = &confirm_delete {
+        let title = notes
+            .iter()
+            .find(|n| &n.id == id)
+            .map(|n| n.title.as_str())
+            .unwrap_or("note");
+        lines.push(Line::styled(
+            format!("  Press d again to delete \"{title}\" · Esc cancel"),
+            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+        ));
+    } else if let Some(err) = &err {
         lines.push(Line::styled(
             format!("  {err}"),
             Style::default().fg(theme.bad),
@@ -235,43 +444,70 @@ pub(super) fn draw_memory(frame: &mut Frame, app: &App, theme: &Theme, area: Rec
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-pub(super) fn draw_mcp(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
-    let Some(welcome) = app.ui.welcome.as_ref() else {
-        return;
+pub(super) fn draw_mcp(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
+    let (list_selected, mcp_probing, mcp_probe) = {
+        let Some(w) = app.ui.welcome.as_ref() else {
+            return;
+        };
+        (w.list_selected, w.mcp_probing, w.mcp_probe.clone())
     };
-    let mcp = &app.inputs.catalog.mcp;
-    let extra = welcome.mcp_probe.len().min(8);
-    let height = panel_height(mcp.len() + extra + 2, area.height);
-    let inner = popup_inner(frame, theme, area, height, "mcp servers");
+    let mcp_len = app.inputs.catalog.mcp.len();
+    let mcp_rows: Vec<(String, String, bool)> = app
+        .inputs
+        .catalog
+        .mcp
+        .iter()
+        .map(|s| (s.name.clone(), s.scope.clone(), s.disabled))
+        .collect();
+    let extra = mcp_probe.len().min(8);
+    let height = panel_height(mcp_len.min(8) + extra + 2, area.height);
+    let inner = popup_inner(frame, app, theme, area, height, "mcp servers");
     let width = inner.width as usize;
     let mut lines = Vec::new();
-    push_dim(&mut lines, theme, "  p probe live servers   esc back");
+    push_dim(&mut lines, theme, "  p probe live servers · Esc back");
     lines.push(Line::from(""));
-    if mcp.is_empty() {
+    if mcp_rows.is_empty() {
         push_dim(&mut lines, theme, "  no MCP servers configured");
     } else {
-        let sel = welcome.list_selected.min(mcp.len() - 1);
-        for (idx, srv) in mcp.iter().enumerate().take(8) {
-            let status = if srv.disabled { "disabled" } else { "enabled " };
+        let window = 8usize;
+        let sel = list_selected.min(mcp_rows.len() - 1);
+        let start = if sel >= window { sel + 1 - window } else { 0 };
+        for (offset, (name, scope, disabled)) in
+            mcp_rows.iter().skip(start).take(window).enumerate()
+        {
+            let idx = start + offset;
+            let row_y = inner.y + lines.len() as u16;
+            if row_y < inner.y + inner.height {
+                app.ui.hit_regions.push(HitRegion {
+                    rect: Rect {
+                        x: inner.x,
+                        y: row_y,
+                        width: inner.width,
+                        height: 1,
+                    },
+                    target: HitTarget::HubListItem(idx),
+                });
+            }
+            let status = if *disabled { "disabled" } else { "enabled " };
             push_choice(
                 &mut lines,
                 theme,
                 width,
                 idx == sel,
-                &format!("{:<18} [{:<7}] {status}", srv.name, srv.scope),
+                &format!("{:<18} [{:<7}] {status}", name, scope),
             );
         }
     }
-    if welcome.mcp_probing {
+    if mcp_probing {
         lines.push(Line::from(""));
         lines.push(Line::styled(
             "  probing configured MCP servers...",
             Style::default().fg(theme.accent),
         ));
-    } else if !welcome.mcp_probe.is_empty() {
+    } else if !mcp_probe.is_empty() {
         lines.push(Line::from(""));
         push_dim(&mut lines, theme, "  PROBE OUTPUT");
-        for row in welcome.mcp_probe.iter().take(8) {
+        for row in mcp_probe.iter().take(8) {
             lines.push(Line::styled(
                 truncate_width(&format!("  {row}"), width),
                 Style::default().fg(theme.text),

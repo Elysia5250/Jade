@@ -1,5 +1,6 @@
 //! Picker, models, sessions, and generic modal handling.
 use super::*;
+use crate::tui::line_edit::{self, EditOutcome};
 
 impl App {
     pub(in crate::tui) fn open_models_modal(&mut self) {
@@ -9,6 +10,7 @@ impl App {
             return;
         }
         let fetching = self.spawn_model_refresh();
+        self.ui.modal_cursor = 0;
         self.ui.modal = Some(Modal::Models(ModelsModal {
             filter: String::new(),
             selected: 0,
@@ -107,13 +109,16 @@ impl App {
     pub(in crate::tui) fn open_sessions_modal(&mut self) {
         self.persist_session();
         let sessions = list_sessions(&self.data_dir);
+        self.ui.modal_cursor = 0;
         self.ui.modal = Some(Modal::Sessions(SessionsModal {
             sessions,
             selected: 0,
+            confirm_delete: None,
         }));
     }
 
     pub(in crate::tui) fn open_picker(&mut self, title: &str, items: Vec<(String, Command)>) {
+        self.ui.modal_cursor = 0;
         self.ui.modal = Some(Modal::Picker(Picker {
             title: title.to_string(),
             query: String::new(),
@@ -402,25 +407,28 @@ impl App {
                     .collect();
                 let len = filtered.len().max(1);
                 match key.code {
-                    KeyCode::Esc => return Action::None,
+                    KeyCode::Esc => {
+                        self.ui.modal_rect = None;
+                        return Action::None;
+                    }
                     KeyCode::Up => p.selected = p.selected.saturating_sub(1),
                     KeyCode::Down => p.selected = (p.selected + 1).min(len - 1),
-                    KeyCode::Backspace => {
-                        p.query.pop();
-                        p.selected = 0;
-                    }
                     KeyCode::Enter => {
                         if let Some((_, (_, cmd))) = filtered.get(p.selected) {
                             let cmd = cmd.clone();
+                            self.ui.modal_rect = None;
                             return self.run_command(cmd);
                         }
+                        self.ui.modal_rect = None;
                         return Action::None;
                     }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        p.query.push(c);
-                        p.selected = 0;
+                    _ => {
+                        if line_edit::handle_key(&mut p.query, &mut self.ui.modal_cursor, key)
+                            == EditOutcome::Changed
+                        {
+                            p.selected = 0;
+                        }
                     }
-                    _ => {}
                 }
                 self.ui.modal = Some(Modal::Picker(p));
                 Action::None
@@ -447,13 +455,12 @@ impl App {
                     .collect();
                 let len = filtered.len().max(1);
                 match key.code {
-                    KeyCode::Esc => return Action::None,
+                    KeyCode::Esc => {
+                        self.ui.modal_rect = None;
+                        return Action::None;
+                    }
                     KeyCode::Up => m.selected = m.selected.saturating_sub(1),
                     KeyCode::Down => m.selected = (m.selected + 1).min(len - 1),
-                    KeyCode::Backspace => {
-                        m.filter.pop();
-                        m.selected = 0;
-                    }
                     KeyCode::Enter => {
                         let chosen = if let Some(item) = filtered.get(m.selected) {
                             Some(ModelRef {
@@ -477,13 +484,16 @@ impl App {
                                 self.set_toast(format!("model: {}", mref.display()), false);
                             }
                         }
+                        self.ui.modal_rect = None;
                         return Action::None;
                     }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        m.filter.push(c);
-                        m.selected = 0;
+                    _ => {
+                        if line_edit::handle_key(&mut m.filter, &mut self.ui.modal_cursor, key)
+                            == EditOutcome::Changed
+                        {
+                            m.selected = 0;
+                        }
                     }
-                    _ => {}
                 }
                 self.ui.modal = Some(Modal::Models(m));
                 Action::None
@@ -491,21 +501,35 @@ impl App {
             Modal::Sessions(mut s) => {
                 let len = s.sessions.len().max(1);
                 match key.code {
-                    KeyCode::Esc => return Action::None,
-                    KeyCode::Up | KeyCode::Char('k') => s.selected = s.selected.saturating_sub(1),
+                    KeyCode::Esc => {
+                        if s.confirm_delete.take().is_some() {
+                            self.ui.modal = Some(Modal::Sessions(s));
+                            return Action::None;
+                        }
+                        self.ui.modal_rect = None;
+                        return Action::None;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        s.confirm_delete = None;
+                        s.selected = s.selected.saturating_sub(1);
+                    }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        s.selected = (s.selected + 1).min(len - 1)
+                        s.confirm_delete = None;
+                        s.selected = (s.selected + 1).min(len - 1);
                     }
                     KeyCode::Char('d') => {
                         if let Some(target) = s.sessions.get(s.selected).map(|x| x.id.clone()) {
                             if target == self.session.current.id {
+                                s.confirm_delete = None;
                                 self.set_toast("cannot delete the active session", true);
+                            } else if s.confirm_delete.as_deref() != Some(target.as_str()) {
+                                s.confirm_delete = Some(target);
                             } else {
                                 let _ = delete_session(&self.data_dir, &target);
-                                let close_id = target.clone();
-                                self.sync_agent(AgentReq::CloseSession { id: close_id });
+                                self.sync_agent(AgentReq::CloseSession { id: target.clone() });
                                 s.sessions.retain(|x| x.id != target);
                                 s.selected = s.selected.min(s.sessions.len().saturating_sub(1));
+                                s.confirm_delete = None;
                             }
                         }
                     }
@@ -520,6 +544,7 @@ impl App {
                                 Err(e) => self.set_toast(format!("{e:#}"), true),
                             }
                         }
+                        self.ui.modal_rect = None;
                         return Action::None;
                     }
                     _ => {}
@@ -530,7 +555,10 @@ impl App {
             Modal::Rewind(mut r) => {
                 let len = r.checkpoints.len().max(1);
                 match key.code {
-                    KeyCode::Esc => return Action::None,
+                    KeyCode::Esc => {
+                        self.ui.modal_rect = None;
+                        return Action::None;
+                    }
                     KeyCode::Up | KeyCode::Char('k') => r.selected = r.selected.saturating_sub(1),
                     KeyCode::Down | KeyCode::Char('j') => {
                         r.selected = (r.selected + 1).min(len - 1)
@@ -539,6 +567,7 @@ impl App {
                         if let Some(cp) = r.checkpoints.get(r.selected) {
                             self.request_rewind(Some(cp.id));
                         }
+                        self.ui.modal_rect = None;
                         return Action::None;
                     }
                     _ => {}
@@ -554,14 +583,14 @@ impl App {
         match modal {
             Modal::Picker(mut p) => {
                 if !clean.is_empty() {
-                    p.query.push_str(&clean);
+                    line_edit::insert_str(&mut p.query, &mut self.ui.modal_cursor, &clean);
                     p.selected = 0;
                 }
                 self.ui.modal = Some(Modal::Picker(p));
             }
             Modal::Models(mut m) => {
                 if !clean.is_empty() {
-                    m.filter.push_str(&clean);
+                    line_edit::insert_str(&mut m.filter, &mut self.ui.modal_cursor, &clean);
                     m.selected = 0;
                 }
                 self.ui.modal = Some(Modal::Models(m));
@@ -569,5 +598,75 @@ impl App {
             Modal::Login(login) => self.handle_login_paste(login, &clean),
             other => self.ui.modal = Some(other),
         }
+    }
+
+    pub(in crate::tui) fn scroll_modal(&mut self, delta: isize) {
+        let key = if delta < 0 {
+            KeyCode::Up
+        } else {
+            KeyCode::Down
+        };
+        let _ = self.handle_modal_key(KeyEvent::new(key, KeyModifiers::NONE));
+    }
+
+    pub(in crate::tui) fn click_modal_item(&mut self, idx: usize) -> Option<Action> {
+        match self.ui.modal.as_mut()? {
+            Modal::Picker(p) => p.selected = idx,
+            Modal::Models(m) => m.selected = idx,
+            Modal::Sessions(s) => {
+                s.selected = idx.min(s.sessions.len().saturating_sub(1));
+                s.confirm_delete = None;
+            }
+            Modal::Rewind(r) => r.selected = idx.min(r.checkpoints.len().saturating_sub(1)),
+            Modal::Login(LoginModal::SelectProvider { selected, .. }) => *selected = idx,
+            Modal::Login(LoginModal::SelectMethod { selected, .. }) => *selected = idx,
+            _ => return None,
+        }
+        Some(self.handle_modal_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)))
+    }
+
+    pub(in crate::tui) fn click_modal_login_field(&mut self, field: usize) {
+        match self.ui.modal.as_mut() {
+            Some(Modal::Login(LoginModal::ApiKeyForm {
+                key,
+                base_url,
+                model,
+                focus_field,
+                ..
+            })) => {
+                *focus_field = field.min(2);
+                let active = match *focus_field {
+                    0 => key.as_str(),
+                    1 => base_url.as_str(),
+                    _ => model.as_str(),
+                };
+                self.ui.modal_cursor = active.chars().count();
+            }
+            Some(Modal::Login(LoginModal::CustomForm {
+                name,
+                base_url,
+                key,
+                model,
+                focus_field,
+                ..
+            })) => {
+                *focus_field = field.min(4);
+                let active = match *focus_field {
+                    1 => name.as_str(),
+                    2 => base_url.as_str(),
+                    3 => key.as_str(),
+                    4 => model.as_str(),
+                    _ => "",
+                };
+                self.ui.modal_cursor = active.chars().count();
+            }
+            _ => {}
+        }
+    }
+
+    pub(in crate::tui) fn dismiss_modal(&mut self) {
+        self.cancel_login_bg();
+        self.ui.modal = None;
+        self.ui.modal_rect = None;
     }
 }

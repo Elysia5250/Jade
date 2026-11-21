@@ -1,10 +1,11 @@
 //! Keyboard handling for the login wizard.
+use crate::tui::line_edit::{self, EditOutcome};
 use crate::tui::*;
 
 impl App {
     pub(in crate::tui) fn handle_login_key(&mut self, login: LoginModal, key: KeyEvent) {
         if key.code == KeyCode::Esc {
-            self.cancel_login_bg();
+            self.handle_login_esc(login);
             return;
         }
         match login {
@@ -17,10 +18,6 @@ impl App {
                 match key.code {
                     KeyCode::Up => selected = selected.saturating_sub(1),
                     KeyCode::Down => selected = (selected + 1).min(len - 1),
-                    KeyCode::Backspace => {
-                        filter.pop();
-                        selected = 0;
-                    }
                     KeyCode::Enter => {
                         if let Some(&(provider_idx, prov)) = list.get(selected) {
                             if prov.methods.len() == 1 {
@@ -34,11 +31,13 @@ impl App {
                             return;
                         }
                     }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        filter.push(c);
-                        selected = 0;
+                    _ => {
+                        if line_edit::handle_key(&mut filter, &mut self.ui.modal_cursor, key)
+                            == EditOutcome::Changed
+                        {
+                            selected = 0;
+                        }
                     }
-                    _ => {}
                 }
                 self.ui.modal = Some(Modal::Login(LoginModal::SelectProvider {
                     filter,
@@ -53,6 +52,7 @@ impl App {
                 let len = prov.methods.len().max(1);
                 match key.code {
                     KeyCode::Left | KeyCode::Backspace => {
+                        self.ui.modal_cursor = 0;
                         self.ui.modal = Some(Modal::Login(LoginModal::SelectProvider {
                             filter: String::new(),
                             selected: provider_idx,
@@ -83,22 +83,17 @@ impl App {
             } => {
                 let prov = &BUILTIN_PROVIDERS[provider_idx];
                 match key.code {
-                    KeyCode::Tab | KeyCode::Down => focus_field = (focus_field + 1) % 3,
-                    KeyCode::BackTab | KeyCode::Up => focus_field = (focus_field + 2) % 3,
+                    KeyCode::Tab | KeyCode::Down => {
+                        focus_field = (focus_field + 1) % 3;
+                        self.sync_api_key_cursor(&api_key, &base_url, &model, focus_field);
+                    }
+                    KeyCode::BackTab | KeyCode::Up => {
+                        focus_field = (focus_field + 2) % 3;
+                        self.sync_api_key_cursor(&api_key, &base_url, &model, focus_field);
+                    }
                     KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         reveal = !reveal;
                     }
-                    KeyCode::Backspace => match focus_field {
-                        0 => {
-                            api_key.pop();
-                        }
-                        1 => {
-                            base_url.pop();
-                        }
-                        _ => {
-                            model.pop();
-                        }
-                    },
                     KeyCode::Enter => {
                         if api_key.trim().is_empty() {
                             error = Some("API key cannot be empty".into());
@@ -140,15 +135,18 @@ impl App {
                             }
                         }
                     }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        error = None;
-                        match focus_field {
-                            0 => api_key.push(c),
-                            1 => base_url.push(c),
-                            _ => model.push(c),
+                    _ => {
+                        let target = match focus_field {
+                            0 => &mut api_key,
+                            1 => &mut base_url,
+                            _ => &mut model,
+                        };
+                        if line_edit::handle_key(target, &mut self.ui.modal_cursor, key)
+                            == EditOutcome::Changed
+                        {
+                            error = None;
                         }
                     }
-                    _ => {}
                 }
                 self.ui.modal = Some(Modal::Login(LoginModal::ApiKeyForm {
                     provider_idx,
@@ -170,8 +168,14 @@ impl App {
                 mut error,
             } => {
                 match key.code {
-                    KeyCode::Tab | KeyCode::Down => focus_field = (focus_field + 1) % 5,
-                    KeyCode::BackTab | KeyCode::Up => focus_field = (focus_field + 4) % 5,
+                    KeyCode::Tab | KeyCode::Down => {
+                        focus_field = (focus_field + 1) % 5;
+                        self.sync_custom_cursor(&name, &base_url, &api_key, &model, focus_field);
+                    }
+                    KeyCode::BackTab | KeyCode::Up => {
+                        focus_field = (focus_field + 4) % 5;
+                        self.sync_custom_cursor(&name, &base_url, &api_key, &model, focus_field);
+                    }
                     KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if focus_field == 0 => {
                         protocol_idx = 1 - protocol_idx;
                         if protocol_idx == 1 && base_url == "http://127.0.0.1:11434/v1" {
@@ -180,21 +184,6 @@ impl App {
                             base_url = "http://127.0.0.1:11434/v1".into();
                         }
                     }
-                    KeyCode::Backspace => match focus_field {
-                        1 => {
-                            name.pop();
-                        }
-                        2 => {
-                            base_url.pop();
-                        }
-                        3 => {
-                            api_key.pop();
-                        }
-                        4 => {
-                            model.pop();
-                        }
-                        _ => {}
-                    },
                     KeyCode::Enter => {
                         if base_url.trim().is_empty() {
                             error = Some("Base URL is required".into());
@@ -251,14 +240,17 @@ impl App {
                             }
                         }
                     }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        error = None;
-                        match focus_field {
-                            1 => name.push(c),
-                            2 => base_url.push(c),
-                            3 => api_key.push(c),
-                            4 => model.push(c),
-                            _ => {}
+                    _ if focus_field > 0 => {
+                        let target = match focus_field {
+                            1 => &mut name,
+                            2 => &mut base_url,
+                            3 => &mut api_key,
+                            _ => &mut model,
+                        };
+                        if line_edit::handle_key(target, &mut self.ui.modal_cursor, key)
+                            == EditOutcome::Changed
+                        {
+                            error = None;
                         }
                     }
                     _ => {}
@@ -285,9 +277,6 @@ impl App {
             } => {
                 if !busy {
                     match key.code {
-                        KeyCode::Backspace => {
-                            pasted.pop();
-                        }
                         KeyCode::Enter if !pasted.trim().is_empty() => {
                             let code = extract_query_param(pasted.trim(), "code")
                                 .unwrap_or_else(|| pasted.trim().to_string());
@@ -318,11 +307,13 @@ impl App {
                             status = "Exchanging authorization code.".into();
                             error = None;
                         }
-                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            error = None;
-                            pasted.push(c);
+                        _ => {
+                            if line_edit::handle_key(&mut pasted, &mut self.ui.modal_cursor, key)
+                                == EditOutcome::Changed
+                            {
+                                error = None;
+                            }
                         }
-                        _ => {}
                     }
                 }
                 self.ui.modal = Some(Modal::Login(LoginModal::OAuthBrowser {
@@ -348,9 +339,6 @@ impl App {
             } => {
                 if !busy {
                     match key.code {
-                        KeyCode::Backspace => {
-                            code_input.pop();
-                        }
                         KeyCode::Enter if !code_input.trim().is_empty() => {
                             let raw = code_input.trim().to_string();
                             let ver = verifier.clone();
@@ -373,11 +361,16 @@ impl App {
                             busy = true;
                             error = None;
                         }
-                        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            error = None;
-                            code_input.push(c);
+                        _ => {
+                            if line_edit::handle_key(
+                                &mut code_input,
+                                &mut self.ui.modal_cursor,
+                                key,
+                            ) == EditOutcome::Changed
+                            {
+                                error = None;
+                            }
                         }
-                        _ => {}
                     }
                 }
                 self.ui.modal = Some(Modal::Login(LoginModal::OAuthCodePaste {
@@ -409,11 +402,78 @@ impl App {
         }
     }
 
+    fn handle_login_esc(&mut self, login: LoginModal) {
+        self.cancel_login_bg();
+        self.ui.modal_cursor = 0;
+        match login {
+            LoginModal::SelectProvider { .. } => {
+                self.ui.modal = None;
+                self.ui.modal_rect = None;
+            }
+            LoginModal::SelectMethod { provider_idx, .. } => {
+                self.ui.modal = Some(Modal::Login(LoginModal::SelectProvider {
+                    filter: String::new(),
+                    selected: provider_idx,
+                }));
+            }
+            LoginModal::ApiKeyForm { provider_idx, .. } => {
+                let prov = &BUILTIN_PROVIDERS[provider_idx];
+                if prov.methods.len() > 1 {
+                    self.ui.modal = Some(Modal::Login(LoginModal::SelectMethod {
+                        provider_idx,
+                        selected: 0,
+                    }));
+                } else {
+                    self.ui.modal = Some(Modal::Login(LoginModal::SelectProvider {
+                        filter: String::new(),
+                        selected: provider_idx,
+                    }));
+                }
+            }
+            LoginModal::CustomForm { .. }
+            | LoginModal::OAuthBrowser { .. }
+            | LoginModal::OAuthCodePaste { .. }
+            | LoginModal::OAuthDevice { .. } => {
+                self.ui.modal = Some(Modal::Login(LoginModal::SelectProvider {
+                    filter: String::new(),
+                    selected: 0,
+                }));
+            }
+        }
+    }
+
+    fn sync_api_key_cursor(&mut self, api_key: &str, base_url: &str, model: &str, field: usize) {
+        let active = match field {
+            0 => api_key,
+            1 => base_url,
+            _ => model,
+        };
+        self.ui.modal_cursor = active.chars().count();
+    }
+
+    fn sync_custom_cursor(
+        &mut self,
+        name: &str,
+        base_url: &str,
+        api_key: &str,
+        model: &str,
+        field: usize,
+    ) {
+        let active = match field {
+            1 => name,
+            2 => base_url,
+            3 => api_key,
+            4 => model,
+            _ => "",
+        };
+        self.ui.modal_cursor = active.chars().count();
+    }
+
     pub(in crate::tui) fn handle_login_paste(&mut self, mut login: LoginModal, clean: &str) {
         if !clean.is_empty() {
             match &mut login {
                 LoginModal::SelectProvider { filter, selected } => {
-                    filter.push_str(clean);
+                    line_edit::insert_str(filter, &mut self.ui.modal_cursor, clean);
                     *selected = 0;
                 }
                 LoginModal::ApiKeyForm {
@@ -425,11 +485,12 @@ impl App {
                     ..
                 } => {
                     *error = None;
-                    match *focus_field {
-                        0 => key.push_str(clean),
-                        1 => base_url.push_str(clean),
-                        _ => model.push_str(clean),
-                    }
+                    let target = match *focus_field {
+                        0 => key,
+                        1 => base_url,
+                        _ => model,
+                    };
+                    line_edit::insert_str(target, &mut self.ui.modal_cursor, clean);
                 }
                 LoginModal::CustomForm {
                     name,
@@ -441,12 +502,14 @@ impl App {
                     ..
                 } => {
                     *error = None;
-                    match *focus_field {
-                        1 => name.push_str(clean),
-                        2 => base_url.push_str(clean),
-                        3 => key.push_str(clean),
-                        4 => model.push_str(clean),
-                        _ => {}
+                    if *focus_field > 0 {
+                        let target = match *focus_field {
+                            1 => name,
+                            2 => base_url,
+                            3 => key,
+                            _ => model,
+                        };
+                        line_edit::insert_str(target, &mut self.ui.modal_cursor, clean);
                     }
                 }
                 LoginModal::OAuthBrowser {
@@ -456,7 +519,7 @@ impl App {
                     ..
                 } if !*busy => {
                     *error = None;
-                    pasted.push_str(clean);
+                    line_edit::insert_str(pasted, &mut self.ui.modal_cursor, clean);
                 }
                 LoginModal::OAuthCodePaste {
                     code_input,
@@ -465,7 +528,7 @@ impl App {
                     ..
                 } if !*busy => {
                     *error = None;
-                    code_input.push_str(clean);
+                    line_edit::insert_str(code_input, &mut self.ui.modal_cursor, clean);
                 }
                 _ => {}
             }

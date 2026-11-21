@@ -1,82 +1,335 @@
-//! Single-level workspace directory creation from the home screen.
+//! Interactive workspace directory browser and single-level folder creation from the Hub.
 use super::super::*;
+use crate::tui::line_edit::{self, EditOutcome};
 use std::path::{Path, PathBuf};
+
+/// Build the visible entries for the Hub directory browser (`o` / `N`).
+pub(in crate::tui) fn build_path_browser_entries(
+    browse_dir: &Path,
+    raw: &str,
+) -> Vec<PathBrowserEntry> {
+    let trimmed = raw.trim();
+    if is_explicit_path(trimmed) {
+        return build_explicit_path_entries(browse_dir, trimmed);
+    }
+    let mut entries = Vec::new();
+    if trimmed.is_empty() || trimmed == "." {
+        entries.push(PathBrowserEntry::OpenCurrent(browse_dir.to_path_buf()));
+        if trimmed.is_empty() {
+            if let Some(parent) = browse_dir.parent() {
+                entries.push(PathBrowserEntry::Parent(parent.to_path_buf()));
+            }
+        }
+    }
+    let filter = if trimmed == "." { "" } else { trimmed };
+    for (display, path) in list_subdirectories(browse_dir, filter) {
+        entries.push(PathBrowserEntry::Dir { display, path });
+    }
+    if entries.is_empty() && !trimmed.is_empty() {
+        entries.push(PathBrowserEntry::TypedPath {
+            display: trimmed.to_string(),
+            raw: trimmed.to_string(),
+        });
+    }
+    entries
+}
+
+fn is_explicit_path(trimmed: &str) -> bool {
+    trimmed.starts_with('/')
+        || trimmed == "~"
+        || trimmed.starts_with("~/")
+        || trimmed == ".."
+        || trimmed.starts_with("../")
+        || trimmed.starts_with("./")
+        || trimmed.contains('/')
+}
+
+fn build_explicit_path_entries(browse_dir: &Path, trimmed: &str) -> Vec<PathBrowserEntry> {
+    let mut entries = Vec::new();
+    let resolved = resolve_cd_path(browse_dir, trimmed);
+    let canon = std::fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
+    let resolved_is_dir = canon.is_dir();
+
+    if trimmed.ends_with('/') || trimmed == "~" || trimmed == ".." {
+        if resolved_is_dir {
+            entries.push(PathBrowserEntry::OpenCurrent(canon.clone()));
+            if let Some(parent) = canon.parent() {
+                entries.push(PathBrowserEntry::Parent(parent.to_path_buf()));
+            }
+            for (display, path) in list_subdirectories(&canon, "") {
+                entries.push(PathBrowserEntry::Dir { display, path });
+            }
+        } else {
+            entries.push(PathBrowserEntry::TypedPath {
+                display: trimmed.to_string(),
+                raw: trimmed.to_string(),
+            });
+        }
+        return entries;
+    }
+
+    if resolved_is_dir {
+        entries.push(PathBrowserEntry::OpenCurrent(canon.clone()));
+    }
+    if let Some(idx) = trimmed.rfind('/') {
+        let parent_raw = &trimmed[..=idx];
+        let name_prefix = &trimmed[idx + 1..];
+        let parent_dir = resolve_cd_path(browse_dir, parent_raw);
+        for (display, path) in list_subdirectories(&parent_dir, name_prefix) {
+            let item_canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if resolved_is_dir && item_canon == canon {
+                continue;
+            }
+            entries.push(PathBrowserEntry::Dir { display, path });
+        }
+    }
+    if entries.is_empty() {
+        entries.push(PathBrowserEntry::TypedPath {
+            display: trimmed.to_string(),
+            raw: trimmed.to_string(),
+        });
+    }
+    entries
+}
 
 impl App {
     pub(super) fn handle_path_keys(&mut self, key: KeyEvent) -> Action {
-        let choose_parent = self
+        let choosing_parent = self
             .ui
             .welcome
             .as_ref()
             .is_some_and(|w| w.mode == WelcomeMode::NewFolderPickParent);
-        let mut submit: Option<String> = None;
-        let cwd = self.session.current.cwd.clone();
-        if let Some(welcome) = self.ui.welcome.as_mut() {
-            match key.code {
-                KeyCode::Esc => {
-                    welcome.mode = WelcomeMode::Home;
-                    welcome.path_selected = 0;
-                    welcome.error = None;
+        let (browse_dir, raw) = match self.ui.welcome.as_ref() {
+            Some(w) => (w.browse_dir.clone(), w.path.clone()),
+            None => return Action::None,
+        };
+        let entries = build_path_browser_entries(&browse_dir, &raw);
+
+        match key.code {
+            KeyCode::Esc => {
+                if let Some(w) = self.ui.welcome.as_mut() {
+                    w.mode = WelcomeMode::Home;
+                    w.path.clear();
+                    w.path_cursor = 0;
+                    w.path_selected = 0;
+                    w.error = None;
                 }
-                KeyCode::Up => {
-                    welcome.path_selected = welcome.path_selected.saturating_sub(1);
-                }
-                KeyCode::Down => {
-                    let comps = complete_directories(&cwd, &welcome.path);
-                    if !comps.is_empty() {
-                        welcome.path_selected = (welcome.path_selected + 1).min(comps.len() - 1);
-                    }
-                }
-                KeyCode::Backspace => {
-                    welcome.path.pop();
-                    welcome.path_selected = 0;
-                    welcome.error = None;
-                }
-                KeyCode::Tab => {
-                    let comps = complete_directories(&cwd, &welcome.path);
-                    let idx = welcome.path_selected.min(comps.len().saturating_sub(1));
-                    if let Some((_, arg)) = comps.get(idx) {
-                        welcome.path = arg.clone();
-                        welcome.path_selected = 0;
-                        welcome.error = None;
-                    }
-                }
-                KeyCode::Enter => {
-                    let comps = complete_directories(&cwd, &welcome.path);
-                    let sel = welcome.path_selected.min(comps.len().saturating_sub(1));
-                    let typed = welcome.path.trim();
-                    let typed_is_dir = !typed.is_empty() && resolve_cd_path(&cwd, typed).is_dir();
-                    if welcome.path_selected > 0 {
-                        if let Some((_, arg)) = comps.get(sel) {
-                            submit = Some(arg.clone());
-                        }
-                    } else if typed_is_dir || typed.is_empty() {
-                        submit = Some(welcome.path.clone());
-                    } else if let Some((_, arg)) = comps.get(sel) {
-                        submit = Some(arg.clone());
-                    } else {
-                        submit = Some(welcome.path.clone());
-                    }
-                }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    welcome.path.push(c);
-                    welcome.path_selected = 0;
-                    welcome.error = None;
-                }
-                _ => {}
+                return Action::None;
             }
+            KeyCode::Up => {
+                if let Some(w) = self.ui.welcome.as_mut() {
+                    w.path_selected = w.path_selected.saturating_sub(1);
+                    w.error = None;
+                }
+                return Action::None;
+            }
+            KeyCode::Down => {
+                if let Some(w) = self.ui.welcome.as_mut() {
+                    if !entries.is_empty() {
+                        w.path_selected = (w.path_selected + 1).min(entries.len() - 1);
+                    }
+                    w.error = None;
+                }
+                return Action::None;
+            }
+            KeyCode::Left
+                if key.modifiers.is_empty()
+                    && self.ui.welcome.as_ref().is_some_and(|w| w.path.is_empty()) =>
+            {
+                self.path_browser_go_up();
+                return Action::None;
+            }
+            KeyCode::Backspace
+                if key.modifiers.is_empty()
+                    && self.ui.welcome.as_ref().is_some_and(|w| w.path.is_empty()) =>
+            {
+                self.path_browser_go_up();
+                return Action::None;
+            }
+            KeyCode::Right
+                if key.modifiers.is_empty()
+                    && self
+                        .ui
+                        .welcome
+                        .as_ref()
+                        .is_some_and(|w| w.path_cursor >= w.path.chars().count()) =>
+            {
+                self.path_browser_step_into(&entries);
+                return Action::None;
+            }
+            KeyCode::Tab => {
+                self.path_browser_step_into(&entries);
+                return Action::None;
+            }
+            KeyCode::Enter => {
+                return self.activate_path_entry(&entries, choosing_parent);
+            }
+            _ => {}
         }
-        if let Some(raw) = submit {
-            if choose_parent {
-                return self.begin_folder_name(&raw);
+
+        if let Some(w) = self.ui.welcome.as_mut() {
+            match line_edit::handle_key(&mut w.path, &mut w.path_cursor, key) {
+                EditOutcome::Changed => {
+                    w.path_selected = 0;
+                    w.error = None;
+                }
+                EditOutcome::Moved | EditOutcome::Ignored => {}
             }
-            return self.enter_workspace_path(&raw);
         }
         Action::None
     }
 
-    fn begin_folder_name(&mut self, raw: &str) -> Action {
-        let candidate = resolve_cd_path(&self.session.current.cwd, raw.trim());
+    fn path_browser_go_up(&mut self) {
+        let Some(w) = self.ui.welcome.as_mut() else {
+            return;
+        };
+        let current = std::fs::canonicalize(&w.browse_dir).unwrap_or_else(|_| w.browse_dir.clone());
+        let Some(parent) = current.parent().map(Path::to_path_buf) else {
+            return;
+        };
+        w.browse_dir = parent.clone();
+        w.path.clear();
+        w.path_cursor = 0;
+        w.error = None;
+        let next_entries = build_path_browser_entries(&parent, "");
+        w.path_selected = next_entries
+            .iter()
+            .position(|entry| match entry {
+                PathBrowserEntry::Dir { path, .. } => {
+                    std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()) == current
+                }
+                _ => false,
+            })
+            .unwrap_or(0);
+    }
+
+    fn path_browser_descend(&mut self, target: PathBuf) {
+        let canon = std::fs::canonicalize(&target).unwrap_or(target);
+        if !canon.is_dir() {
+            if let Some(w) = self.ui.welcome.as_mut() {
+                w.error = Some(format!("not a directory: {}", canon.display()));
+            }
+            return;
+        }
+        if let Some(w) = self.ui.welcome.as_mut() {
+            w.browse_dir = canon;
+            w.path.clear();
+            w.path_cursor = 0;
+            w.path_selected = 0;
+            w.error = None;
+        }
+    }
+
+    fn path_browser_step_into(&mut self, entries: &[PathBrowserEntry]) {
+        let sel = self
+            .ui
+            .welcome
+            .as_ref()
+            .map(|w| w.path_selected.min(entries.len().saturating_sub(1)))
+            .unwrap_or(0);
+        match entries.get(sel) {
+            Some(PathBrowserEntry::Dir { path, .. }) => {
+                self.path_browser_descend(path.clone());
+            }
+            Some(PathBrowserEntry::Parent(_)) => {
+                self.path_browser_go_up();
+            }
+            Some(PathBrowserEntry::OpenCurrent(path)) => {
+                self.path_browser_descend(path.clone());
+            }
+            _ => {}
+        }
+    }
+
+    fn activate_path_entry(
+        &mut self,
+        entries: &[PathBrowserEntry],
+        choosing_parent: bool,
+    ) -> Action {
+        let sel = self
+            .ui
+            .welcome
+            .as_ref()
+            .map(|w| w.path_selected.min(entries.len().saturating_sub(1)))
+            .unwrap_or(0);
+        match entries.get(sel).cloned() {
+            Some(PathBrowserEntry::OpenCurrent(path)) => {
+                self.commit_browser_path(path, choosing_parent)
+            }
+            Some(PathBrowserEntry::Parent(_)) => {
+                self.path_browser_go_up();
+                Action::None
+            }
+            Some(PathBrowserEntry::Dir { path, .. }) => {
+                self.path_browser_descend(path);
+                Action::None
+            }
+            Some(PathBrowserEntry::TypedPath { raw, .. }) => {
+                let base = self
+                    .ui
+                    .welcome
+                    .as_ref()
+                    .map(|w| w.browse_dir.clone())
+                    .unwrap_or_else(|| self.session.current.cwd.clone());
+                let candidate = resolve_cd_path(&base, raw.trim());
+                self.commit_browser_path(candidate, choosing_parent)
+            }
+            None => {
+                let fallback = self
+                    .ui
+                    .welcome
+                    .as_ref()
+                    .map(|w| resolve_cd_path(&w.browse_dir, w.path.trim()))
+                    .unwrap_or_else(|| self.session.current.cwd.clone());
+                self.commit_browser_path(fallback, choosing_parent)
+            }
+        }
+    }
+
+    fn commit_browser_path(&mut self, candidate: PathBuf, choosing_parent: bool) -> Action {
+        if choosing_parent {
+            return self.begin_folder_name_path(candidate);
+        }
+        let path = std::fs::canonicalize(&candidate).unwrap_or(candidate);
+        if !path.is_dir() {
+            if let Some(w) = self.ui.welcome.as_mut() {
+                w.error = Some(format!("not a directory: {}", path.display()));
+            }
+            return Action::None;
+        }
+        self.activate_workspace(path);
+        Action::None
+    }
+
+    pub(in crate::tui) fn hub_click_path_entry(&mut self, idx: usize) -> Action {
+        let (choosing_parent, browse_dir, raw, already) = match self.ui.welcome.as_ref() {
+            Some(w) if w.mode.is_path_input() => (
+                w.mode == WelcomeMode::NewFolderPickParent,
+                w.browse_dir.clone(),
+                w.path.clone(),
+                w.path_selected == idx,
+            ),
+            _ => return Action::None,
+        };
+        let entries = build_path_browser_entries(&browse_dir, &raw);
+        if idx >= entries.len() {
+            return Action::None;
+        }
+        if let Some(w) = self.ui.welcome.as_mut() {
+            w.path_selected = idx;
+            w.error = None;
+        }
+        let immediate = matches!(
+            entries.get(idx),
+            Some(PathBrowserEntry::OpenCurrent(_) | PathBrowserEntry::Parent(_))
+        );
+        if already || immediate {
+            return self.activate_path_entry(&entries, choosing_parent);
+        }
+        Action::None
+    }
+
+    fn begin_folder_name_path(&mut self, candidate: PathBuf) -> Action {
         let path = std::fs::canonicalize(&candidate).unwrap_or(candidate);
         if !path.is_dir() {
             if let Some(welcome) = self.ui.welcome.as_mut() {
@@ -94,6 +347,7 @@ impl App {
             welcome.folder_parent = Some(path);
             welcome.mode = WelcomeMode::NewFolderName;
             welcome.draft.clear();
+            welcome.draft_cursor = 0;
             welcome.error = None;
         }
         Action::None

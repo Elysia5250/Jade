@@ -84,6 +84,11 @@ pub(crate) enum HitTarget {
     HubControl(HubControl),
     HubOpenPath,
     HubNewFolder,
+    HubPathEntry(usize),
+    HubListItem(usize),
+    ModalItem(usize),
+    ModalLoginField(usize),
+    FocusSideInput,
 }
 
 #[derive(Debug, Clone)]
@@ -289,6 +294,18 @@ pub(crate) struct HubWorkspaceRow {
     pub(crate) resumes: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PathBrowserEntry {
+    /// Confirm and open (or select as parent) the current directory.
+    OpenCurrent(PathBuf),
+    /// Navigate up to the parent directory (`../`).
+    Parent(PathBuf),
+    /// Descend into a subdirectory (`name/`).
+    Dir { display: String, path: PathBuf },
+    /// Submit an explicitly typed path (e.g. `/tmp/foo` or `~/work`).
+    TypedPath { display: String, raw: String },
+}
+
 /// Central Mission Control Hub. Shown on startup and reachable anytime via `/home` or `Ctrl+X h`.
 pub(crate) struct Welcome {
     pub(crate) can_return: bool,
@@ -301,14 +318,18 @@ pub(crate) struct Welcome {
     pub(crate) selected_workspace: usize,
     pub(crate) selected_control: usize,
     pub(crate) search: String,
+    pub(crate) search_cursor: usize,
     pub(crate) searching: bool,
     pub(crate) confirm_delete: Option<String>,
     pub(crate) rename_target: Option<String>,
+    pub(crate) browse_dir: PathBuf,
     pub(crate) path: String,
+    pub(crate) path_cursor: usize,
     pub(crate) path_selected: usize,
     pub(crate) error: Option<String>,
     pub(crate) folder_parent: Option<PathBuf>,
     pub(crate) draft: String,
+    pub(crate) draft_cursor: usize,
     pub(crate) list_selected: usize,
     pub(crate) skills: Vec<SkillSummary>,
     pub(crate) notes: Vec<MemoryNote>,

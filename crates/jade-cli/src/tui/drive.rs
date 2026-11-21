@@ -414,6 +414,8 @@ async fn on_terminal(
                 return Ok(TermOutcome::Stay);
             }
             app.ui.selection = None;
+            app.ui.hover_target = None;
+            app.ui.hover_rect = None;
             app.ui.screen_lines.clear();
             let action = app.handle_key(key);
             if on_action(app, tui, remote, Some((tty, term_rx)), action).await? {
@@ -431,12 +433,19 @@ async fn on_terminal(
         Event::Mouse(mouse) => {
             if matches!(mouse.kind, MouseEventKind::Moved) {
                 let prev_hover = app.ui.inspector.hover_divider;
+                let prev_target = app.ui.hover_target.clone();
+                let prev_rect = app.ui.hover_rect;
                 app.handle_mouse(mouse);
-                return Ok(if app.ui.inspector.hover_divider != prev_hover {
-                    TermOutcome::Redraw
-                } else {
-                    TermOutcome::Stay
-                });
+                return Ok(
+                    if app.ui.inspector.hover_divider != prev_hover
+                        || app.ui.hover_target != prev_target
+                        || app.ui.hover_rect != prev_rect
+                    {
+                        TermOutcome::Redraw
+                    } else {
+                        TermOutcome::Stay
+                    },
+                );
             }
             if matches!(mouse.kind, MouseEventKind::Up(MouseButton::Left))
                 && app.ui.selection.as_ref().is_some_and(|s| s.active)
@@ -456,6 +465,8 @@ async fn on_terminal(
         }
         Event::Resize(_, _) => {
             app.ui.selection = None;
+            app.ui.hover_target = None;
+            app.ui.hover_rect = None;
             app.ui.drag_start = None;
             app.ui.screen_lines.clear();
             Ok(TermOutcome::Redraw)

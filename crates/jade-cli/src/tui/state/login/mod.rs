@@ -7,6 +7,7 @@ mod methods;
 impl App {
     pub(in crate::tui) fn open_login_modal(&mut self) {
         self.cancel_login_bg();
+        self.ui.modal_cursor = 0;
         self.ui.modal = Some(Modal::Login(LoginModal::SelectProvider {
             filter: String::new(),
             selected: 0,

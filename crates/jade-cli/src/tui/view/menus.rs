@@ -73,12 +73,17 @@ pub(super) fn draw_cd_menu(frame: &mut Frame, app: &App, theme: &Theme, editor: 
         .collect();
     let mut state = ListState::default();
     state.select(Some(app.ui.menu_selected.min(items.len() - 1)));
+    let title = if items.len() > 10 {
+        format!(" directory ({}) ", items.len())
+    } else {
+        " directory ".to_string()
+    };
     let list = List::new(rows)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(" directory ", Style::default().fg(theme.dim))),
+                .title(Span::styled(title, Style::default().fg(theme.dim))),
         )
         .highlight_style(
             Style::default()

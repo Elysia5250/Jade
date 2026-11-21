@@ -55,73 +55,27 @@ impl App {
 
     pub(in crate::tui) fn handle_side_key(&mut self, key: KeyEvent) -> Action {
         if key.code == KeyCode::Esc {
-            if self.ui.side_input.is_empty() {
-                self.ui.focus = Focus::Input;
-            } else {
-                self.ui.side_input.clear();
-                self.ui.side_cursor = 0;
-            }
+            self.ui.focus = Focus::Input;
             return Action::None;
         }
-        if let KeyCode::Char(ch) = key.code {
-            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
-                self.insert_side_char(ch);
+        if key.code == KeyCode::Enter {
+            let text = self.ui.side_input.trim().to_string();
+            if text.is_empty() {
                 return Action::None;
             }
+            self.ui.side_input.clear();
+            self.ui.side_cursor = 0;
+            return if key.modifiers.contains(KeyModifiers::ALT) {
+                Action::SubmitAgentFollowup(text)
+            } else if key.modifiers.contains(KeyModifiers::CONTROL) {
+                Action::SubmitAgentSteer(text)
+            } else {
+                Action::SubmitAgent(text)
+            };
         }
-        match key.code {
-            KeyCode::Enter => {
-                let text = self.ui.side_input.trim().to_string();
-                if text.is_empty() {
-                    return Action::None;
-                }
-                self.ui.side_input.clear();
-                self.ui.side_cursor = 0;
-                if key.modifiers.contains(KeyModifiers::ALT) {
-                    Action::SubmitAgentFollowup(text)
-                } else if key.modifiers.contains(KeyModifiers::CONTROL) {
-                    Action::SubmitAgentSteer(text)
-                } else {
-                    Action::SubmitAgent(text)
-                }
-            }
-            KeyCode::Backspace => {
-                self.delete_side_before();
-                Action::None
-            }
-            KeyCode::Left => {
-                self.ui.side_cursor = self.ui.side_cursor.saturating_sub(1);
-                Action::None
-            }
-            KeyCode::Right => {
-                let len = self.ui.side_input.chars().count();
-                if self.ui.side_cursor < len {
-                    self.ui.side_cursor += 1;
-                }
-                Action::None
-            }
-            _ => Action::None,
-        }
+        line_edit::handle_key(&mut self.ui.side_input, &mut self.ui.side_cursor, key);
+        Action::None
     }
-
-    fn insert_side_char(&mut self, ch: char) {
-        let at = side_byte(&self.ui.side_input, self.ui.side_cursor);
-        self.ui.side_input.insert(at, ch);
-        self.ui.side_cursor += 1;
-    }
-
-    fn delete_side_before(&mut self) {
-        if self.ui.side_cursor == 0 {
-            return;
-        }
-        self.ui.side_cursor -= 1;
-        let at = side_byte(&self.ui.side_input, self.ui.side_cursor);
-        self.ui.side_input.remove(at);
-    }
-}
-
-fn side_byte(text: &str, chars: usize) -> usize {
-    text.chars().take(chars).map(char::len_utf8).sum()
 }
 
 fn write_side_note(app: &mut App, note: SideNote) {

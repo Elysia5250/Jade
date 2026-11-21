@@ -1,7 +1,8 @@
-//! Generic modals and the login wizard.
+//! Generic modals (command picker, models, sessions, rewind) with mouse hit regions.
+use super::login_modal::{draw_login_modal, place_cursor};
 use crate::tui::*;
 
-fn modal_rect(area: Rect, want_w: u16, want_h: u16) -> Rect {
+pub(super) fn modal_rect(area: Rect, want_w: u16, want_h: u16) -> Rect {
     let width = want_w
         .min(area.width.saturating_sub(4).max(1))
         .min(area.width);
@@ -11,610 +12,357 @@ fn modal_rect(area: Rect, want_w: u16, want_h: u16) -> Rect {
     centered_rect(area, width, height)
 }
 
-pub(super) fn draw_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+pub(super) fn draw_modal(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     if area.width < 4 || area.height < 4 {
         return;
     }
-    let Some(modal) = app.ui.modal.as_ref() else {
+    let Some(modal) = app.ui.modal.take() else {
         return;
     };
-    match modal {
-        Modal::Picker(p) => {
-            let filtered: Vec<&(String, Command)> = p
-                .items
-                .iter()
-                .filter(|(label, _)| {
-                    p.query.is_empty()
-                        || label
-                            .to_ascii_lowercase()
-                            .contains(&p.query.to_ascii_lowercase())
-                })
-                .collect();
-            let want_h = ((filtered.len() as u16) + 4).clamp(6, 18);
-            let popup = modal_rect(area, 62, want_h);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    format!(" {} ", p.title),
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-
-            let parts = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Min(1)])
-                .split(inner);
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(" Search: ", Style::default().fg(theme.dim)),
-                    Span::raw(p.query.clone()),
-                ])),
-                parts[0],
-            );
-            let list_items: Vec<ListItem> = filtered
-                .iter()
-                .map(|(label, _)| ListItem::new(Line::raw(format!(" {label}"))))
-                .collect();
-            let mut state = ListState::default();
-            if !list_items.is_empty() {
-                state.select(Some(p.selected.min(list_items.len() - 1)));
-            }
-            let list = List::new(list_items).highlight_style(
-                Style::default()
-                    .bg(theme.selection)
-                    .add_modifier(Modifier::BOLD),
-            );
-            frame.render_stateful_widget(list, parts[1], &mut state);
-        }
-        Modal::Models(m) => {
-            let filtered: Vec<&AvailableModel> = m
-                .models
-                .iter()
-                .filter(|item| {
-                    m.filter.is_empty()
-                        || item
-                            .model_id
-                            .to_ascii_lowercase()
-                            .contains(&m.filter.to_ascii_lowercase())
-                        || item
-                            .provider_id
-                            .to_ascii_lowercase()
-                            .contains(&m.filter.to_ascii_lowercase())
-                })
-                .collect();
-            let want_h = ((filtered.len() as u16) + 6).clamp(8, 20);
-            let popup = modal_rect(area, 66, want_h);
-            frame.render_widget(Clear, popup);
-            let title = " model ";
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(title, Style::default().fg(theme.accent)));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-
-            let parts = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Min(1)])
-                .split(inner);
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(" Filter: ", Style::default().fg(theme.dim)),
-                    Span::raw(m.filter.clone()),
-                ])),
-                parts[0],
-            );
-            let active_provider = app.inputs.catalog.provider_id.clone();
-            let active_model = app.inputs.catalog.model_id.clone();
-            let signed_in = app.inputs.catalog.signed_in;
-            let rows: Vec<ListItem> = filtered
-                .iter()
-                .map(|item| {
-                    let is_active = signed_in
-                        && item.provider_id == active_provider
-                        && item.model_id == active_model;
-                    let dot = if is_active { "* " } else { "  " };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            dot,
-                            Style::default().fg(if is_active { theme.ok } else { theme.dim }),
-                        ),
-                        Span::raw(format!("{:<30} ", item.model_id)),
-                        Span::styled(
-                            format!("{} ({})", item.provider_name, item.auth_kind),
-                            Style::default().fg(theme.dim),
-                        ),
-                    ]))
-                })
-                .collect();
-            let mut state = ListState::default();
-            if !rows.is_empty() {
-                state.select(Some(m.selected.min(rows.len() - 1)));
-            }
-            let list = List::new(rows).highlight_style(
-                Style::default()
-                    .bg(theme.selection)
-                    .add_modifier(Modifier::BOLD),
-            );
-            frame.render_stateful_widget(list, parts[1], &mut state);
-        }
-        Modal::Sessions(s) => {
-            let want_h = ((s.sessions.len() as u16) + 4).clamp(7, 18);
-            let popup = modal_rect(area, 72, want_h);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    " sessions ",
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-
-            let rows: Vec<ListItem> = if s.sessions.is_empty() {
-                vec![ListItem::new(Line::styled(
-                    " (no saved sessions yet)",
-                    Style::default().fg(theme.dim),
-                ))]
-            } else {
-                s.sessions
-                    .iter()
-                    .map(|item| {
-                        let cur = if item.id == app.session.current.id {
-                            "* "
-                        } else {
-                            "  "
-                        };
-                        ListItem::new(Line::from(vec![
-                            Span::styled(cur, Style::default().fg(theme.ok)),
-                            Span::raw(format!("{:<32} ", truncate_chars(&item.title, 30))),
-                            Span::styled(
-                                format!("{} - {} items", collapse_home(&item.cwd), item.item_count),
-                                Style::default().fg(theme.dim),
-                            ),
-                        ]))
-                    })
-                    .collect()
-            };
-            let mut state = ListState::default();
-            if !s.sessions.is_empty() {
-                state.select(Some(s.selected.min(s.sessions.len() - 1)));
-            }
-            let list = List::new(rows).highlight_style(
-                Style::default()
-                    .bg(theme.selection)
-                    .add_modifier(Modifier::BOLD),
-            );
-            frame.render_stateful_widget(list, inner, &mut state);
-        }
-        Modal::Rewind(r) => {
-            let want_h = ((r.checkpoints.len() as u16) + 5).clamp(8, 18);
-            let popup = modal_rect(area, 76, want_h);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    " rewind checkpoint (Enter confirm · Esc cancel) ",
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-
-            let rows: Vec<ListItem> = r
-                .checkpoints
-                .iter()
-                .enumerate()
-                .map(|(idx, cp)| {
-                    let badge = if idx == 0 { "* " } else { "  " };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(badge, Style::default().fg(theme.ok)),
-                        Span::styled(format!("#{:<3} ", cp.id), Style::default().fg(theme.accent)),
-                        Span::raw(format!("{:<38} ", truncate_chars(&cp.label, 36))),
-                        Span::styled(
-                            format!("{} files", cp.files_touched),
-                            Style::default().fg(theme.dim),
-                        ),
-                    ]))
-                })
-                .collect();
-            let mut state = ListState::default();
-            if !r.checkpoints.is_empty() {
-                state.select(Some(r.selected.min(r.checkpoints.len() - 1)));
-            }
-            let list = List::new(rows).highlight_style(
-                Style::default()
-                    .bg(theme.selection)
-                    .add_modifier(Modifier::BOLD),
-            );
-            frame.render_stateful_widget(list, inner, &mut state);
-        }
+    match &modal {
+        Modal::Picker(p) => draw_picker(frame, app, theme, area, p),
+        Modal::Models(m) => draw_models(frame, app, theme, area, m),
+        Modal::Sessions(s) => draw_sessions(frame, app, theme, area, s),
+        Modal::Rewind(r) => draw_rewind(frame, app, theme, area, r),
         Modal::Login(login) => draw_login_modal(frame, app, theme, area, login),
     }
+    app.ui.modal = Some(modal);
 }
 
-fn draw_login_modal(frame: &mut Frame, app: &App, theme: &Theme, area: Rect, login: &LoginModal) {
-    match login {
-        LoginModal::SelectProvider { filter, selected } => {
-            let providers = app.filtered_login_providers(filter);
-            let connected = &app.inputs.catalog.connected_providers;
-            let want_h = ((providers.len() as u16) + 5).clamp(8, 18);
-            let popup = modal_rect(area, 70, want_h);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(" login ", Style::default().fg(theme.accent)));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
+fn draw_picker(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect, p: &Picker) {
+    let filtered: Vec<&(String, Command)> = p
+        .items
+        .iter()
+        .filter(|(label, _)| {
+            p.query.is_empty()
+                || label
+                    .to_ascii_lowercase()
+                    .contains(&p.query.to_ascii_lowercase())
+        })
+        .collect();
+    let want_h = ((filtered.len() as u16) + 4).clamp(6, 18);
+    let popup = modal_rect(area, 62, want_h);
+    app.ui.modal_rect = Some(popup);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent))
+        .title(Span::styled(
+            format!(" {} ", p.title),
+            Style::default().fg(theme.accent),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
 
-            let parts = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(1), Constraint::Min(1)])
-                .split(inner);
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(" Search: ", Style::default().fg(theme.dim)),
-                    Span::raw(filter.clone()),
-                ])),
-                parts[0],
-            );
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(1)])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" Search: ", Style::default().fg(theme.dim)),
+            Span::raw(p.query.clone()),
+        ])),
+        parts[0],
+    );
+    place_cursor(frame, parts[0], 9, &p.query, app.ui.modal_cursor);
 
-            let rows: Vec<ListItem> = providers
-                .iter()
-                .map(|(_, p)| {
-                    let badge = match connected.get(p.id) {
-                        Some(label) => format!("[✓ {label}]"),
-                        None => String::new(),
-                    };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(
-                            format!(" {:<20} ", p.name),
-                            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("{:<32} ", p.subtitle),
-                            Style::default().fg(theme.dim),
-                        ),
-                        Span::styled(badge, Style::default().fg(theme.ok)),
-                    ]))
-                })
-                .collect();
-            let mut state = ListState::default();
-            if !rows.is_empty() {
-                state.select(Some((*selected).min(rows.len() - 1)));
-            }
-            let list = List::new(rows).highlight_style(
-                Style::default()
-                    .bg(theme.selection)
-                    .add_modifier(Modifier::BOLD),
-            );
-            frame.render_stateful_widget(list, parts[1], &mut state);
-        }
-        LoginModal::SelectMethod {
-            provider_idx,
-            selected,
-        } => {
-            let prov = &BUILTIN_PROVIDERS[*provider_idx];
-            let popup = modal_rect(area, 72, (prov.methods.len() as u16) * 2 + 4);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    format!(" {} - Select auth method (Esc back/close) ", prov.name),
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
+    let list_h = parts[1].height as usize;
+    let sel = p.selected.min(filtered.len().saturating_sub(1));
+    let offset = if list_h > 0 && sel >= list_h {
+        sel + 1 - list_h
+    } else {
+        0
+    };
+    let list_items: Vec<ListItem> = filtered
+        .iter()
+        .skip(offset)
+        .take(list_h.max(1))
+        .enumerate()
+        .map(|(vis, (label, _))| {
+            let idx = offset + vis;
+            push_modal_hit(app, parts[1], vis, idx);
+            ListItem::new(Line::raw(format!(" {label}")))
+        })
+        .collect();
+    let mut state = ListState::default();
+    if !list_items.is_empty() {
+        state.select(Some(sel.saturating_sub(offset)));
+    }
+    let list = List::new(list_items).highlight_style(
+        Style::default()
+            .bg(theme.selection)
+            .add_modifier(Modifier::BOLD),
+    );
+    frame.render_stateful_widget(list, parts[1], &mut state);
+}
 
-            let rows: Vec<ListItem> = prov
-                .methods
-                .iter()
-                .map(|m| {
-                    ListItem::new(vec![
-                        Line::styled(
-                            format!(" {}", m.label),
-                            Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
-                        ),
-                        Line::styled(format!("   {}", m.hint), Style::default().fg(theme.dim)),
-                    ])
-                })
-                .collect();
-            let mut state = ListState::default();
-            state.select(Some(*selected));
-            let list = List::new(rows).highlight_style(
-                Style::default()
-                    .bg(theme.selection)
-                    .add_modifier(Modifier::BOLD),
-            );
-            frame.render_stateful_widget(list, inner, &mut state);
-        }
-        LoginModal::ApiKeyForm {
-            provider_idx,
-            key,
-            base_url,
-            model,
-            focus_field,
-            reveal,
-            error,
-        } => {
-            let prov = &BUILTIN_PROVIDERS[*provider_idx];
-            let popup = modal_rect(area, 68, 12);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    format!(" {} - API Key ", prov.name),
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
+fn draw_models(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect, m: &ModelsModal) {
+    let filtered: Vec<&AvailableModel> = m
+        .models
+        .iter()
+        .filter(|item| {
+            m.filter.is_empty()
+                || item
+                    .model_id
+                    .to_ascii_lowercase()
+                    .contains(&m.filter.to_ascii_lowercase())
+                || item
+                    .provider_id
+                    .to_ascii_lowercase()
+                    .contains(&m.filter.to_ascii_lowercase())
+        })
+        .collect();
+    let want_h = ((filtered.len() as u16) + 6).clamp(8, 20);
+    let popup = modal_rect(area, 66, want_h);
+    app.ui.modal_rect = Some(popup);
+    frame.render_widget(Clear, popup);
+    let title = if m.fetching {
+        " model (refreshing...) "
+    } else {
+        " model "
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent))
+        .title(Span::styled(title, Style::default().fg(theme.accent)));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
 
-            let masked = if *reveal || key.is_empty() {
-                key.clone()
-            } else {
-                "*".repeat(key.chars().count())
-            };
-            let field = |idx: usize, label: &str, val: &str| {
-                let marker = if *focus_field == idx { "> " } else { "  " };
-                let style = if *focus_field == idx {
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme.dim)
-                };
-                Line::from(vec![
-                    Span::styled(format!("{marker}{label:<12} "), style),
-                    Span::raw(val.to_string()),
-                ])
-            };
-            let mut lines = vec![
-                Line::from(""),
-                field(0, "API Key:", &masked),
-                field(1, "Base URL:", base_url),
-                field(2, "Model:", model),
-                Line::from(""),
-                Line::styled(
-                    "  Tab switch field - Ctrl+R reveal - Enter save - Esc cancel",
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" Filter: ", Style::default().fg(theme.dim)),
+            Span::raw(m.filter.clone()),
+        ])),
+        parts[0],
+    );
+    place_cursor(frame, parts[0], 9, &m.filter, app.ui.modal_cursor);
+
+    let active_provider = app.inputs.catalog.provider_id.clone();
+    let active_model = app.inputs.catalog.model_id.clone();
+    let signed_in = app.inputs.catalog.signed_in;
+    let list_h = parts[1].height as usize;
+    let sel = m.selected.min(filtered.len().saturating_sub(1));
+    let offset = if list_h > 0 && sel >= list_h {
+        sel + 1 - list_h
+    } else {
+        0
+    };
+    let rows: Vec<ListItem> = if filtered.is_empty() && !m.filter.trim().is_empty() {
+        let prov = if active_provider.is_empty() {
+            "provider".to_string()
+        } else {
+            active_provider.clone()
+        };
+        vec![ListItem::new(Line::styled(
+            format!(" Enter to use custom model: {prov}/{}", m.filter.trim()),
+            Style::default().fg(theme.warn),
+        ))]
+    } else {
+        filtered
+            .iter()
+            .skip(offset)
+            .take(list_h.max(1))
+            .enumerate()
+            .map(|(vis, item)| {
+                let idx = offset + vis;
+                push_modal_hit(app, parts[1], vis, idx);
+                let is_active = signed_in
+                    && item.provider_id == active_provider
+                    && item.model_id == active_model;
+                let dot = if is_active { "* " } else { "  " };
+                ListItem::new(Line::from(vec![
+                    Span::styled(
+                        dot,
+                        Style::default().fg(if is_active { theme.ok } else { theme.dim }),
+                    ),
+                    Span::raw(format!("{:<30} ", item.model_id)),
+                    Span::styled(
+                        format!("{} ({})", item.provider_name, item.auth_kind),
+                        Style::default().fg(theme.dim),
+                    ),
+                ]))
+            })
+            .collect()
+    };
+    let mut state = ListState::default();
+    if !filtered.is_empty() {
+        state.select(Some(sel.saturating_sub(offset)));
+    }
+    let list = List::new(rows).highlight_style(
+        Style::default()
+            .bg(theme.selection)
+            .add_modifier(Modifier::BOLD),
+    );
+    frame.render_stateful_widget(list, parts[1], &mut state);
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            " ↑↓ select · Enter choose · Ctrl+U clear · Esc close",
+            Style::default().fg(theme.dim),
+        )),
+        parts[2],
+    );
+}
+
+fn draw_sessions(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect, s: &SessionsModal) {
+    let want_h = ((s.sessions.len() as u16) + 5).clamp(7, 19);
+    let popup = modal_rect(area, 72, want_h);
+    app.ui.modal_rect = Some(popup);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent))
+        .title(Span::styled(
+            " sessions ",
+            Style::default().fg(theme.accent),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    let list_h = parts[0].height as usize;
+    let sel = s.selected.min(s.sessions.len().saturating_sub(1));
+    let offset = if list_h > 0 && sel >= list_h {
+        sel + 1 - list_h
+    } else {
+        0
+    };
+    let current_id = app.session.current.id.clone();
+    let rows: Vec<ListItem> = if s.sessions.is_empty() {
+        vec![ListItem::new(Line::styled(
+            " (no saved sessions yet)",
+            Style::default().fg(theme.dim),
+        ))]
+    } else {
+        s.sessions
+            .iter()
+            .skip(offset)
+            .take(list_h.max(1))
+            .enumerate()
+            .map(|(vis, item)| {
+                let idx = offset + vis;
+                push_modal_hit(app, parts[0], vis, idx);
+                let cur = if item.id == current_id { "* " } else { "  " };
+                ListItem::new(Line::from(vec![
+                    Span::styled(cur, Style::default().fg(theme.ok)),
+                    Span::raw(format!("{:<32} ", truncate_chars(&item.title, 30))),
+                    Span::styled(
+                        format!("{} - {} items", collapse_home(&item.cwd), item.item_count),
+                        Style::default().fg(theme.dim),
+                    ),
+                ]))
+            })
+            .collect()
+    };
+    let mut state = ListState::default();
+    if !s.sessions.is_empty() {
+        state.select(Some(sel.saturating_sub(offset)));
+    }
+    let list = List::new(rows).highlight_style(
+        Style::default()
+            .bg(theme.selection)
+            .add_modifier(Modifier::BOLD),
+    );
+    frame.render_stateful_widget(list, parts[0], &mut state);
+
+    let footer = if let Some(id) = &s.confirm_delete {
+        let title = s
+            .sessions
+            .iter()
+            .find(|x| &x.id == id)
+            .map(|x| x.title.as_str())
+            .unwrap_or("session");
+        Line::styled(
+            format!(" Press d again to delete \"{title}\" · Esc cancel"),
+            Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Line::styled(
+            " ↑↓/jk select · Enter open · d delete · Esc close",
+            Style::default().fg(theme.dim),
+        )
+    };
+    frame.render_widget(Paragraph::new(footer), parts[1]);
+}
+
+fn draw_rewind(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect, r: &RewindModal) {
+    let want_h = ((r.checkpoints.len() as u16) + 5).clamp(8, 18);
+    let popup = modal_rect(area, 76, want_h);
+    app.ui.modal_rect = Some(popup);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.accent))
+        .title(Span::styled(
+            " rewind checkpoint (Enter confirm · Esc cancel) ",
+            Style::default().fg(theme.accent),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let list_h = inner.height as usize;
+    let sel = r.selected.min(r.checkpoints.len().saturating_sub(1));
+    let offset = if list_h > 0 && sel >= list_h {
+        sel + 1 - list_h
+    } else {
+        0
+    };
+    let rows: Vec<ListItem> = r
+        .checkpoints
+        .iter()
+        .skip(offset)
+        .take(list_h.max(1))
+        .enumerate()
+        .map(|(vis, cp)| {
+            let idx = offset + vis;
+            push_modal_hit(app, inner, vis, idx);
+            let badge = if idx == 0 { "* " } else { "  " };
+            ListItem::new(Line::from(vec![
+                Span::styled(badge, Style::default().fg(theme.ok)),
+                Span::styled(format!("#{:<3} ", cp.id), Style::default().fg(theme.accent)),
+                Span::raw(format!("{:<38} ", truncate_chars(&cp.label, 36))),
+                Span::styled(
+                    format!("{} files", cp.files_touched),
                     Style::default().fg(theme.dim),
                 ),
-            ];
-            if let Some(err) = error {
-                lines.push(Line::styled(
-                    format!("  Error: {err}"),
-                    Style::default().fg(theme.bad),
-                ));
-            }
-            frame.render_widget(Paragraph::new(lines), inner);
-        }
-        LoginModal::CustomForm {
-            protocol_idx,
-            name,
-            base_url,
-            key,
-            model,
-            focus_field,
-            error,
-        } => {
-            let popup = modal_rect(area, 72, 14);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    " Custom Compatible Provider ",
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
+            ]))
+        })
+        .collect();
+    let mut state = ListState::default();
+    if !r.checkpoints.is_empty() {
+        state.select(Some(sel.saturating_sub(offset)));
+    }
+    let list = List::new(rows).highlight_style(
+        Style::default()
+            .bg(theme.selection)
+            .add_modifier(Modifier::BOLD),
+    );
+    frame.render_stateful_widget(list, inner, &mut state);
+}
 
-            let proto_label = if *protocol_idx == 1 {
-                "< Anthropic-Compatible >"
-            } else {
-                "< OpenAI-Compatible >"
-            };
-            let masked_key = if key.is_empty() {
-                "(optional)".to_string()
-            } else {
-                "*".repeat(key.chars().count())
-            };
-            let field = |idx: usize, label: &str, val: &str| {
-                let marker = if *focus_field == idx { "> " } else { "  " };
-                let style = if *focus_field == idx {
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme.dim)
-                };
-                Line::from(vec![
-                    Span::styled(format!("{marker}{label:<12} "), style),
-                    Span::raw(val.to_string()),
-                ])
-            };
-            let mut lines = vec![
-                Line::from(""),
-                field(0, "Protocol:", proto_label),
-                field(1, "Name:", name),
-                field(2, "Base URL:", base_url),
-                field(3, "API Key:", &masked_key),
-                field(4, "Model ID:", model),
-                Line::from(""),
-                Line::styled(
-                    "  Tab field - <-/-> protocol - Enter save - Esc cancel",
-                    Style::default().fg(theme.dim),
-                ),
-            ];
-            if let Some(err) = error {
-                lines.push(Line::styled(
-                    format!("  Error: {err}"),
-                    Style::default().fg(theme.bad),
-                ));
-            }
-            frame.render_widget(Paragraph::new(lines), inner);
-        }
-        LoginModal::OAuthBrowser {
-            provider_name,
-            url,
-            pasted,
-            status,
-            busy,
-            error,
-            ..
-        } => {
-            let popup = modal_rect(area, 76, 15);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    format!(" {provider_name} - OAuth Browser "),
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-            if inner.width < 2 || inner.height == 0 {
-                return;
-            }
-            let w = inner.width.saturating_sub(4).max(8) as usize;
-            let mut lines = vec![
-                Line::styled(
-                    format!("  {status}"),
-                    Style::default().fg(if *busy { theme.accent } else { theme.ok }),
-                ),
-                Line::from(""),
-                Line::styled("  Authorize URL:", Style::default().fg(theme.dim)),
-            ];
-            for chunk in wrap_text(url, w) {
-                lines.push(Line::styled(
-                    format!("  {chunk}"),
-                    Style::default().fg(theme.secondary),
-                ));
-            }
-            lines.push(Line::from(""));
-            lines.push(Line::styled(
-                "  Or paste redirect URL / code (for SSH/headless):",
-                Style::default().fg(theme.dim),
-            ));
-            lines.push(Line::from(vec![
-                Span::styled("  > ", Style::default().fg(theme.accent)),
-                Span::raw(pasted.clone()),
-            ]));
-            if let Some(err) = error {
-                lines.push(Line::styled(
-                    format!("  Error: {err}"),
-                    Style::default().fg(theme.bad),
-                ));
-            }
-            frame.render_widget(Paragraph::new(lines), inner);
-        }
-        LoginModal::OAuthCodePaste {
-            provider_name,
-            url,
-            code_input,
-            busy,
-            error,
-            ..
-        } => {
-            let popup = modal_rect(area, 76, 15);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    format!(" {provider_name} "),
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-            if inner.width < 2 || inner.height == 0 {
-                return;
-            }
-            let w = inner.width.saturating_sub(4).max(8) as usize;
-            let mut lines = vec![Line::styled(
-                "  Open this URL in your browser to authorize:",
-                Style::default().fg(theme.dim),
-            )];
-            for chunk in wrap_text(url, w) {
-                lines.push(Line::styled(
-                    format!("  {chunk}"),
-                    Style::default().fg(theme.secondary),
-                ));
-            }
-            lines.push(Line::from(""));
-            lines.push(Line::styled(
-                if *busy {
-                    "  Exchanging authorization code."
-                } else {
-                    "  Paste the `code#state` (or callback URL) and press Enter:"
-                },
-                Style::default().fg(if *busy { theme.accent } else { theme.text }),
-            ));
-            lines.push(Line::from(vec![
-                Span::styled("  > ", Style::default().fg(theme.accent)),
-                Span::raw(code_input.clone()),
-            ]));
-            if let Some(err) = error {
-                lines.push(Line::styled(
-                    format!("  Error: {err}"),
-                    Style::default().fg(theme.bad),
-                ));
-            }
-            frame.render_widget(Paragraph::new(lines), inner);
-        }
-        LoginModal::OAuthDevice {
-            provider_name,
-            verification_uri,
-            user_code,
-            status,
-            error,
-        } => {
-            let popup = modal_rect(area, 66, 12);
-            frame.render_widget(Clear, popup);
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent))
-                .title(Span::styled(
-                    format!(" {provider_name} - Device Flow "),
-                    Style::default().fg(theme.accent),
-                ));
-            let inner = block.inner(popup);
-            frame.render_widget(block, popup);
-
-            let mut lines = vec![
-                Line::from(""),
-                Line::from(vec![
-                    Span::styled("  1. Open:  ", Style::default().fg(theme.dim)),
-                    Span::styled(
-                        verification_uri.clone(),
-                        Style::default().fg(theme.secondary),
-                    ),
-                ]),
-                Line::from(vec![
-                    Span::styled("  2. Code:  ", Style::default().fg(theme.dim)),
-                    Span::styled(
-                        user_code.clone(),
-                        Style::default().fg(theme.ok).add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                Line::from(""),
-                Line::styled(format!("  {status}"), Style::default().fg(theme.dim)),
-                Line::styled("  Press Esc to cancel.", Style::default().fg(theme.dim)),
-            ];
-            if let Some(err) = error {
-                lines.push(Line::styled(
-                    format!("  Error: {err}"),
-                    Style::default().fg(theme.bad),
-                ));
-            }
-            frame.render_widget(Paragraph::new(lines), inner);
-        }
+fn push_modal_hit(app: &mut App, area: Rect, vis: usize, idx: usize) {
+    let row_y = area.y + vis as u16;
+    if row_y < area.y + area.height {
+        app.ui.hit_regions.push(HitRegion {
+            rect: Rect {
+                x: area.x,
+                y: row_y,
+                width: area.width,
+                height: 1,
+            },
+            target: HitTarget::ModalItem(idx),
+        });
     }
 }

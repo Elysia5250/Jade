@@ -422,20 +422,59 @@ fn draw_workspaces_body(
     inner: Rect,
     focused: bool,
 ) {
-    let (workspaces, selected) = {
+    let filtered = app.filtered_hub_workspaces();
+    let (search, searching, selected, workspaces) = {
         let Some(w) = app.ui.welcome.as_ref() else {
             return;
         };
-        (w.workspaces.clone(), w.selected_workspace)
+        let rows: Vec<HubWorkspaceRow> = filtered
+            .iter()
+            .filter_map(|&idx| w.workspaces.get(idx).cloned())
+            .collect();
+        (w.search.clone(), w.searching, w.selected_workspace, rows)
     };
     let width = inner.width as usize;
-    let action_y = inner.y + inner.height.saturating_sub(1);
-    let body_max_y = if action_y > inner.y + 1 {
-        action_y
+    let mut y = inner.y;
+    let max_y = inner.y + inner.height;
+
+    let search_line = if searching {
+        Line::from(vec![
+            Span::styled(
+                " / ",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("{search}_"), Style::default().fg(theme.text)),
+        ])
+    } else if !search.is_empty() {
+        Line::from(vec![
+            Span::styled(" / ", Style::default().fg(theme.accent)),
+            Span::styled(search.clone(), Style::default().fg(theme.text)),
+            Span::styled("  (Esc clear)", Style::default().fg(theme.dim)),
+        ])
     } else {
-        inner.y + inner.height
+        Line::styled(
+            " / search workspaces   ·   o browse folders   ·   N new folder",
+            Style::default().fg(theme.dim),
+        )
     };
-    let avail = (body_max_y.saturating_sub(inner.y)) as usize;
+    if y < max_y {
+        frame.render_widget(
+            Paragraph::new(search_line),
+            Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            },
+        );
+        y += 1;
+    }
+
+    let action_y = max_y.saturating_sub(1);
+    let body_max_y = if action_y > y + 1 { action_y } else { max_y };
+    let avail = (body_max_y.saturating_sub(y)) as usize;
     let sel = selected.min(workspaces.len().saturating_sub(1));
     let start = if sel >= avail && avail > 0 {
         sel + 1 - avail
@@ -443,7 +482,22 @@ fn draw_workspaces_body(
         0
     };
 
-    for (y, (offset, ws)) in (inner.y..body_max_y).zip(workspaces.iter().skip(start).enumerate()) {
+    if workspaces.is_empty() && y < body_max_y {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "  No workspaces match filter",
+                Style::default().fg(theme.dim),
+            )),
+            Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            },
+        );
+    }
+
+    for (row_y, (offset, ws)) in (y..body_max_y).zip(workspaces.iter().skip(start).enumerate()) {
         let idx = start + offset;
         let is_sel = focused && idx == sel;
         let bg = if is_sel { theme.selection } else { theme.bg };
@@ -496,7 +550,7 @@ fn draw_workspaces_body(
         ]);
         let rect = Rect {
             x: inner.x,
-            y,
+            y: row_y,
             width: inner.width,
             height: 1,
         };
@@ -507,7 +561,7 @@ fn draw_workspaces_body(
         frame.render_widget(Paragraph::new(line), rect);
     }
 
-    if action_y < inner.y + inner.height {
+    if action_y < max_y && action_y > inner.y {
         draw_quick_path_actions(frame, app, theme, inner.x, action_y, inner.width);
     }
 }

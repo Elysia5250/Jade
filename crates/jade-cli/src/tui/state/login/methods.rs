@@ -10,6 +10,7 @@ impl App {
             AuthMethodKind::OpenAiApiKey
             | AuthMethodKind::AnthropicApiKey
             | AuthMethodKind::SimpleApiKey => {
+                self.ui.modal_cursor = 0;
                 self.ui.modal = Some(Modal::Login(LoginModal::ApiKeyForm {
                     provider_idx,
                     key: String::new(),
@@ -21,9 +22,11 @@ impl App {
                 }));
             }
             AuthMethodKind::CustomForm => {
+                let initial_name = "Custom Provider".to_string();
+                self.ui.modal_cursor = initial_name.chars().count();
                 self.ui.modal = Some(Modal::Login(LoginModal::CustomForm {
                     protocol_idx: 0,
-                    name: "Custom Provider".to_string(),
+                    name: initial_name,
                     base_url: "http://127.0.0.1:11434/v1".to_string(),
                     key: String::new(),
                     model: String::new(),
@@ -98,6 +101,7 @@ impl App {
                 self.login.rx = Some(rx);
                 self.login.task = Some(handle);
                 self.login.cancel = Some(cancel_tx);
+                self.ui.modal_cursor = 0;
                 self.ui.modal = Some(Modal::Login(LoginModal::OAuthBrowser {
                     provider_name: prov.name.to_string(),
                     url: initial_url,
@@ -155,6 +159,7 @@ impl App {
                 };
                 let url = anthropic_authorize_url(console, &pkce, &state);
                 open_browser(&url);
+                self.ui.modal_cursor = 0;
                 self.ui.modal = Some(Modal::Login(LoginModal::OAuthCodePaste {
                     provider_name: if console {
                         "Anthropic Console (OAuth, experimental / unofficial)".into()

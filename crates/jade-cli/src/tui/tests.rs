@@ -200,14 +200,14 @@ fn typing_between_esc_presses_rearms_the_interrupt() {
 
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     app.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
-    // The draft clears instead of cancelling, and the arm starts over.
-    let clear = app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    assert!(matches!(clear, Action::None));
-    assert!(app.ui.input.is_empty());
+    // Typing disarms the previous Esc without losing the draft; two fresh Esc
+    // presses interrupt while keeping the draft intact.
     let arm = app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(matches!(arm, Action::None));
+    assert_eq!(app.ui.input, "h");
     let cancel = app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(matches!(cancel, Action::Cancel));
+    assert_eq!(app.ui.input, "h");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

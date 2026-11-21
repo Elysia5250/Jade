@@ -18,10 +18,12 @@ impl App {
             match key.code {
                 KeyCode::Up => {
                     self.ui.menu_selected = self.ui.menu_selected.saturating_sub(1);
+                    self.ui.cd_navigated = true;
                     return Action::None;
                 }
                 KeyCode::Down => {
                     self.ui.menu_selected = (self.ui.menu_selected + 1).min(last);
+                    self.ui.cd_navigated = true;
                     return Action::None;
                 }
                 KeyCode::Tab => {
@@ -29,18 +31,32 @@ impl App {
                     self.ui.input = format!("/cd {chosen}");
                     self.ui.input_cursor = self.ui.input.chars().count();
                     self.ui.menu_selected = 0;
+                    self.ui.cd_navigated = false;
+                    self.ui.cd_dismissed = false;
                     return Action::None;
                 }
                 KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
-                    let chosen = cd_dirs[self.ui.menu_selected.min(last)].1.clone();
+                    let raw = self.cd_query().unwrap_or("").trim().to_string();
+                    let keep_typed = !self.ui.cd_navigated
+                        && !raw.is_empty()
+                        && (raw.ends_with('/')
+                            || resolve_cd_path(&self.session.current.cwd, &raw).is_dir());
+                    let target = if keep_typed {
+                        raw
+                    } else {
+                        cd_dirs[self.ui.menu_selected.min(last)].1.clone()
+                    };
                     self.ui.input.clear();
                     self.ui.input_cursor = 0;
                     self.ui.menu_selected = 0;
-                    return self.run_slash(&format!("/cd {chosen}"));
+                    self.ui.cd_navigated = false;
+                    self.ui.cd_dismissed = false;
+                    return self.run_slash(&format!("/cd {target}"));
                 }
                 KeyCode::Esc => {
-                    self.ui.input.clear();
-                    self.ui.input_cursor = 0;
+                    self.ui.cd_dismissed = true;
+                    self.ui.cd_navigated = false;
+                    self.ui.menu_selected = 0;
                     return Action::None;
                 }
                 _ => {}
@@ -140,6 +156,9 @@ impl App {
             KeyCode::Enter => {
                 let text = self.ui.input.trim().to_string();
                 if text.is_empty() && self.ui.pending_images.is_empty() {
+                    if self.ui.mode == InputMode::Agent && !self.inputs.catalog.signed_in {
+                        self.open_login_modal();
+                    }
                     return Action::None;
                 }
                 if self.ui.history.last().map(|h| h != &text).unwrap_or(true) {
@@ -150,6 +169,8 @@ impl App {
                 self.ui.input.clear();
                 self.ui.input_cursor = 0;
                 self.ui.menu_selected = 0;
+                self.ui.cd_navigated = false;
+                self.ui.cd_dismissed = false;
                 self.ui.at_dismissed_at = None;
 
                 if text.starts_with('/') {
@@ -203,17 +224,10 @@ impl App {
                 Action::None
             }
             KeyCode::Esc => {
-                if !self.ui.input.is_empty() {
-                    self.ui.input.clear();
-                    self.ui.input_cursor = 0;
-                } else if !self.ui.pending_images.is_empty() {
-                    self.ui.pending_images.clear();
-                    self.set_toast("cleared attached images", false);
-                } else if self.agent.running {
+                if self.agent.running {
                     return self.esc_interrupt();
-                } else {
-                    self.ui.focus = Focus::Transcript;
                 }
+                self.ui.focus = Focus::Transcript;
                 Action::None
             }
             KeyCode::PageUp => {
@@ -301,6 +315,8 @@ impl App {
                     'u' => {
                         self.ui.input.clear();
                         self.ui.input_cursor = 0;
+                        self.ui.cd_navigated = false;
+                        self.ui.cd_dismissed = false;
                         self.ui.at_dismissed_at = None;
                     }
                     'a' => self.ui.input_cursor = self.line_start_char(self.ui.input_cursor),
@@ -308,6 +324,8 @@ impl App {
                     'k' => {
                         let byte = self.byte_index(self.ui.input_cursor);
                         self.ui.input.truncate(byte);
+                        self.ui.cd_navigated = false;
+                        self.ui.cd_dismissed = false;
                         self.ui.at_dismissed_at = None;
                     }
                     'w' => self.delete_word_before_cursor(),
@@ -346,6 +364,13 @@ impl App {
             return;
         }
         if self.agent.pending_ask.is_some() {
+            return;
+        }
+        if self.ui.focus == Focus::Side {
+            let clean: String = text.chars().filter(|c| !matches!(c, '\r' | '\n')).collect();
+            if !clean.is_empty() {
+                line_edit::insert_str(&mut self.ui.side_input, &mut self.ui.side_cursor, &clean);
+            }
             return;
         }
         self.ui.focus = Focus::Input;
@@ -443,6 +468,8 @@ impl App {
         self.ui.input.insert(at, c);
         self.ui.input_cursor += 1;
         self.ui.menu_selected = 0;
+        self.ui.cd_navigated = false;
+        self.ui.cd_dismissed = false;
         self.ui.at_dismissed_at = None;
         if c == '@' || self.at_mention_span().is_some() {
             self.session
@@ -459,6 +486,8 @@ impl App {
         self.ui.input.remove(at);
         self.ui.input_cursor -= 1;
         self.ui.menu_selected = 0;
+        self.ui.cd_navigated = false;
+        self.ui.cd_dismissed = false;
         self.ui.at_dismissed_at = None;
     }
 
@@ -469,6 +498,8 @@ impl App {
         let at = self.byte_index(self.ui.input_cursor);
         self.ui.input.remove(at);
         self.ui.menu_selected = 0;
+        self.ui.cd_navigated = false;
+        self.ui.cd_dismissed = false;
         self.ui.at_dismissed_at = None;
     }
 

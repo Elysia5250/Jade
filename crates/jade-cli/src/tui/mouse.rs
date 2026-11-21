@@ -11,25 +11,27 @@ impl App {
         match mouse.kind {
             MouseEventKind::Moved => {
                 self.ui.inspector.dragging_divider = false;
-                self.ui.inspector.hover_divider = self
-                    .ui
-                    .inspector
-                    .divider_x
-                    .map(|dx| col.abs_diff(dx) <= 1)
-                    .unwrap_or(false);
+                self.ui.inspector.hover_divider = self.ui.welcome.is_none()
+                    && self.ui.modal.is_none()
+                    && self
+                        .ui
+                        .inspector
+                        .divider_x
+                        .map(|dx| col.abs_diff(dx) <= 1)
+                        .unwrap_or(false);
+                self.update_hover(col, row);
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 self.ui.inspector.dragging_divider = false;
-                if self.ui.modal.is_some() {
-                    return None;
-                }
-                if let Some(dx) = self.ui.inspector.divider_x {
-                    if col.abs_diff(dx) <= 1 {
-                        self.ui.inspector.dragging_divider = true;
-                        self.ui.inspector.hover_divider = true;
-                        self.ui.selection = None;
-                        self.ui.drag_start = None;
-                        return None;
+                if self.ui.modal.is_none() && self.ui.welcome.is_none() {
+                    if let Some(dx) = self.ui.inspector.divider_x {
+                        if col.abs_diff(dx) <= 1 {
+                            self.ui.inspector.dragging_divider = true;
+                            self.ui.inspector.hover_divider = true;
+                            self.ui.selection = None;
+                            self.ui.drag_start = None;
+                            return None;
+                        }
                     }
                 }
                 self.ui.selection = None;
@@ -43,6 +45,9 @@ impl App {
                         let ratio = (right_w as f32 / total_w as f32).clamp(0.22, 0.72);
                         self.ui.inspector.dragged_ratio = Some(ratio);
                     }
+                    return None;
+                }
+                if self.ui.modal.is_some() {
                     return None;
                 }
                 if let Some(start) = self.ui.drag_start {
@@ -83,16 +88,17 @@ impl App {
                     return None;
                 }
                 self.ui.selection = None;
-                if drag_start.is_some() && self.ui.modal.is_none() {
+                if drag_start.is_some() {
                     return self.dispatch_click(col, row);
                 }
             }
             MouseEventKind::ScrollUp => {
                 if self.ui.modal.is_some() {
+                    self.scroll_modal(-1);
                     return None;
                 }
                 if self.ui.welcome.is_some() {
-                    self.scroll_hub(-1);
+                    self.scroll_welcome_popup(-1);
                     return None;
                 }
                 if self.is_over_inspector(col, row) {
@@ -104,10 +110,11 @@ impl App {
             }
             MouseEventKind::ScrollDown => {
                 if self.ui.modal.is_some() {
+                    self.scroll_modal(1);
                     return None;
                 }
                 if self.ui.welcome.is_some() {
-                    self.scroll_hub(1);
+                    self.scroll_welcome_popup(1);
                     return None;
                 }
                 if self.is_over_inspector(col, row) {
@@ -133,6 +140,37 @@ impl App {
         None
     }
 
+    fn update_hover(&mut self, col: u16, row: u16) {
+        let modal_open = self.ui.modal.is_some();
+        let hit = self
+            .ui
+            .hit_regions
+            .iter()
+            .rev()
+            .find(|hr| {
+                if modal_open
+                    && !matches!(
+                        hr.target,
+                        HitTarget::ModalItem(_) | HitTarget::ModalLoginField(_)
+                    )
+                {
+                    return false;
+                }
+                rect_contains(hr.rect, col, row)
+            })
+            .map(|hr| (hr.target.clone(), hr.rect));
+        match hit {
+            Some((target, rect)) => {
+                self.ui.hover_target = Some(target);
+                self.ui.hover_rect = Some(rect);
+            }
+            None => {
+                self.ui.hover_target = None;
+                self.ui.hover_rect = None;
+            }
+        }
+    }
+
     fn is_over_inspector(&self, col: u16, row: u16) -> bool {
         let r = self.ui.inspector.last_area;
         r.width > 0
@@ -144,20 +182,76 @@ impl App {
     }
 
     pub(in crate::tui) fn dispatch_click(&mut self, col: u16, row: u16) -> Option<Action> {
+        if self.ui.modal.is_some() {
+            let hit = self
+                .ui
+                .hit_regions
+                .iter()
+                .rev()
+                .find(|hr| {
+                    matches!(
+                        hr.target,
+                        HitTarget::ModalItem(_) | HitTarget::ModalLoginField(_)
+                    ) && rect_contains(hr.rect, col, row)
+                })
+                .map(|hr| hr.target.clone());
+            match hit {
+                Some(HitTarget::ModalItem(idx)) => return self.click_modal_item(idx),
+                Some(HitTarget::ModalLoginField(field)) => {
+                    self.click_modal_login_field(field);
+                    return None;
+                }
+                _ => {
+                    if self
+                        .ui
+                        .modal_rect
+                        .is_some_and(|r| !rect_contains(r, col, row))
+                    {
+                        self.dismiss_modal();
+                    }
+                    return None;
+                }
+            }
+        }
+
+        if self
+            .ui
+            .welcome
+            .as_ref()
+            .is_some_and(|w| w.mode != WelcomeMode::Home)
+        {
+            let hit = self
+                .ui
+                .hit_regions
+                .iter()
+                .rev()
+                .find(|hr| rect_contains(hr.rect, col, row))
+                .map(|hr| hr.target.clone());
+            match hit {
+                Some(HitTarget::HubPathEntry(idx)) => return Some(self.hub_click_path_entry(idx)),
+                Some(HitTarget::HubListItem(idx)) => {
+                    self.hub_click_list_item(idx);
+                    return None;
+                }
+                _ => {
+                    if self
+                        .ui
+                        .modal_rect
+                        .is_some_and(|r| !rect_contains(r, col, row))
+                    {
+                        self.dismiss_welcome_subpanel();
+                    }
+                    return None;
+                }
+            }
+        }
+
         let hit = self
             .ui
             .hit_regions
             .iter()
             .rev()
-            .find(|hr| {
-                let r = hr.rect;
-                r.width > 0
-                    && r.height > 0
-                    && col >= r.x
-                    && col < r.x + r.width
-                    && row >= r.y
-                    && row < r.y + r.height
-            })
+            .find(|hr| rect_contains(hr.rect, col, row))
             .map(|hr| hr.target.clone());
 
         if let Some(target) = hit {
@@ -310,7 +404,28 @@ impl App {
                 HitTarget::HubNewFolder => {
                     self.hub_open_new_folder_panel();
                 }
+                HitTarget::HubPathEntry(idx) => {
+                    return Some(self.hub_click_path_entry(idx));
+                }
+                HitTarget::HubListItem(idx) => {
+                    self.hub_click_list_item(idx);
+                }
+                HitTarget::ModalItem(idx) => {
+                    return self.click_modal_item(idx);
+                }
+                HitTarget::ModalLoginField(field) => {
+                    self.click_modal_login_field(field);
+                }
+                HitTarget::FocusSideInput => {
+                    if self.ui.side_open {
+                        self.ui.focus = Focus::Side;
+                    }
+                }
             }
+            return None;
+        }
+
+        if self.ui.welcome.is_some() {
             return None;
         }
 
@@ -361,6 +476,15 @@ impl App {
         }
         out.join("\n").trim().to_string()
     }
+}
+
+fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
+    r.width > 0
+        && r.height > 0
+        && col >= r.x
+        && col < r.x + r.width
+        && row >= r.y
+        && row < r.y + r.height
 }
 
 fn copy_to_clipboard(text: &str) {

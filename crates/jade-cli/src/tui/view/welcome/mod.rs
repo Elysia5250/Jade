@@ -188,7 +188,7 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
         )
     } else if w.tab == HubTab::Workspaces {
         Line::styled(
-            " ↑↓/jk move  ·  Enter open  ·  n new session  ·  o open path  ·  N new folder  ·  Tab controls",
+            " ↑↓/jk move  ·  Enter open  ·  / search  ·  n new session  ·  o open path  ·  N new folder  ·  Tab controls",
             Style::default().fg(theme.dim),
         )
     } else {

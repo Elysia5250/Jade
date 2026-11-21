@@ -4,7 +4,7 @@ use super::super::*;
 impl App {
     pub(super) fn reload_welcome_skills(&mut self) {
         let data = self.data_dir.clone();
-        let cwd = self.session.current.cwd.clone();
+        let cwd = self.selected_hub_cwd();
         let mut skills: Vec<_> = jade_agent::skills::discover_skills(&data, &cwd)
             .into_iter()
             .filter(|skill| skill.scope == jade_agent::skills::SkillScope::User)
@@ -75,7 +75,7 @@ impl App {
         }
     }
 
-    fn toggle_selected_skill(&mut self) {
+    pub(super) fn toggle_selected_skill(&mut self) {
         let Some(skill) = self
             .ui
             .welcome
@@ -84,11 +84,8 @@ impl App {
         else {
             return;
         };
-        let on = jade_agent::skills::skill_is_injected(
-            &self.data_dir,
-            &self.session.current.cwd,
-            &skill,
-        );
+        let cwd = self.selected_hub_cwd();
+        let on = jade_agent::skills::skill_is_injected(&self.data_dir, &cwd, &skill);
         let result = jade_agent::skills::prefs::set_inject(&self.data_dir, &skill.name, !on);
         if let Some(welcome) = self.ui.welcome.as_mut() {
             welcome.error = result.err();

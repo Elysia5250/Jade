@@ -146,8 +146,52 @@ pub(crate) fn complete_directories(cwd: &Path, raw: &str) -> Vec<(String, String
             .then_with(|| a.2.cmp(&b.2))
     });
     dirs.into_iter()
-        .take(10)
         .map(|(_, _, display, completed)| (display, completed))
+        .collect()
+}
+
+/// List matching subdirectories inside `dir` (uncapped, fuzzy-ranked).
+pub(crate) fn list_subdirectories(dir: &Path, filter: &str) -> Vec<(String, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let q = filter.to_lowercase();
+    let q_chars = q.chars().count();
+    let mut dirs: Vec<(u8, String, String, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        let is_dir = ft.is_dir() || (ft.is_symlink() && path.is_dir());
+        if !is_dir {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') && !filter.starts_with('.') {
+            continue;
+        }
+        let lower = name.to_lowercase();
+        let rank = if q.is_empty() || name.starts_with(filter) {
+            0
+        } else if lower.starts_with(&q) {
+            1
+        } else if lower.contains(&q) {
+            2
+        } else if q_chars >= 2 && crate::tui::links::is_subsequence(&q, &lower) {
+            3
+        } else {
+            continue;
+        };
+        dirs.push((rank, lower, format!("{name}/"), path));
+    }
+    dirs.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    dirs.into_iter()
+        .map(|(_, _, display, path)| (display, path))
         .collect()
 }
 

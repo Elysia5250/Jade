@@ -13,7 +13,7 @@ mod modals;
 mod ops;
 mod sidechat;
 mod subagent;
-mod welcome;
+pub(in crate::tui) mod welcome;
 
 impl App {
     pub(in crate::tui) fn new(
@@ -98,8 +98,12 @@ impl App {
                 history_pos: None,
                 history_draft: None,
                 menu_selected: 0,
+                cd_navigated: false,
+                cd_dismissed: false,
                 at_dismissed_at: None,
                 modal: None,
+                modal_rect: None,
+                modal_cursor: 0,
                 theme: prefs.theme % THEMES.len(),
                 leader_at: None,
                 interrupt_at: None,
@@ -107,6 +111,8 @@ impl App {
                 welcome: None,
                 inspector: InspectorState::default(),
                 hit_regions: Vec::new(),
+                hover_target: None,
+                hover_rect: None,
                 transcript_area: Rect::default(),
                 mouse_capture: true,
                 selection: None,
@@ -175,6 +181,8 @@ impl App {
         self.session.expanded_explore_groups.clear();
         self.session.transcript_cache.clear();
         self.ui.hit_regions.clear();
+        self.ui.hover_target = None;
+        self.ui.hover_rect = None;
         self.ui.selection = None;
         self.ui.drag_start = None;
         self.ui.screen_lines.clear();

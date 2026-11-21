@@ -6,11 +6,19 @@ impl App {
         if key.code != KeyCode::Esc {
             self.ui.interrupt_at = None;
         }
-        if self.ui.welcome.is_some()
-            && key.code == KeyCode::Char('c')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-        {
-            return Action::Quit;
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.ui.welcome.is_some() {
+                return Action::Quit;
+            }
+            if self.ui.modal.is_some() {
+                self.cancel_login_bg();
+                self.ui.modal = None;
+                self.ui.modal_rect = None;
+                return Action::None;
+            }
+            if self.agent.pending_ask.is_some() {
+                return Action::Cancel;
+            }
         }
         if self.ui.modal.is_some() {
             return self.handle_modal_key(key);
@@ -162,6 +170,30 @@ impl App {
                     self.ui.inspector.scroll = 0;
                     return Action::None;
                 }
+                KeyCode::Char('[')
+                    if self.ui.inspector.tab == InspectorTab::Overview
+                        && !self.jobs.list.is_empty() =>
+                {
+                    self.jobs.selected = self.jobs.selected.saturating_sub(1);
+                    self.ui.inspector.scroll = self.ui.inspector.max_scroll;
+                    return Action::None;
+                }
+                KeyCode::Char(']')
+                    if self.ui.inspector.tab == InspectorTab::Overview
+                        && !self.jobs.list.is_empty() =>
+                {
+                    if self.jobs.selected + 1 < self.jobs.list.len() {
+                        self.jobs.selected += 1;
+                    }
+                    self.ui.inspector.scroll = self.ui.inspector.max_scroll;
+                    return Action::None;
+                }
+                KeyCode::Char('i') | KeyCode::Enter
+                    if self.ui.inspector.tab == InspectorTab::Side && self.ui.side_open =>
+                {
+                    self.ui.focus = Focus::Side;
+                    return Action::None;
+                }
                 _ => {}
             }
         }
@@ -192,13 +224,7 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 match self.ui.focus {
                     Focus::Sidebar => {
-                        if self.ui.inspector.tab == InspectorTab::Overview
-                            && !self.jobs.list.is_empty()
-                        {
-                            self.jobs.selected = self.jobs.selected.saturating_sub(1);
-                        } else {
-                            self.ui.inspector.scroll = self.ui.inspector.scroll.saturating_sub(2);
-                        }
+                        self.ui.inspector.scroll = self.ui.inspector.scroll.saturating_sub(2);
                     }
                     Focus::Transcript => {
                         if let Some(idx) = self.ui.selected_card {
@@ -217,20 +243,12 @@ impl App {
             KeyCode::Down | KeyCode::Char('j') => {
                 match self.ui.focus {
                     Focus::Sidebar => {
-                        if self.ui.inspector.tab == InspectorTab::Overview
-                            && !self.jobs.list.is_empty()
-                        {
-                            if self.jobs.selected + 1 < self.jobs.list.len() {
-                                self.jobs.selected += 1;
-                            }
-                        } else {
-                            self.ui.inspector.scroll = self
-                                .ui
-                                .inspector
-                                .scroll
-                                .saturating_add(2)
-                                .min(self.ui.inspector.max_scroll);
-                        }
+                        self.ui.inspector.scroll = self
+                            .ui
+                            .inspector
+                            .scroll
+                            .saturating_add(2)
+                            .min(self.ui.inspector.max_scroll);
                     }
                     Focus::Transcript => {
                         if !self.session.current.items.is_empty() {
@@ -254,14 +272,19 @@ impl App {
                     self.toggle_expand_cards();
                     return Action::None;
                 }
-                if self.ui.focus == Focus::Sidebar {
+                if self.ui.focus == Focus::Sidebar
+                    && self.ui.inspector.tab == InspectorTab::Overview
+                {
                     if let Some(job) = self.jobs.list.get(self.jobs.selected).cloned() {
                         return Action::AttachJob(job);
                     }
                 }
                 Action::None
             }
-            KeyCode::Char('c') if self.ui.focus == Focus::Sidebar => {
+            KeyCode::Char('c')
+                if self.ui.focus == Focus::Sidebar
+                    && self.ui.inspector.tab == InspectorTab::Overview =>
+            {
                 if let Some(job) = self.jobs.list.get(self.jobs.selected) {
                     return Action::CancelJob(job.id);
                 }
@@ -336,7 +359,6 @@ impl App {
             }
             KeyCode::Char('b') => self.run_command(Command::ToggleSidebar),
             KeyCode::Char('r') => Action::Refresh,
-            KeyCode::Char('q') => Action::Quit,
             _ => Action::None,
         }
     }
@@ -370,6 +392,9 @@ impl App {
                 self.ui.inspector.selected_diff = self.session.current.changed_files.len() - 1;
                 self.ui.inspector.file_path = Some(last.path.clone());
             }
+        }
+        if tab == InspectorTab::Side && self.ui.side_open {
+            self.ui.focus = Focus::Side;
         }
         Action::None
     }

@@ -260,19 +260,32 @@ async fn welcome_path_mode_supports_arrow_selection_and_enter() {
 
     let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
     app.open_welcome();
-    if let Some(w) = app.ui.welcome.as_mut() {
-        w.mode = WelcomeMode::OpenPath;
-    }
+    app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
 
-    // Move Down from Alpha (0) to Beta (1), then Tab completes "Beta/"
-    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(app.ui.welcome.as_ref().unwrap().path_selected, 1);
+    // Entries: [0] OpenCurrent(dir), [1] Parent(..), [2] Alpha/, [3] Beta/
+    // Move down to Beta/ (index 3) and press Tab to descend into Beta/.
+    for _ in 0..3 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    }
+    assert_eq!(app.ui.welcome.as_ref().unwrap().path_selected, 3);
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    assert_eq!(app.ui.welcome.as_ref().unwrap().path, "Beta/");
+    assert_eq!(
+        std::fs::canonicalize(&app.ui.welcome.as_ref().unwrap().browse_dir).unwrap(),
+        std::fs::canonicalize(&b).unwrap()
+    );
     assert_eq!(app.ui.welcome.as_ref().unwrap().path_selected, 0);
 
-    // Clear, type partial lowercase "al", Down/Up stays clamped, Enter opens Alpha
-    app.ui.welcome.as_mut().unwrap().path = "al".to_string();
+    // Go back up with Left, filter "al", Enter descends into Alpha/, Enter opens Alpha/.
+    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    for ch in "al".chars() {
+        app.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.ui.welcome.is_some());
+    assert_eq!(
+        std::fs::canonicalize(&app.ui.welcome.as_ref().unwrap().browse_dir).unwrap(),
+        std::fs::canonicalize(&a).unwrap()
+    );
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(app.ui.welcome.is_none());
     assert_eq!(app.session.current.cwd, std::fs::canonicalize(&a).unwrap());

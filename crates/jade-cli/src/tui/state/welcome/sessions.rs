@@ -92,6 +92,33 @@ impl App {
             .collect()
     }
 
+    pub(in crate::tui) fn filtered_hub_workspaces(&self) -> Vec<usize> {
+        let Some(welcome) = self.ui.welcome.as_ref() else {
+            return Vec::new();
+        };
+        let query = welcome.search.trim().to_ascii_lowercase();
+        welcome
+            .workspaces
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| {
+                query.is_empty()
+                    || collapse_home(&row.cwd)
+                        .to_ascii_lowercase()
+                        .contains(&query)
+                    || row.title.to_ascii_lowercase().contains(&query)
+            })
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    pub(in crate::tui) fn selected_hub_workspace(&self) -> Option<&HubWorkspaceRow> {
+        let welcome = self.ui.welcome.as_ref()?;
+        let filtered = self.filtered_hub_workspaces();
+        let idx = *filtered.get(welcome.selected_workspace)?;
+        welcome.workspaces.get(idx)
+    }
+
     pub(in crate::tui) fn selected_hub_session(&self) -> Option<&HubSessionRow> {
         let welcome = self.ui.welcome.as_ref()?;
         let filtered = self.filtered_hub_sessions();
@@ -108,9 +135,8 @@ impl App {
                 .selected_hub_session()
                 .map(|s| s.cwd.clone())
                 .unwrap_or_else(|| self.session.current.cwd.clone()),
-            HubTab::Workspaces => welcome
-                .workspaces
-                .get(welcome.selected_workspace)
+            HubTab::Workspaces => self
+                .selected_hub_workspace()
                 .map(|w| w.cwd.clone())
                 .unwrap_or_else(|| self.session.current.cwd.clone()),
         }
@@ -154,6 +180,7 @@ impl App {
         };
         if let Some(welcome) = self.ui.welcome.as_mut() {
             welcome.rename_target = Some(row.id);
+            welcome.draft_cursor = row.title.chars().count();
             welcome.draft = row.title;
             welcome.mode = WelcomeMode::RenameSession;
             welcome.confirm_delete = None;
@@ -216,10 +243,7 @@ impl App {
 
     pub(super) fn activate_selected_workspace(&mut self, resume: bool) {
         let path = self
-            .ui
-            .welcome
-            .as_ref()
-            .and_then(|w| w.workspaces.get(w.selected_workspace))
+            .selected_hub_workspace()
             .map(|row| row.cwd.clone())
             .unwrap_or_else(|| self.session.current.cwd.clone());
         self.activate_workspace_with_mode(path, resume);
@@ -321,7 +345,6 @@ fn build_workspace_rows(
             .then(b.running_count.cmp(&a.running_count))
             .then(b.updated_ms.cmp(&a.updated_ms))
     });
-    rows.truncate(16);
     rows
 }
 
@@ -344,10 +367,21 @@ pub(super) fn clamp_hub_selection(welcome: &mut Welcome) {
     } else if welcome.selected_session >= visible_sessions {
         welcome.selected_session = visible_sessions - 1;
     }
-    if welcome.workspaces.is_empty() {
+    let visible_workspaces = welcome
+        .workspaces
+        .iter()
+        .filter(|row| {
+            query.is_empty()
+                || collapse_home(&row.cwd)
+                    .to_ascii_lowercase()
+                    .contains(&query)
+                || row.title.to_ascii_lowercase().contains(&query)
+        })
+        .count();
+    if visible_workspaces == 0 {
         welcome.selected_workspace = 0;
-    } else if welcome.selected_workspace >= welcome.workspaces.len() {
-        welcome.selected_workspace = welcome.workspaces.len() - 1;
+    } else if welcome.selected_workspace >= visible_workspaces {
+        welcome.selected_workspace = visible_workspaces - 1;
     }
     welcome.selected_control = welcome
         .selected_control

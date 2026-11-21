@@ -592,13 +592,23 @@ impl App {
             return Action::None;
         };
         match key.code {
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 ask.selected = ask.selected.saturating_sub(1);
                 self.agent.pending_ask = Some(ask);
             }
-            KeyCode::Down => {
+            KeyCode::Down | KeyCode::Char('j') => {
                 ask.selected = (ask.selected + 1).min(ask.options.len().saturating_sub(1));
                 self.agent.pending_ask = Some(ask);
+            }
+            KeyCode::Char(c @ '1'..='9') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let idx = (c as usize) - ('1' as usize);
+                if let Some(opt) = ask.options.get(idx) {
+                    let label = opt.label.clone();
+                    self.answer_ask(ask.id, label.clone());
+                    self.set_toast(format!("chose: {label}"), false);
+                } else {
+                    self.agent.pending_ask = Some(ask);
+                }
             }
             KeyCode::Enter => {
                 let label = ask
@@ -610,10 +620,8 @@ impl App {
                 self.set_toast(format!("chose: {label}"), false);
             }
             KeyCode::Esc => {
-                if let Some(option) = ask.options.get(ask.recommended) {
-                    self.answer_ask(ask.id, option.label.clone());
-                    self.set_toast(format!("chose recommended: {}", option.label), false);
-                }
+                self.agent.pending_ask = Some(ask);
+                return self.esc_interrupt();
             }
             _ => self.agent.pending_ask = Some(ask),
         }

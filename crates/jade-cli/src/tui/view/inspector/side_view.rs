@@ -18,6 +18,12 @@ pub(super) fn draw_side_view(frame: &mut Frame, app: &mut App, theme: &Theme, ar
         height: input_h,
     };
     draw_body(frame, app, theme, body);
+    if input.width > 0 && input.height > 0 {
+        app.ui.hit_regions.push(HitRegion {
+            rect: input,
+            target: HitTarget::FocusSideInput,
+        });
+    }
     draw_input(frame, app, theme, input);
 }
 

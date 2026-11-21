@@ -39,6 +39,32 @@ pub(super) fn draw_controls_pane(
         .border_style(Style::default().fg(border_fg))
         .title(title)
         .style(Style::default().bg(theme.panel));
+    if !wide {
+        let s_w = display_width(" [1] Sessions ") as u16;
+        let w_w = display_width(" [2] Workspaces ") as u16;
+        let sx = area.x + 1;
+        app.ui.hit_regions.push(HitRegion {
+            rect: Rect {
+                x: sx,
+                y: area.y,
+                width: s_w.min(area.width.saturating_sub(2)),
+                height: 1,
+            },
+            target: HitTarget::HubSelectTab(HubTab::Sessions),
+        });
+        let wx = sx + s_w;
+        if wx < area.x + area.width {
+            app.ui.hit_regions.push(HitRegion {
+                rect: Rect {
+                    x: wx,
+                    y: area.y,
+                    width: w_w.min((area.x + area.width).saturating_sub(wx)),
+                    height: 1,
+                },
+                target: HitTarget::HubSelectTab(HubTab::Workspaces),
+            });
+        }
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
