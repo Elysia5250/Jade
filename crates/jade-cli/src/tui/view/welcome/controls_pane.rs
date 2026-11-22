@@ -125,7 +125,8 @@ fn control_group(ctrl: HubControl) -> &'static str {
         | HubControl::Model
         | HubControl::Effort
         | HubControl::Budget
-        | HubControl::Delegate => "MODEL & REASONING",
+        | HubControl::Delegate
+        | HubControl::Voice => "MODEL & REASONING",
         HubControl::Permission | HubControl::Trust | HubControl::Target => "SAFETY & RUNTIME",
         HubControl::Skills | HubControl::Memory | HubControl::Mcp => "CAPABILITIES",
         HubControl::Theme | HubControl::Sidebar => "APPEARANCE",
@@ -219,6 +220,11 @@ fn control_display(
         HubControl::Delegate => (
             "Delegate",
             format!("◄ {} ►", cat.delegate_level.as_str()),
+            theme.text,
+        ),
+        HubControl::Voice => (
+            "Voice",
+            format!("◄ {} ►", cat.voice_style.as_str()),
             theme.text,
         ),
         HubControl::Permission => {

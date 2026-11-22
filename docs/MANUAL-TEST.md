@@ -146,22 +146,22 @@ curl --unix-socket /tmp/jade-test/jade.sock http://x/ 2>&1 | head -1
 
 ---
 
-## C. 多机（需要 `conduit run` + 账号）
+## C. 多机（需要 `topaz run` + 账号）
 
-前提：两台机器都完成 conduit 侧初始化，并且 **`conduit run` 在跑**（它独占设备密钥、
+前提：两台机器都完成 topaz 侧初始化，并且 **`topaz run` 在跑**（它独占设备密钥、
 QUIC 端口和 control.sock；不要再起第二个引擎）。
 
 ```bash
 # 两台都做
-conduit init --coord-url https://HOST:7722 --pin PIN
-conduit account create --invite CODE     # 第一台
-conduit join CODE                        # 第二台
-conduit run                              # 常驻
+topaz init --coord-url https://HOST:7722 --pin PIN
+topaz account create --invite CODE     # 第一台
+topaz join CODE                        # 第二台
+topaz run                              # 常驻
 
 # 两台都做：agent 守护进程 + 3 个空闲 accept 槽
 jade serve
 # => jade daemon listening on ~/.jade/jade.sock
-#    conduit: watching ~/.conduit/control.sock (3 accept slot(s))
+#    topaz: watching ~/.topaz/control.sock (3 accept slot(s))
 ```
 
 发现设备（任一台）：
@@ -171,7 +171,7 @@ jade devices
 # => ID / NAME / DNS / VIP / STATUS / AGENT / ME
 # => AGENT=yes 表示该机器当前通告了 service 16（可被调度）
 jade status
-# => conduit: connected (...), this device workstations (3fa9...)
+# => topaz: connected (...), this device workstations (3fa9...)
 #    network:  direct · tun tun0 · 1 peer(s) · vip 100.64.0.1
 #    service:  jade online=true listeners=3
 ```
@@ -197,7 +197,7 @@ jade --on laptop cancel 3
 
 | 场景 | 预期 |
 |---|---|
-| `conduit run` 没起 | `connecting to conduit at .../control.sock (is conduit run up?)` |
+| `topaz run` 没起 | `connecting to topaz at .../control.sock (is topaz run up?)` |
 | 目标机 `jade disable` | `... refused: agent disabled on this device (jade enable)` |
 | 目标机没 allow 你 | `... refused: caller <device_id> is not allowlisted here` |
 | 名字写错 | `... refused: device not found: X [device_not_found, HTTP 404]` |
@@ -205,7 +205,7 @@ jade --on laptop cancel 3
 | 目标机离线 | `... refused: ... [peer_offline, HTTP 503]` |
 | 目标机没跑 `jade serve` | `... refused: <name> does not advertise service 16 [service_not_registered, HTTP 503]`（约 1–3 秒内生效，依赖 discovery） |
 
-TUI 多机切换（conduit 已连接时）：
+TUI 多机切换（topaz 已连接时）：
 
 ```bash
 jade ui
@@ -213,8 +213,8 @@ jade ui
 # 切换后任务发往新目标；`/sidebar` 里的 job 列表跟着换
 ```
 
-> conduit 的 `/v1/services/{id}/open|accept` 与 `/v1/events` 已落地，本清单已在
-> 本地 coord + 两台设备上真机跑通。`crates/jade-service/tests/conduit_control.rs`
+> topaz 的 `/v1/services/{id}/open|accept` 与 `/v1/events` 已落地，本清单已在
+> 本地 coord + 两台设备上真机跑通。`crates/jade-service/tests/topaz_control.rs`
 > 另外用 mock 覆盖出站整链路、accept 交接与 allowlist、404/409 透传、
 > status/devices 解析。
 
@@ -226,5 +226,5 @@ jade ui
 - **没有路径围栏**：相对路径落目标机 `$HOME`，绝对路径就是整机可读；"允许调用 ≈ 该用户的全部文件权限"。
 - **只有一个默认并发组**：`--group` 可以分组，但每个组的并发上限目前都落到 `max_jobs`。
 - **L3 直连不做**：契约已把 agent 通道收敛到 `control.sock` 的 WS 桥；TUN 只给用户自己的工具。
-- **`jade/bridge/` 已弃用**：它链接 conduit crate 并起第二个引擎，与 `conduit run` 冲突。
-- **TUI 的机器列表来自 `/v1/devices` + `/v1/events`**；conduit 没起时只显示 `local`。
+- **`jade/bridge/` 已弃用**：它链接 topaz crate 并起第二个引擎，与 `topaz run` 冲突。
+- **TUI 的机器列表来自 `/v1/devices` + `/v1/events`**；topaz 没起时只显示 `local`。

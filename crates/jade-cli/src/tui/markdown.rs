@@ -78,23 +78,31 @@ pub(crate) fn render_markdown_linked_with_code_bg(
             continue;
         }
         if in_code {
-            let gutter = " | ";
-            let shown = truncate_width(raw, width.saturating_sub(display_width(gutter)).max(4));
-            let mut spans = vec![LinkedSpan {
-                span: Span::styled(gutter, Style::default().fg(theme.border)),
-                target: None,
-            }];
             let code_spans =
-                highlight_code_line(&shown, code_lang, theme, Style::default().fg(theme.text));
-            for sp in code_spans {
-                spans.push(LinkedSpan {
+                highlight_code_line(raw, code_lang, theme, Style::default().fg(theme.text));
+            let linked_code: Vec<LinkedSpan> = code_spans
+                .into_iter()
+                .map(|sp| LinkedSpan {
                     span: Span::styled(sp.content.into_owned(), sp.style),
                     target: None,
-                });
+                })
+                .collect();
+            for row in wrap_code_spans(
+                LinkedSpan {
+                    span: Span::styled(" | ", Style::default().fg(theme.border)),
+                    target: None,
+                },
+                LinkedSpan {
+                    span: Span::styled(" ↳ ", Style::default().fg(theme.dim)),
+                    target: None,
+                },
+                linked_code,
+                width,
+            ) {
+                let mut ll = LinkedLine::from_linked(row);
+                ll.line_style = Some(code_bg);
+                out.push(ll);
             }
-            let mut ll = LinkedLine::from_linked(spans);
-            ll.line_style = Some(code_bg);
-            out.push(ll);
             i += 1;
             continue;
         }
@@ -436,6 +444,50 @@ pub(crate) fn wrap_linked_spans(
             rows.last_mut().unwrap().push(LinkedSpan {
                 span: Span::styled(buf, style),
                 target,
+            });
+        }
+    }
+    rows
+}
+
+fn wrap_code_spans(
+    first_prefix: LinkedSpan,
+    cont_prefix: LinkedSpan,
+    spans: Vec<LinkedSpan>,
+    max_width: usize,
+) -> Vec<Vec<LinkedSpan>> {
+    let prefix_w = display_width(&first_prefix.span.content)
+        .max(display_width(&cont_prefix.span.content));
+    let budget = max_width.saturating_sub(prefix_w).max(4);
+    let mut rows: Vec<Vec<LinkedSpan>> = vec![vec![first_prefix]];
+    let mut cur_w = 0usize;
+
+    for token in spans {
+        let style = token.span.style;
+        let text = token.span.content.into_owned();
+        if text.is_empty() {
+            continue;
+        }
+        let mut buf = String::new();
+        for ch in text.chars() {
+            let cw = char_width(ch);
+            if cur_w + cw > budget && (cur_w > 0 || !buf.is_empty()) {
+                if !buf.is_empty() {
+                    rows.last_mut().unwrap().push(LinkedSpan {
+                        span: Span::styled(std::mem::take(&mut buf), style),
+                        target: None,
+                    });
+                }
+                rows.push(vec![cont_prefix.clone()]);
+                cur_w = 0;
+            }
+            buf.push(ch);
+            cur_w += cw;
+        }
+        if !buf.is_empty() {
+            rows.last_mut().unwrap().push(LinkedSpan {
+                span: Span::styled(buf, style),
+                target: None,
             });
         }
     }

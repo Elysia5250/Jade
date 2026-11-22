@@ -26,7 +26,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 pub(super) struct Mcp {
     pub(super) data_dir: PathBuf,
     pub(super) cwd: PathBuf,
-    pub(super) conduit: Option<PathBuf>,
+    pub(super) topaz: Option<PathBuf>,
     pub(super) permissions: Arc<PermissionEngine>,
 }
 
@@ -38,16 +38,12 @@ impl Mcp {
         Ok(Remote::new(dialer_for(
             &self.data_dir,
             machine,
-            self.conduit.clone(),
+            self.topaz.clone(),
         )))
     }
 }
 
-pub async fn serve(
-    data_dir: PathBuf,
-    conduit: Option<PathBuf>,
-    mode: PermissionMode,
-) -> Result<()> {
+pub async fn serve(data_dir: PathBuf, topaz: Option<PathBuf>, mode: PermissionMode) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| data_dir.clone());
     let permissions = PermissionEngine::new(
         data_dir.clone(),
@@ -59,7 +55,7 @@ pub async fn serve(
     let mcp = Mcp {
         data_dir,
         cwd,
-        conduit,
+        topaz,
         permissions,
     };
 
@@ -440,7 +436,7 @@ mod tests {
         let mcp = Mcp {
             data_dir: dir.clone(),
             cwd: dir.clone(),
-            conduit: None,
+            topaz: None,
             permissions: PermissionEngine::new(
                 dir.clone(),
                 dir.clone(),

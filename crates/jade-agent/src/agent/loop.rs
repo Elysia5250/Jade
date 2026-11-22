@@ -54,7 +54,7 @@ pub async fn run_agent_turn(cfg: TurnConfig, tx: mpsc::UnboundedSender<AgentEven
     });
     let host = SubagentHost {
         data_dir: cfg.data_dir.clone(),
-        conduit: cfg.conduit.clone(),
+        topaz: cfg.topaz.clone(),
         local_socket: cfg.local_socket.clone(),
         local_server: cfg.local_server.clone(),
         target: cfg.target.clone(),
@@ -167,7 +167,7 @@ pub(crate) async fn execute_loop(
     let remote = crate::runtime::remote_for(
         &cfg.data_dir,
         &cfg.target,
-        cfg.conduit.clone(),
+        cfg.topaz.clone(),
         cfg.local_socket.clone(),
         cfg.local_server.clone(),
     );

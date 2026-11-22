@@ -225,7 +225,7 @@ fn has_component_in(path: &Path, basenames: &[&str]) -> bool {
         ".ssh",
         ".aws",
         ".jade",
-        ".conduit",
+        ".topaz",
         ".gnupg",
         ".kube",
         ".codex",

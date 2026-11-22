@@ -23,9 +23,9 @@ pub use landlock::apply_landlock_in_child;
 
 pub(crate) const PROTECTED_DIRS: &[&str] = &[".git", ".jade", ".codex", ".agents", ".ssh", ".aws"];
 pub(crate) const USER_SECRET_DIRS: &[&str] = &[
-    ".ssh", ".aws", ".jade", ".conduit", ".gnupg", ".kube", ".codex", ".agents",
+    ".ssh", ".aws", ".jade", ".topaz", ".gnupg", ".kube", ".codex", ".agents",
 ];
-const USER_CONTROL_DIRS: &[&str] = &[".jade", ".conduit"];
+const USER_CONTROL_DIRS: &[&str] = &[".jade", ".topaz"];
 
 static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
 static BACKEND_CACHE: OnceLock<SandboxBackend> = OnceLock::new();
@@ -254,13 +254,13 @@ fn effective_cwd(policy_cwd: &str, exec_cwd: &str) -> PathBuf {
 /// User-level credential and control directories that sandboxes must isolate
 /// and remote callers must never read or mutate.
 pub fn user_secret_paths() -> Vec<PathBuf> {
-    collect_user_dirs(USER_SECRET_DIRS, &["JADE_DATA_DIR", "CONDUIT_DATA_DIR"])
+    collect_user_dirs(USER_SECRET_DIRS, &["JADE_DATA_DIR", "TOPAZ_DATA_DIR"])
 }
 
 /// User-level local daemon control directories whose Unix sockets must stay
 /// unreachable even when outbound network is otherwise allowed.
 pub fn user_control_dirs() -> Vec<PathBuf> {
-    collect_user_dirs(USER_CONTROL_DIRS, &["JADE_DATA_DIR", "CONDUIT_DATA_DIR"])
+    collect_user_dirs(USER_CONTROL_DIRS, &["JADE_DATA_DIR", "TOPAZ_DATA_DIR"])
 }
 
 fn collect_user_dirs(rel_dirs: &[&str], env_vars: &[&str]) -> Vec<PathBuf> {

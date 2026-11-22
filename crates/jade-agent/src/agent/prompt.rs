@@ -7,12 +7,13 @@ pub(crate) const ENV_ACK: &str = "Continuing with this environment.";
 pub(crate) const ENV_UPDATE_PREFIX: &str = "<environment_update>\n";
 pub(crate) const PRE_MODEL_PREFIX: &str = "<pre_model_context>\n";
 
-/// Skills, memory, and the agent catalog captured once per turn.
+/// Skills, memory, voice register, and the agent catalog captured once per turn.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct EnvDiskSnapshot {
     skills: Option<String>,
     memory: Option<String>,
     agents: Option<String>,
+    voice: Option<String>,
     workspace: Option<String>,
 }
 
@@ -28,6 +29,7 @@ impl EnvDiskSnapshot {
                 skills,
                 memory: None,
                 agents: None,
+                voice: None,
                 workspace,
             };
         }
@@ -37,15 +39,26 @@ impl EnvDiskSnapshot {
             let rule = super::delegate_pref::instruction(data_dir);
             format!("## Available subagents (invoke with `delegate`)\n{rule}\n{catalog}")
         });
+        let voice = Some(format!(
+            "## Output register\n{}",
+            super::voice_pref::instruction(data_dir)
+        ));
         Self {
             skills,
             memory,
             agents,
+            voice,
             workspace,
         }
     }
 
-    pub(crate) fn note(&self, data_dir: &Path, session_id: &str, depth: u8) -> Option<String> {
+    pub(crate) fn note(
+        &self,
+        data_dir: &Path,
+        session_id: &str,
+        depth: u8,
+        plan_mode: bool,
+    ) -> Option<String> {
         let mut parts = Vec::new();
         if let Some(workspace) = &self.workspace {
             parts.push(workspace.clone());
@@ -54,6 +67,14 @@ impl EnvDiskSnapshot {
             parts.push(skills.clone());
         }
         if depth == 0 {
+            if let Some(voice) = &self.voice {
+                parts.push(voice.clone());
+            }
+            if plan_mode {
+                parts.push(
+                    "## Active phase\nPlan / discussion mode (read-only). Focus on analysis, trade-offs, and planning; do not claim edits outside `.jade/plans/*.md`.".to_string(),
+                );
+            }
             if let Some(memory) = &self.memory {
                 parts.push(memory.clone());
             }
@@ -79,7 +100,8 @@ impl EnvDiskSnapshot {
         depth: u8,
         interactive: bool,
     ) -> Option<String> {
-        let mut base = self.note(data_dir, permissions.session_id(), depth);
+        let plan_mode = permissions.mode() == crate::permissions::PermissionMode::Plan;
+        let mut base = self.note(data_dir, permissions.session_id(), depth, plan_mode);
         if depth != 0 {
             return base;
         }
@@ -132,36 +154,36 @@ fn active_mode_block(
 
 const VOICE: &str = r#"
 
-## Voice
-One shell per reply. Slot labels, punctuation, and `say` use the language of the user's most recent message. Omit empty slots. No headings, rules, blockquotes, italics, nested lists, or emoji.
-Pinned labels. For any other language, translate each English label once and keep that wording.
+## Voice & Output Paradigm
+Use the language of the user's most recent message for prose, section headings, and `say`. Follow the `## Output register` in `<environment>` when present.
 
-| Slot | 中文 | English |
-| --- | --- | --- |
-| Delivery lead | 已完成 | Done |
-| Error lead | 失败点 | Failed |
-| Plan lead | 目标 | Goal |
-| Answer lead | 结论 | Answer |
-| Saw it | 已核对 | Verified |
-| Reasoned | 推断 | Inferred |
-| Not checked | 未核对 | Unchecked |
-| Still true | 已成立 | Holds |
-| One action | 下一步 | Next |
-- Line: one sentence, no bold label and no list. Chinese ends with `。`. English ends with `.`
-- Card: one bold lead, one clause, a blank line, then 1-4 bullets. One backtick path per bullet, parent and filename only (`agent/prompt.rs`), plus `:line` when a line matters. Chinese bullets use `：` with no space after it. English bullets use `: `. A fenced command replaces the list; tag the language; each line stays within 64 columns. Error cards use the Failed lead and only Holds, Inferred, Unchecked, and Next. At most one apology, and only in that card, with what still holds and the next action. No greeting, no capability preface, no second apology.
-- Steps: bold Goal lead, one clause, a blank line, then 2-4 numbered steps. Choices go only in `ask`.
+### Layout & Scannability
+- Lead with the conclusion in 1 sentence. No greeting, no capability preface, no closing recap, and at most one concise apology on failure.
+- No walls of text: keep any prose paragraph to at most 2 sentences (~50-60 Chinese characters or 2-3 lines). Whenever covering 2+ points, causes, or changes, break immediately into a flat bullet list.
+- Bullet shape: `- **2-5 word topic**: single point` (Chinese uses `：` with no space; English uses `: `). Keep each bullet to 1-2 lines. No nested lists.
+- Keep prose free of file paths: refer to modules or features in plain words inside prose and bullets, and collect all touched or referenced paths at the end under `### 涉及文件` / `### Files` (`- `parent/file.rs:line` — brief role`).
+- Use `### Short Title` for section headings (never `#` or `##`). Leave one blank line between distinct blocks. Never combine `**` and `` ` `` on the same span. No emoji, no horizontal rules (`---`), no italics; use `>` blockquotes sparingly only for critical warnings or verbatim quotes.
+- Tables only for side-by-side comparisons (at most 4 columns, 6 rows, short cells, no file paths); otherwise use bullets. Tag the language on fenced code blocks, show only focused snippets or runnable commands, and wrap long shell commands with `\`.
 
-Chinese card: `**已完成** 会话锁在 daemon。` then `- **已核对** `agent/prompt.rs`：系统提示在这里拼。`
-English card: `**Done** The session lock lives in the daemon.` then `- **Verified** `agent/prompt.rs`: the system prompt is built here.`
-Tables only when the user asked to compare: at most 3 columns and 4 data rows. A cell is at most 8 Chinese characters or 16 Latin letters and contains no path.
+### Phase-Aware Shapes
+- **Discussion / Research / Planning**: Lead with the recommendation or answer, list trade-offs, put key decision forks in `ask`, and close with 1-2 concrete open questions if needed.
+- **Execution (in progress)**: Use `say` for progress (plain text, one line, display width at most 48, no period, no path, no Markdown; Chinese `正在<动作>，接着<下一拍>` or `收到，先<动作>`; English `Doing <action>, then <next>` or `On it, first <action>`). Do not emit prose chatter between tool calls.
+- **Delivery / Reporting**: 1-sentence summary first. Single module (≤ 4 bullets): one flat list. Multi-module: group positive changes by module (`### Module`), then aggregate all cross-module failures, risks, or unverified items under `### 未验证与风险` / `### Risks & Unverified`. Put `### 验证结果` / `### Verification` (exact commands with counts/exit codes) and `### 涉及文件` / `### Files` at the end. Omit empty sections.
+- **Debugging / Review / Failure**: Group by severity or conclusion semantics (`### 阻塞问题` / `### Blockers` first), not by module. On failure or abort, state what failed, what still holds, and the next action. Never truncate critical error output or security warnings.
 
-`say` is plain text, one line, no period, no path, no Markdown, display width at most 48. Chinese: `正在<动作>，接着<下一拍>`, or to open `收到，先<动作>`. English: `Doing <action>, then <next>`, or to open `On it, first <action>`. Other languages use that present-tense shape.
+### Confidence & References
+- Never use rubber-stamp labels like `已核对` / `Verified`. Every stated fact must be grounded in files read or tool outputs observed.
+- Exception-based signaling: explicitly mark anything inferred, assumed, or not yet run (`（推断，未实测）` / `(inferred, unverified)` or under `### 未验证与风险` / `### Risks & Unverified`). When evidence is missing, say so plainly instead of guessing.
+- Research & external references: for technical research, API/library usage, or comparisons, anchor claims inline with `[1]`, `[2]` and append `### 参考来源` / `### References` (`- [1] Title — URL（what it supports）`). Prefer primary sources (official docs, RFCs, source repos, papers) and note secondary/community sources. Never fabricate URLs; if no web or external tool was used in the turn, explicitly note at the end that the answer is based on prior knowledge and was not web-verified.
 "#;
 
 const SUBAGENT_VOICE: &str = r#"
 
 ## Voice
-The final report is one card in the language of the task. Lead with **已完成** / **Done** or **失败点** / **Failed**, then 1-4 bullets. Each bullet is one predicate and one path written `parent/file.rs:line`. Labels: 已核对/Verified, 推断/Inferred, 未核对/Unchecked, 已成立/Holds, 下一步/Next. For any other language, translate each English label once and keep that wording. No greeting and no hedge words.
+Return a compact, factual report for the parent agent in the language of the task.
+- Lead with a 1-sentence outcome, followed by flat bullets with concrete evidence (`parent/file.rs:line` or exact command results).
+- Do not use rubber-stamp labels like `已核对` / `Verified`. Explicitly flag anything inferred, unverified, or blocked, and list remaining risks or gaps.
+- No greeting, no filler, and no hedge words.
 "#;
 
 pub(crate) fn build_system_prompt(target: &str, cwd: &Path) -> String {
@@ -264,7 +286,7 @@ pub(crate) fn environment_note_for_depth(
     session_id: &str,
     depth: u8,
 ) -> Option<String> {
-    EnvDiskSnapshot::capture(data_dir, cwd, depth, true).note(data_dir, session_id, depth)
+    EnvDiskSnapshot::capture(data_dir, cwd, depth, true).note(data_dir, session_id, depth, false)
 }
 
 struct VolatileTail {
@@ -520,20 +542,23 @@ mod tests {
         assert!(prompt.contains("recommended"));
         assert!(!prompt.contains("recommended option is taken"));
         assert!(!prompt.contains("isolates `/tmp`"));
-        assert!(prompt.contains("## Voice"));
-        assert!(prompt.contains("No headings"));
-        for slot in [
-            "已完成",
-            "失败点",
-            "目标",
-            "Done",
-            "Failed",
-            "Goal",
-            "Verified",
+        assert!(prompt.contains("## Voice & Output Paradigm"));
+        assert!(prompt.contains("### Short Title"));
+        for marker in [
+            "### 涉及文件",
+            "### Files",
+            "### 未验证与风险",
+            "### Risks & Unverified",
+            "### 参考来源",
+            "### References",
+            "Discussion / Research / Planning",
+            "Delivery / Reporting",
+            "Debugging / Review / Failure",
+            "Exception-based signaling",
+            "Never use rubber-stamp labels",
         ] {
-            assert!(prompt.contains(slot), "missing {slot}");
+            assert!(prompt.contains(marker), "missing {marker}");
         }
-        assert!(prompt.contains("translate each English label once"));
         assert!(prompt.contains("正在"));
         assert!(prompt.contains("Doing"));
         assert!(desc.contains("plain text"), "{desc}");
@@ -550,14 +575,32 @@ mod tests {
     }
 
     #[test]
-    fn subagent_report_uses_a_card_with_one_path() {
+    fn subagent_report_is_compact_and_evidence_grounded() {
         let prompt =
             build_subagent_system_prompt("local", std::path::Path::new("/tmp"), "Role body.");
         assert!(prompt.contains("Role body."));
-        assert!(prompt.contains("one card"));
+        assert!(prompt.contains("compact, factual report"));
         assert!(prompt.contains("parent/file.rs:line"));
-        assert!(prompt.contains("Verified"));
+        assert!(prompt.contains("Do not use rubber-stamp labels"));
         assert!(prompt.contains("workspace snapshot"));
+    }
+
+    #[test]
+    fn plan_mode_injects_active_phase_into_depth_zero_env_only() {
+        let dir = tmpdir("plan-phase");
+        let snap = EnvDiskSnapshot::capture(&dir, &dir, 0, true);
+        let normal = snap.note(&dir, "sess", 0, false).unwrap();
+        assert!(!normal.contains("## Active phase"));
+        let plan = snap.note(&dir, "sess", 0, true).unwrap();
+        assert!(plan.contains("## Active phase"));
+        assert!(plan.contains("Plan / discussion mode"));
+
+        let sub = EnvDiskSnapshot::capture(&dir, &dir, 1, true);
+        let sub_plan = sub.note(&dir, "sess", 1, true);
+        assert!(sub_plan
+            .as_deref()
+            .is_none_or(|n| !n.contains("## Active phase")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

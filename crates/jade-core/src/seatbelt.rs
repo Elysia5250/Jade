@@ -160,7 +160,7 @@ fn control_socket_paths() -> Vec<PathBuf> {
             }
         }
     }
-    if let Some(val) = std::env::var_os("CONDUIT_CONTROL_SOCK").filter(|s| !s.is_empty()) {
+    if let Some(val) = std::env::var_os("TOPAZ_CONTROL_SOCK").filter(|s| !s.is_empty()) {
         let p = crate::fs::resolve(&val.to_string_lossy());
         if !sockets.iter().any(|existing| existing == &p) {
             sockets.push(p);
@@ -213,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_blocks_jade_conduit_and_rw_env_files() {
+    fn profile_blocks_jade_topaz_and_rw_env_files() {
         let n = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -243,7 +243,7 @@ mod tests {
         assert!(profile.contains(&env_rule_prefix), "{profile}");
         if std::env::var_os("HOME").is_some() {
             assert!(profile.contains("/.jade\")"), "{profile}");
-            assert!(profile.contains("/.conduit\")"), "{profile}");
+            assert!(profile.contains("/.topaz\")"), "{profile}");
             assert!(
                 profile.contains("(deny network-outbound (remote unix-socket (path-literal"),
                 "{profile}"

@@ -2,6 +2,7 @@
 use super::super::*;
 use jade_agent::agent::delegate_pref::{self, DelegateLevel};
 use jade_agent::agent::effort;
+use jade_agent::agent::voice_pref::{self, VoiceStyle};
 use jade_agent::agent::CompactionTier;
 
 const BUDGET_TIERS: [(&str, CompactionTier); 4] = [
@@ -17,6 +18,8 @@ const DELEGATE_LEVELS: [DelegateLevel; 4] = [
     DelegateLevel::Normal,
     DelegateLevel::High,
 ];
+
+const VOICE_STYLES: [VoiceStyle; 3] = [VoiceStyle::Expert, VoiceStyle::Engineer, VoiceStyle::Plain];
 
 const PERM_MODES: [PermissionMode; 5] = [
     PermissionMode::Default,
@@ -47,6 +50,10 @@ impl App {
             }
             HubControl::Delegate => {
                 self.cycle_hub_delegate(dir);
+                Action::None
+            }
+            HubControl::Voice => {
+                self.cycle_hub_voice(dir);
                 Action::None
             }
             HubControl::Permission => {
@@ -167,6 +174,27 @@ impl App {
             Ok(()) => {
                 self.inputs.invalidate_catalog();
                 self.set_toast(format!("delegate: {}", next.as_str()), false);
+            }
+            Err(err) => {
+                if let Some(w) = self.ui.welcome.as_mut() {
+                    w.error = Some(err);
+                }
+            }
+        }
+    }
+
+    fn cycle_hub_voice(&mut self, dir: isize) {
+        let current = voice_pref::load(&self.data_dir);
+        let idx = VOICE_STYLES
+            .iter()
+            .position(|style| *style == current)
+            .unwrap_or(1);
+        let next_idx = (idx as isize + dir).rem_euclid(VOICE_STYLES.len() as isize) as usize;
+        let next = VOICE_STYLES[next_idx];
+        match voice_pref::set(&self.data_dir, next) {
+            Ok(()) => {
+                self.inputs.invalidate_catalog();
+                self.set_toast(format!("voice: {}", next.as_str()), false);
             }
             Err(err) => {
                 if let Some(w) = self.ui.welcome.as_mut() {

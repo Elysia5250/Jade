@@ -527,6 +527,31 @@ fn emit_token(
     buf: &mut String,
     out: &mut Vec<LinkedSpan>,
 ) {
+    if tok.starts_with("http://") || tok.starts_with("https://") {
+        let url = tok.trim_end_matches(|c| matches!(c, '.' | ',' | ';' | ':' | '!' | '?'));
+        let scheme_len = if url.starts_with("https://") { 8 } else { 7 };
+        if url.len() > scheme_len {
+            if !buf.is_empty() {
+                out.push(LinkedSpan {
+                    span: Span::raw(std::mem::take(buf)),
+                    target: None,
+                });
+            }
+            out.push(LinkedSpan {
+                span: Span::styled(
+                    url.to_string(),
+                    Style::default()
+                        .fg(theme.link)
+                        .add_modifier(Modifier::UNDERLINED),
+                ),
+                target: None,
+            });
+            if url.len() < tok.len() {
+                buf.push_str(&tok[url.len()..]);
+            }
+            return;
+        }
+    }
     let trimmed = tok.trim_end_matches('.');
     let suffix_len = tok.len() - trimmed.len();
     if (trimmed.contains('/') || trimmed.contains('.')) && trimmed.len() >= 3 {

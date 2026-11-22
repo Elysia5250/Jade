@@ -5,7 +5,7 @@ turn, the queue, and detached jobs. Closing the console does not stop them.
 The same process is the policy gate and the stdio MCP server.
 
 Peers are reached through whatever transport you plug in. The default is
-`conduit run`'s control socket — a Unix socket, with no compile-time coupling
+`topaz run`'s control socket — a Unix socket, with no compile-time coupling
 in either direction.
 
 ## Install
@@ -16,7 +16,7 @@ jade status          # first run starts the local daemon
 ```
 
 macOS and Linux, x86_64 and aarch64. No root and no TUN: the agent speaks over
-`control.sock`, and works standalone without conduit. Self-hosting releases and
+`control.sock`, and works standalone without topaz. Self-hosting releases and
 the full matrix are in [docs/INSTALL.md](./docs/INSTALL.md).
 
 ## The one idea
@@ -48,8 +48,8 @@ watch can live for minutes without blocking anything else.
 | Interaction | `jade-service` (server/client) | One short request per stream: submit, list, status, log cursor, cancel, file ops |
 | Execution | `jade-core::job` / `exec` / `log` | Job table, queueing, process groups, timeouts, cancellation, log records |
 | Policy | `jade-core::config` | `agent.json`: enabled + caller allowlist + `max_jobs` |
-| Transport | `jade-service::transport` | `AgentDialer` / `AgentStream` / `AgentHost`; Unix socket now, conduit later |
-| Transport adapter | `jade-service::conduit` | HTTP/WebSocket client of `conduit run`; no conduit crate, no second engine |
+| Transport | `jade-service::transport` | `AgentDialer` / `AgentStream` / `AgentHost`; Unix socket now, topaz later |
+| Transport adapter | `jade-service::topaz` | HTTP/WebSocket client of `topaz run`; no topaz crate, no second engine |
 
 ## Crates
 
@@ -60,7 +60,7 @@ watch can live for minutes without blocking anything else.
   (`sandbox`), search (`search`), policy (`config`), audit trail.
 - `jade-service`: `AgentServer::serve_stream` (one request per stream), a
   client (`Remote<D>`, plus stream-level helpers), transport traits, and the
-  `conduit` runtime adapter (`ConduitClient`, `ConduitDialer`, `WsByteStream`,
+  `topaz` runtime adapter (`TopazClient`, `TopazDialer`, `WsByteStream`,
   accept pool).
 - `jade-agent`: daemon lifecycle, the agent loop (tools, providers,
   permissions, hooks, skills, MCP, auth, memory, worktree, sessions, and
@@ -68,8 +68,8 @@ watch can live for minutes without blocking anything else.
 - `jade-cli` (`jade`): binary entrypoint, CLI dispatch, headless mode
   (`jade ask` / `jade -p`), and the terminal console (`tui/`).
 
-The old `bridge/` crate (which linked the conduit crates and started a second
-engine) has been removed — it conflicts with `conduit run` owning the device
+The old `bridge/` crate (which linked the topaz crates and started a second
+engine) has been removed — it conflicts with `topaz run` owning the device
 identity and TUN. It remains in git history up to `55944b0`.
 
 ## Quick start
@@ -88,7 +88,7 @@ That is the main entry point: bare `jade` starts the terminal console in
 `--cwd`, `-c`, `--session`, or `--new-session`, the console opens the home
 screen first; the current directory stays the first row. `/login`
 (or env vars like `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`) connects a model so
-prompts can call the tools in [Agent](#agent) on `local` or any `conduit` peer.
+prompts can call the tools in [Agent](#agent) on `local` or any `topaz` peer.
 `/mode` switches to **Shell**, where a command runs directly as a detached
 daemon job.
 
@@ -192,14 +192,14 @@ Markdown with real tables, lists and inline emphasis. Tool output is stripped
 of ANSI escapes before it reaches the transcript. Sessions are saved under
 `~/.jade/sessions/` (`jade -c` resumes the latest session for the current
 directory). It talks to the same daemon over
-short RPCs — a UI exit never affects a running job. When conduit is connected,
+short RPCs — a UI exit never affects a running job. When topaz is connected,
 `/machine` and `ctrl+p` list only peers advertising service 16. The status
 line names the target when it is not `local`.
 
 ## Agent
 
 A console turn runs in the daemon. The model calls tools on `local` or a
-conduit peer:
+topaz peer:
 
 - Files and search: `read`, `write`, `edit`, `ls`, `glob`, `grep`.
 - Shell: `exec`, `job`, `monitor`.
@@ -260,9 +260,9 @@ In a non-interactive MCP session an `ask` fails instead of prompting.
 - **One daemon per data directory**: `jade serve` takes an exclusive `flock`
   on `<data-dir>/jade.lock` before touching the socket, so a second instance
   fails fast instead of unlisting the live socket and sharing `jobs/state.json`.
-- `jade serve --local-only` skips the conduit accept pool (alias:
-  `--no-conduit`).
-- **Remote** callers are identified by the transport. Over conduit that is the
+- `jade serve --local-only` skips the topaz accept pool (alias:
+  `--no-topaz`).
+- **Remote** callers are identified by the transport. Over topaz that is the
   mTLS-authenticated `device_id`, so the allowlist is not a string the caller
   invents:
 
@@ -271,17 +271,17 @@ jade enable
 jade allow 3fa9c1d2a0b7e451      # remote device id from `jade devices`, not a tool rule
 ```
 
-## Multi-machine: conduit
+## Multi-machine: topaz
 
-`conduit run` is the single network daemon on each machine: it owns the device
+`topaz run` is the single network daemon on each machine: it owns the device
 key, the QUIC/relay sessions, and optionally the TUN device. It exposes all of
-that on `~/.conduit/control.sock` as HTTP/1.1 + JSON and WebSocket. **jade is
-just a client of that socket** — no conduit crate, no second engine, no shared
+that on `~/.topaz/control.sock` as HTTP/1.1 + JSON and WebSocket. **jade is
+just a client of that socket** — no topaz crate, no second engine, no shared
 data directory.
 
 ```bash
 # terminal 1 (each machine): the network daemon
-conduit run
+topaz run
 
 # terminal 2 (each machine): the agent daemon; parks 3 idle accept slots
 jade serve
@@ -296,15 +296,15 @@ jade --on 100.64.0.2 logs 12 --follow
 How it is wired:
 
 - **Outbound** — `GET /v1/services/16/open/{target}` upgrades to a WebSocket and
-  becomes a transparent byte stream carrying jade protocol v2. Conduit resolves
+  becomes a transparent byte stream carrying jade protocol v2. Topaz resolves
   `device_id`, `dns_name`, `virtual_ip`, or a unique device name, and answers
   `400/404/409/503` with `{"error": "..."}` so the CLI prints the real reason.
 - **Inbound** — `jade serve` keeps a few idle
   `GET /v1/services/16/accept?name=jade` connections. When a peer opens a
-  stream, conduit sends one text frame naming the mTLS-authenticated
+  stream, topaz sends one text frame naming the mTLS-authenticated
   `peer_device_id`, then switches to binary passthrough; jade wraps it in
   `WsByteStream` and calls `serve_stream(peer_device_id, stream)`.
-- **Identity** — the allowlist therefore matches a device id conduit has
+- **Identity** — the allowlist therefore matches a device id topaz has
   already authenticated, not a caller-supplied string.
 - **Discovery** — `GET /v1/status` and `GET /v1/devices` drive `jade status`
   and `jade devices` (its `AGENT` column is "advertises service 16").
@@ -316,16 +316,16 @@ How it is wired:
   `service_not_registered`, ...), rendered as
   `... refused: <reason> [<code>, HTTP <status>]`.
 
-The control socket path comes from `--conduit-socket`, `CONDUIT_CONTROL_SOCK`,
-`$CONDUIT_DATA_DIR/control.sock`, or `~/.conduit/control.sock`.
+The control socket path comes from `--topaz-socket`, `TOPAZ_CONTROL_SOCK`,
+`$TOPAZ_DATA_DIR/control.sock`, or `~/.topaz/control.sock`.
 
 This path has been exercised end to end against the real thing: local
-`conduit-coord`, two devices joined into one account, two `conduit run
+`topaz-coord`, two devices joined into one account, two `topaz run
 --no-tun` daemons, two `jade serve` instances, then `jade --on <device> run`
 over the WebSocket bridge — including the mTLS caller id in the job owner and
 the allowlist refusal path.
 
-**Agent traffic never uses L3.** conduit's `100.64.0.0/10` + `*.conduit` is for
+**Agent traffic never uses L3.** topaz's `100.64.0.0/10` + `*.topaz` is for
 your own tools (ssh, curl, databases, grain); the agent protocol stays on the
 WebSocket bridge, where every stream carries an mTLS-authenticated device id.
 That is also why `jade` has no `--listen-vpn` and no IP→device reverse
@@ -337,12 +337,12 @@ mapping.
 cargo test --workspace
 ```
 
-The control-socket contract is covered by a mock `conduit` server
-(`crates/jade-service/tests/conduit_control.rs`): outbound upgrade and a full
+The control-socket contract is covered by a mock `topaz` server
+(`crates/jade-service/tests/topaz_control.rs`): outbound upgrade and a full
 job round trip, the accept pool with the handoff metadata and allowlist refusal,
 HTTP error propagation, and `/v1/status` + `/v1/devices` parsing. The real
 bridge is exercised manually with two local devices; see
-[docs/MANUAL-TEST.md](./docs/MANUAL-TEST.md#c-多机需要-conduit-run--账号).
+[docs/MANUAL-TEST.md](./docs/MANUAL-TEST.md#c-多机需要-topaz-run--账号).
 
 Covered end to end: submit returning before the child exits, a dropped watcher
 not killing its job, group queueing, cancel of running and queued jobs, state
@@ -353,5 +353,5 @@ output pane, hints) via ratatui's test backend.
 
 ## Platform
 
-Unix only for now: the daemon and conduit's control socket both speak over Unix
+Unix only for now: the daemon and topaz's control socket both speak over Unix
 sockets.

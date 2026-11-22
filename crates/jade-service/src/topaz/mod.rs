@@ -1,9 +1,9 @@
-//! Runtime adapter for `conduit run`'s control socket.
+//! Runtime adapter for `topaz run`'s control socket.
 //!
-//! `conduit` is a separate VPN daemon that owns the device keys, the QUIC/relay
+//! `topaz` is a separate VPN daemon that owns the device keys, the QUIC/relay
 //! sessions and (optionally) the TUN device. It exposes them on a Unix socket
 //! as plain HTTP/1.1 + JSON and WebSocket. This module is a *client* of that
-//! socket — no conduit crate, no second engine, no shared data directory.
+//! socket — no topaz crate, no second engine, no shared data directory.
 //!
 //! Two directions:
 //!
@@ -11,7 +11,7 @@
 //!   WebSocket and hands back a transparent byte stream to the peer's agent.
 //! * **Inbound** — [`spawn_accept_pool`] keeps a few idle
 //!   `GET /v1/services/16/accept?name=jade` connections. When a peer opens a
-//!   stream, conduit sends one text frame naming the mTLS-authenticated
+//!   stream, topaz sends one text frame naming the mTLS-authenticated
 //!   `peer_device_id`, then switches that connection to binary passthrough.
 //!
 //! Failure modes are carried as HTTP status + `{"error": "..."}`, so CLI errors
@@ -37,7 +37,7 @@ mod ws;
 pub use accept::{spawn_accept_pool, AcceptPool};
 pub use ws::WsByteStream;
 
-/// The service id jade registers with conduit.
+/// The service id jade registers with topaz.
 pub const AGENT_SERVICE_ID: u16 = jade_proto::AGENT_SERVICE_ID;
 /// Name reported in `/v1/services/16/accept?name=...`.
 pub const SERVICE_NAME: &str = "jade";
@@ -48,15 +48,15 @@ pub const DEFAULT_POOL: usize = 4;
 /// How often a parked accept connection is pinged.
 pub const KEEPALIVE: Duration = Duration::from_secs(25);
 
-/// Resolve the control socket: explicit path, `CONDUIT_CONTROL_SOCK`,
-/// `$CONDUIT_DATA_DIR/control.sock`, else `~/.conduit/control.sock`.
+/// Resolve the control socket: explicit path, `TOPAZ_CONTROL_SOCK`,
+/// `$TOPAZ_DATA_DIR/control.sock`, else `~/.topaz/control.sock`.
 pub fn default_control_socket() -> PathBuf {
-    if let Some(path) = std::env::var_os("CONDUIT_CONTROL_SOCK") {
+    if let Some(path) = std::env::var_os("TOPAZ_CONTROL_SOCK") {
         if !path.is_empty() {
             return PathBuf::from(path);
         }
     }
-    if let Some(dir) = std::env::var_os("CONDUIT_DATA_DIR") {
+    if let Some(dir) = std::env::var_os("TOPAZ_DATA_DIR") {
         if !dir.is_empty() {
             return PathBuf::from(dir).join("control.sock");
         }
@@ -65,7 +65,7 @@ pub fn default_control_socket() -> PathBuf {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".conduit").join("control.sock")
+    home.join(".topaz").join("control.sock")
 }
 
 /// A device as listed by `GET /v1/devices`.
@@ -122,7 +122,7 @@ pub struct Peer {
     pub path: Option<String>,
     #[serde(default)]
     pub rtt_ms: Option<u64>,
-    /// Services the peer advertises over conduit's discovery channel.
+    /// Services the peer advertises over topaz's discovery channel.
     #[serde(default)]
     pub services: Vec<PeerService>,
 }
@@ -167,19 +167,19 @@ pub struct Status {
     pub services: Vec<ServiceInfo>,
 }
 
-/// One handed-off inbound stream, with the caller conduit authenticated.
+/// One handed-off inbound stream, with the caller topaz authenticated.
 pub struct Accept {
     pub peer_device_id: String,
     pub stream: BoxStream,
 }
 
-/// Client for the conduit control socket.
+/// Client for the topaz control socket.
 #[derive(Debug, Clone)]
-pub struct ConduitClient {
+pub struct TopazClient {
     socket: PathBuf,
 }
 
-impl ConduitClient {
+impl TopazClient {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         Self {
             socket: socket.into(),
@@ -197,7 +197,7 @@ impl ConduitClient {
     async fn connect(&self) -> Result<UnixStream> {
         UnixStream::connect(&self.socket).await.with_context(|| {
             format!(
-                "connecting to conduit at {} (is `conduit run` up?)",
+                "connecting to topaz at {} (is `topaz run` up?)",
                 self.socket.display()
             )
         })
@@ -209,11 +209,11 @@ impl ConduitClient {
         let request = format!("ws://localhost{path}").into_client_request()?;
         match client_async(request, stream).await {
             Ok((ws, response)) => {
-                if let Some(peer) = response.headers().get("x-conduit-peer-id") {
+                if let Some(peer) = response.headers().get("x-topaz-peer-id") {
                     debug!(
                         peer = %peer.to_str().unwrap_or("?"),
                         path,
-                        "conduit handed over a peer"
+                        "topaz handed over a peer"
                     );
                 }
                 Ok(ws)
@@ -240,14 +240,14 @@ impl ConduitClient {
                 } else {
                     format!("{reason} [{code}, HTTP {}]", status.as_u16())
                 };
-                bail!("conduit refused {path}: {reason}")
+                bail!("topaz refused {path}: {reason}")
             }
-            Err(e) => Err(e).with_context(|| format!("upgrading {path} on the conduit socket")),
+            Err(e) => Err(e).with_context(|| format!("upgrading {path} on the topaz socket")),
         }
     }
 
     /// Open a stream to `target` (`device_id`, `dns_name`, `virtual_ip`, or a
-    /// unique device name — conduit resolves it).
+    /// unique device name — topaz resolves it).
     pub async fn open(&self, target: &str) -> Result<BoxStream> {
         let path = format!(
             "/v1/services/{}/open/{}",
@@ -258,11 +258,11 @@ impl ConduitClient {
         Ok(BoxStream::new(WsByteStream::new(ws)))
     }
 
-    /// Park one accept connection and wait for conduit to hand off a peer.
+    /// Park one accept connection and wait for topaz to hand off a peer.
     ///
     /// A parked connection is idle for a long time, so this pings every
-    /// [`KEEPALIVE`] and treats a failed send as "conduit is gone": the caller
-    /// reconnects instead of holding a half-open slot conduit still counts.
+    /// [`KEEPALIVE`] and treats a failed send as "topaz is gone": the caller
+    /// reconnects instead of holding a half-open slot topaz still counts.
     pub async fn accept(&self) -> Result<Accept> {
         let path = format!(
             "/v1/services/{}/accept?name={}",
@@ -279,12 +279,12 @@ impl ConduitClient {
                 msg = rx.next() => match msg {
                     Some(Ok(Message::Text(text))) => {
                         let meta: Handoff = serde_json::from_str(text.as_str())
-                            .context("parsing the conduit handoff frame")?;
+                            .context("parsing the topaz handoff frame")?;
                         if meta.event != "accepted" {
-                            bail!("conduit sent an unexpected handoff event: {}", meta.event);
+                            bail!("topaz sent an unexpected handoff event: {}", meta.event);
                         }
                         if meta.peer_device_id.is_empty() {
-                            bail!("conduit handed off a peer without a device id");
+                            bail!("topaz handed off a peer without a device id");
                         }
                         let ws = tx.reunite(rx).map_err(|_| {
                             anyhow::anyhow!("reuniting the parked accept websocket")
@@ -295,20 +295,20 @@ impl ConduitClient {
                         });
                     }
                     Some(Ok(Message::Binary(_))) => {
-                        bail!("conduit sent binary data before the handoff metadata")
+                        bail!("topaz sent binary data before the handoff metadata")
                     }
                     Some(Ok(Message::Ping(payload))) => {
                         tx.send(Message::Pong(payload)).await.ok();
                     }
                     Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => {}
                     Some(Ok(Message::Close(_))) | None => {
-                        bail!("conduit closed the accept connection before a handoff")
+                        bail!("topaz closed the accept connection before a handoff")
                     }
-                    Some(Err(e)) => return Err(e).context("waiting for a conduit handoff"),
+                    Some(Err(e)) => return Err(e).context("waiting for a topaz handoff"),
                 },
                 _ = ping.tick() => {
                     if tx.send(Message::Ping(Vec::new().into())).await.is_err() {
-                        bail!("conduit stopped answering on the control socket");
+                        bail!("topaz stopped answering on the control socket");
                     }
                 }
             }
@@ -319,7 +319,7 @@ impl ConduitClient {
     ///
     /// Returns the initial snapshot plus a watch channel fed by every later
     /// push (peer online/offline, RTT, virtual ip, and `service 16` listener
-    /// counts). The channel closes when conduit goes away.
+    /// counts). The channel closes when topaz goes away.
     pub async fn watch(&self) -> Result<tokio::sync::watch::Receiver<Option<Status>>> {
         let mut ws = self.upgrade("/v1/events").await?;
         let initial = loop {
@@ -336,7 +336,7 @@ impl ConduitClient {
                 | Some(Ok(Message::Pong(_)))
                 | Some(Ok(Message::Frame(_))) => {}
                 Some(Ok(Message::Close(_))) | None => {
-                    bail!("conduit closed /v1/events before the first snapshot")
+                    bail!("topaz closed /v1/events before the first snapshot")
                 }
                 Some(Err(e)) => return Err(e).context("reading the first /v1/events frame"),
             }
@@ -396,24 +396,24 @@ impl ConduitClient {
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                bail!("conduit response timed out for {path}");
+                bail!("topaz response timed out for {path}");
             }
             let step = remaining.min(Duration::from_secs(10));
             let n = tokio::time::timeout(step, stream.read(&mut buf))
                 .await
-                .map_err(|_| anyhow::anyhow!("conduit read timed out for {path}"))??;
+                .map_err(|_| anyhow::anyhow!("topaz read timed out for {path}"))??;
             if n == 0 {
                 break;
             }
             raw.extend_from_slice(&buf[..n]);
             if raw.len() > MAX_RESPONSE {
-                bail!("conduit response exceeded {MAX_RESPONSE} bytes");
+                bail!("topaz response exceeded {MAX_RESPONSE} bytes");
             }
         }
         let response = parse_http_response(&raw)?;
         if response.status != 200 {
             bail!(
-                "conduit returned {} for {path}: {}",
+                "topaz returned {} for {path}: {}",
                 response.status,
                 String::from_utf8_lossy(&response.body).trim()
             );
@@ -439,34 +439,34 @@ struct Handoff {
     peer_device_id: String,
 }
 
-/// `AgentDialer` backed by the conduit control socket.
+/// `AgentDialer` backed by the topaz control socket.
 ///
-/// The daemon name is passed through to conduit, which resolves it against the
+/// The daemon name is passed through to topaz, which resolves it against the
 /// account's active devices and guarantees the peer's identity with mTLS.
 #[derive(Debug, Clone)]
-pub struct ConduitDialer {
-    client: ConduitClient,
+pub struct TopazDialer {
+    client: TopazClient,
 }
 
-impl ConduitDialer {
+impl TopazDialer {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         Self {
-            client: ConduitClient::new(socket),
+            client: TopazClient::new(socket),
         }
     }
 
     pub fn from_env() -> Self {
         Self {
-            client: ConduitClient::from_env(),
+            client: TopazClient::from_env(),
         }
     }
 
-    pub fn client(&self) -> &ConduitClient {
+    pub fn client(&self) -> &TopazClient {
         &self.client
     }
 }
 
-impl AgentDialer for ConduitDialer {
+impl AgentDialer for TopazDialer {
     fn open_stream<'a>(
         &'a self,
         peer: &'a str,
@@ -484,7 +484,7 @@ struct HttpResponse {
 }
 
 fn parse_http_response(raw: &[u8]) -> Result<HttpResponse> {
-    let head_end = find(raw, b"\r\n\r\n").context("malformed HTTP response from conduit")?;
+    let head_end = find(raw, b"\r\n\r\n").context("malformed HTTP response from topaz")?;
     let head = String::from_utf8_lossy(&raw[..head_end]);
     let mut lines = head.split("\r\n");
     let status_line = lines.next().unwrap_or_default();

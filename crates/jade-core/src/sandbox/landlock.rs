@@ -127,7 +127,7 @@ pub(crate) fn build_landlock(
     }
 
     // Never grant `/` or `$HOME`: enumerate system read-only roots explicitly so
-    // `~/.ssh`, `~/.aws`, `~/.jade`, and `~/.conduit` remain unreachable.
+    // `~/.ssh`, `~/.aws`, `~/.jade`, and `~/.topaz` remain unreachable.
     let mut ro_paths = Vec::new();
     for root in SYSTEM_RO_ROOTS {
         let p = Path::new(root);

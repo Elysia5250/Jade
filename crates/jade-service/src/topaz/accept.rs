@@ -1,6 +1,6 @@
-//! Inbound side: idle accept connections parked on conduit.
+//! Inbound side: idle accept connections parked on topaz.
 
-use super::ConduitClient;
+use super::TopazClient;
 use crate::server::AgentServer;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -31,17 +31,17 @@ impl Drop for AcceptPool {
     }
 }
 
-/// Keep `size` idle accept connections parked on conduit and serve whatever is
+/// Keep `size` idle accept connections parked on topaz and serve whatever is
 /// handed off. Each worker owns exactly one parked connection at a time, so the
 /// pool size is the number of simultaneous idle accepts.
-pub fn spawn_accept_pool(server: AgentServer, client: ConduitClient, size: usize) -> AcceptPool {
+pub fn spawn_accept_pool(server: AgentServer, client: TopazClient, size: usize) -> AcceptPool {
     let size = size.max(1);
     let tasks = Arc::new(Mutex::new(Vec::with_capacity(size)));
     let stop = Arc::new(AtomicBool::new(false));
     info!(
         socket = %client.socket().display(),
         pool = size,
-        "conduit accept pool started"
+        "topaz accept pool started"
     );
     for _ in 0..size {
         let server = server.clone();
@@ -75,7 +75,7 @@ fn push_task(tasks: &Mutex<Vec<JoinHandle<()>>>, stop: &AtomicBool, handle: Join
 
 async fn accept_worker(
     server: AgentServer,
-    client: ConduitClient,
+    client: TopazClient,
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     stop: Arc<AtomicBool>,
 ) {
@@ -88,7 +88,7 @@ async fn accept_worker(
                 }
                 backoff = Duration::from_millis(250);
                 let peer = accept.peer_device_id.clone();
-                debug!(peer = %peer, "conduit handed off an inbound stream");
+                debug!(peer = %peer, "topaz handed off an inbound stream");
                 let server = server.clone();
                 let stream = tokio::spawn(async move {
                     if let Err(e) = server
@@ -104,9 +104,9 @@ async fn accept_worker(
                 if stop.load(Ordering::SeqCst) {
                     break;
                 }
-                // Conduit not running (or restarting) is normal: stay quiet and
+                // Topaz not running (or restarting) is normal: stay quiet and
                 // keep the local daemon fully usable.
-                debug!(error = %e, "no conduit accept connection; retrying");
+                debug!(error = %e, "no topaz accept connection; retrying");
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(5));
             }

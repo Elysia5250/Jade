@@ -123,7 +123,7 @@ impl Runtime {
         let remote = super::remote_for(
             &self.data_dir,
             &target,
-            self.conduit.clone(),
+            self.topaz.clone(),
             local_socket,
             self.local_server.clone(),
         );
@@ -289,11 +289,11 @@ pub(crate) async fn cancel_active_job(
     data_dir: &std::path::Path,
     target: &str,
     local_socket: Option<PathBuf>,
-    conduit: Option<PathBuf>,
+    topaz: Option<PathBuf>,
     local_server: Option<jade_service::AgentServer>,
     job_id: u64,
 ) {
-    let remote = super::remote_for(data_dir, target, conduit, local_socket, local_server);
+    let remote = super::remote_for(data_dir, target, topaz, local_socket, local_server);
     let _ = remote.cancel(target, job_id).await;
 }
 

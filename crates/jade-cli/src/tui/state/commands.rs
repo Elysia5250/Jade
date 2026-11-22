@@ -307,6 +307,10 @@ impl App {
                 self.run_delegate_command(arg);
                 Action::None
             }
+            SlashCmdKind::Voice => {
+                self.run_voice_command(arg);
+                Action::None
+            }
             SlashCmdKind::Effort => {
                 self.run_effort_command(arg);
                 Action::None

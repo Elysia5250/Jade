@@ -75,7 +75,7 @@ pub(crate) use jade_proto::{
     Job, JobId, JobState as ProtoJobState, LogRecord, SubmitRequest, TaskSpec, DEFAULT_GROUP,
 };
 pub(crate) use jade_service::{
-    default_control_socket, dialer_for, AgentDialer, ConduitClient, Remote, Status,
+    default_control_socket, dialer_for, AgentDialer, Remote, Status, TopazClient,
 };
 pub(crate) use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -131,7 +131,7 @@ fn model_list_needs_fetch(data_dir: &std::path::Path) -> bool {
 pub async fn run(
     data_dir: PathBuf,
     target: String,
-    conduit: Option<PathBuf>,
+    topaz: Option<PathBuf>,
     cwd: PathBuf,
     continue_last: bool,
     session_id: Option<String>,
@@ -143,15 +143,9 @@ pub async fn run(
             "`jade` TUI requires a terminal stdout; use `jade -p \"...\"` or `jade ask \"...\"` for non-interactive runs"
         );
     }
-    let mut remote: Remote<AnyDialer> =
-        Remote::new(dialer_for(&data_dir, &target, conduit.clone()));
+    let mut remote: Remote<AnyDialer> = Remote::new(dialer_for(&data_dir, &target, topaz.clone()));
 
-    let mut app = App::new(
-        data_dir.clone(),
-        target.clone(),
-        conduit.clone(),
-        cwd.clone(),
-    );
+    let mut app = App::new(data_dir.clone(), target.clone(), topaz.clone(), cwd.clone());
     if pick_workspace {
         app.open_welcome();
     }
@@ -170,7 +164,7 @@ pub async fn run(
         }
     }
 
-    // Enter alternate screen immediately before daemon/conduit startup so frame 1 is instant.
+    // Enter alternate screen immediately before daemon/topaz startup so frame 1 is instant.
     let mut tui = Tui::enter()?;
     app.ui.truecolor = tui.caps.truecolor;
     app.agent.retry_at = Instant::now() + Duration::from_millis(800);
@@ -189,7 +183,7 @@ pub async fn run(
 
     let boot_data = data_dir.clone();
     let boot_target = target.clone();
-    let boot_conduit = conduit.clone();
+    let boot_topaz = topaz.clone();
     let boot_tx = app.notice_tx.clone();
     tokio::spawn(async move {
         if boot_target == "local" || boot_target.is_empty() {
@@ -208,9 +202,9 @@ pub async fn run(
         } else {
             let _ = boot_tx.send(UiNotice::DaemonReady);
         }
-        let client = ConduitClient::new(boot_conduit.unwrap_or_else(default_control_socket));
+        let client = TopazClient::new(boot_topaz.unwrap_or_else(default_control_socket));
         if let Ok(rx) = client.watch().await {
-            let _ = boot_tx.send(UiNotice::ConduitWatch(rx));
+            let _ = boot_tx.send(UiNotice::TopazWatch(rx));
         }
     });
 
@@ -322,8 +316,8 @@ pub(crate) struct ShellWatch {
 pub(crate) enum UiNotice {
     /// Background daemon ensure succeeded; console can attach and refresh immediately.
     DaemonReady,
-    /// Background conduit watch receiver connected.
-    ConduitWatch(watch::Receiver<Option<Status>>),
+    /// Background topaz watch receiver connected.
+    TopazWatch(watch::Receiver<Option<Status>>),
     /// A send failed because the daemon went away; put the items back in the
     /// outbox so the next attach can deliver them.
     Requeue {
@@ -390,7 +384,7 @@ pub(crate) struct SnapshotAccum {
 
 pub(crate) struct App {
     data_dir: PathBuf,
-    conduit: Option<PathBuf>,
+    topaz: Option<PathBuf>,
     notice_tx: mpsc::UnboundedSender<UiNotice>,
     notice_rx: mpsc::UnboundedReceiver<UiNotice>,
     inputs: inputs::Inputs,

@@ -178,7 +178,7 @@ fn launchctl_uninstall(path: &Path) {
 
 /// Install a user-level autostart unit for `jade serve`.
 ///
-/// The daemon keeps the local socket and the conduit accept pool; launching it
+/// The daemon keeps the local socket and the topaz accept pool; launching it
 /// through the OS is what makes it survive logout/reboot.
 pub fn install(exe: &Path, data_dir: &Path) -> Result<String> {
     std::fs::create_dir_all(data_dir)?;

@@ -22,7 +22,7 @@ pub(crate) use super::live::{Live, LivePhase, PhaseGuard};
 
 pub struct Runtime {
     pub(crate) data_dir: PathBuf,
-    pub(crate) conduit: Option<PathBuf>,
+    pub(crate) topaz: Option<PathBuf>,
     pub(crate) local_server: Option<AgentServer>,
     pub(crate) mcp_pool: Arc<crate::mcp::pool::McpPool>,
     sessions: Mutex<HashMap<String, Arc<Mutex<Live>>>>,
@@ -34,19 +34,19 @@ impl Runtime {
         Self::with_local_server(data_dir, None, None)
     }
 
-    pub fn with_conduit(data_dir: PathBuf, conduit: Option<PathBuf>) -> Arc<Self> {
-        Self::with_local_server(data_dir, conduit, None)
+    pub fn with_topaz(data_dir: PathBuf, topaz: Option<PathBuf>) -> Arc<Self> {
+        Self::with_local_server(data_dir, topaz, None)
     }
 
     pub fn with_local_server(
         data_dir: PathBuf,
-        conduit: Option<PathBuf>,
+        topaz: Option<PathBuf>,
         local_server: Option<AgentServer>,
     ) -> Arc<Self> {
         let mcp_pool = crate::mcp::pool::McpPool::new(data_dir.clone());
         Arc::new(Self {
             data_dir,
-            conduit,
+            topaz,
             local_server,
             mcp_pool,
             sessions: Mutex::new(HashMap::new()),
@@ -263,7 +263,7 @@ impl Runtime {
 
         let cfg = TurnConfig {
             data_dir: self.data_dir.clone(),
-            conduit: self.conduit.clone(),
+            topaz: self.topaz.clone(),
             local_socket,
             local_server: self.local_server.clone(),
             target,
@@ -586,7 +586,7 @@ impl Runtime {
         }
         if let Some((job_id, target, local_socket)) = job {
             let data_dir = self.data_dir.clone();
-            let conduit = self.conduit.clone();
+            let topaz = self.topaz.clone();
             let local_server = self.local_server.clone();
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
@@ -594,7 +594,7 @@ impl Runtime {
                         &data_dir,
                         &target,
                         local_socket,
-                        conduit,
+                        topaz,
                         local_server,
                         job_id,
                     )

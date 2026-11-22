@@ -292,7 +292,7 @@ pub struct Hello {
     pub os: String,
     pub arch: String,
     pub hostname: String,
-    /// The conduit device id, when this stream arrived over the fabric.
+    /// The topaz device id, when this stream arrived over the fabric.
     pub device: Option<String>,
 }
 

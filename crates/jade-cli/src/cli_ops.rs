@@ -5,7 +5,7 @@ use anyhow::Result;
 use jade_agent::{auth, daemon};
 use jade_core::AgentConfigStore;
 use jade_proto::{EntryKind, JobState, AGENT_VERSION};
-use jade_service::ConduitClient;
+use jade_service::TopazClient;
 use std::io::{Read, Write};
 use std::path::Path;
 
@@ -66,12 +66,12 @@ pub(crate) async fn cmd_status(ctx: &Ctx) -> Result<()> {
         );
     }
 
-    let conduit = ConduitClient::new(ctx.conduit_socket());
-    match conduit.status().await {
+    let topaz = TopazClient::new(ctx.topaz_socket());
+    match topaz.status().await {
         Ok(status) => {
             println!(
-                "conduit:  connected ({}), this device {} ({})",
-                conduit.socket().display(),
+                "topaz:  connected ({}), this device {} ({})",
+                topaz.socket().display(),
                 status.device_name,
                 status.device_id
             );
@@ -98,7 +98,7 @@ pub(crate) async fn cmd_status(ctx: &Ctx) -> Result<()> {
                 None => println!("service:  jade not registered (start `jade serve`)"),
             }
         }
-        Err(_) => println!("conduit:  not running ({})", conduit.socket().display()),
+        Err(_) => println!("topaz:  not running ({})", topaz.socket().display()),
     }
     println!("protocol: v{AGENT_VERSION}");
     println!("sandbox:  {}", jade_core::sandbox::backend_label());
@@ -127,7 +127,7 @@ pub(crate) fn cmd_deny(data_dir: &Path, caller_id: &str) -> Result<()> {
 }
 
 pub(crate) async fn cmd_devices(ctx: &Ctx) -> Result<()> {
-    let client = ConduitClient::new(ctx.conduit_socket());
+    let client = TopazClient::new(ctx.topaz_socket());
     let reply = client.devices().await?;
     if reply.devices.is_empty() {
         println!("no devices in this account");

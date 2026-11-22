@@ -15,7 +15,7 @@ pub(crate) enum Commands {
         #[arg(trailing_var_arg = true, required = true)]
         prompt: Vec<String>,
     },
-    /// Show policy, daemon state, conduit status, and job counts.
+    /// Show policy, daemon state, topaz status, and job counts.
     Status,
     /// Connect an LLM provider (API key, OAuth, or custom endpoint).
     Login,
@@ -34,7 +34,7 @@ pub(crate) enum Commands {
     Allow { caller_id: String },
     /// Remove a remote device id from this device's caller allowlist.
     Deny { caller_id: String },
-    /// List the devices in this conduit account.
+    /// List the devices in this topaz account.
     Devices,
     /// Manage the local daemon.
     Daemon {
@@ -45,10 +45,10 @@ pub(crate) enum Commands {
     Serve {
         #[arg(long)]
         socket: Option<PathBuf>,
-        /// Local use only: do not expose service 16 to conduit.
-        #[arg(long, alias = "no-conduit")]
+        /// Local use only: do not expose service 16 to topaz.
+        #[arg(long, alias = "no-topaz")]
         local_only: bool,
-        /// Idle accept connections parked on conduit.
+        /// Idle accept connections parked on topaz.
         #[arg(long, default_value_t = jade_service::DEFAULT_POOL)]
         accept_pool: usize,
     },

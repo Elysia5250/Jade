@@ -37,7 +37,7 @@ async fn mcp_server_normalizes_relative_paths_rejects_ld_preload_and_audits() {
     let mcp = Mcp {
         data_dir: data.clone(),
         cwd: cwd.clone(),
-        conduit: None,
+        topaz: None,
         permissions: PermissionEngine::new(
             data.clone(),
             cwd.clone(),
@@ -98,7 +98,7 @@ async fn mcp_server_normalizes_relative_paths_rejects_ld_preload_and_audits() {
     let eng_auto = Mcp {
         data_dir: data.clone(),
         cwd: cwd.clone(),
-        conduit: None,
+        topaz: None,
         permissions: PermissionEngine::new(
             data,
             cwd,

@@ -109,7 +109,7 @@ fn truncate_linked_spans(spans: &[LinkedSpan], max: usize) -> (Vec<LinkedSpan>, 
     }
     if max >= 1 {
         out.push(LinkedSpan {
-            span: Span::raw("."),
+            span: Span::raw("…"),
             target: None,
         });
         used += 1;

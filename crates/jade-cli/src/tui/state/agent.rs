@@ -203,7 +203,7 @@ impl App {
                     self.spawn_agent_attach();
                 }
             }
-            UiNotice::ConduitWatch(rx) => {
+            UiNotice::TopazWatch(rx) => {
                 self.jobs.watch = Some(rx);
             }
             UiNotice::Requeue { session_id, items } => {

@@ -25,7 +25,7 @@ struct MonitorEntry {
     info: MonitorInfo,
     target: String,
     data_dir: PathBuf,
-    conduit: Option<PathBuf>,
+    topaz: Option<PathBuf>,
     local_socket: Option<PathBuf>,
     local_server: Option<AgentServer>,
     cancel_tx: watch::Sender<bool>,
@@ -45,7 +45,7 @@ impl Drop for MonitorEntry {
         let target = self.target.clone();
         let job_id = self.info.job_id;
         let data_dir = self.data_dir.clone();
-        let conduit = self.conduit.clone();
+        let topaz = self.topaz.clone();
         let local_socket = self.local_socket.clone();
         let local_server = self.local_server.clone();
         let handle = self
@@ -56,7 +56,7 @@ impl Drop for MonitorEntry {
             return;
         };
         handle.spawn(async move {
-            let remote = super::remote_for(&data_dir, &target, conduit, local_socket, local_server);
+            let remote = super::remote_for(&data_dir, &target, topaz, local_socket, local_server);
             let _ = remote.cancel(&target, job_id).await;
         });
     }
@@ -72,7 +72,7 @@ struct HubInner {
 pub struct MonitorHub {
     session_id: String,
     data_dir: PathBuf,
-    conduit: Option<PathBuf>,
+    topaz: Option<PathBuf>,
     local_socket: Mutex<Option<PathBuf>>,
     local_server: Option<AgentServer>,
     runtime: Weak<Runtime>,
@@ -83,14 +83,14 @@ impl MonitorHub {
     pub(crate) fn new(
         session_id: String,
         data_dir: PathBuf,
-        conduit: Option<PathBuf>,
+        topaz: Option<PathBuf>,
         local_server: Option<AgentServer>,
         runtime: Weak<Runtime>,
     ) -> Arc<Self> {
         Arc::new(Self {
             session_id,
             data_dir,
-            conduit,
+            topaz,
             local_socket: Mutex::new(None),
             local_server,
             runtime,
@@ -120,7 +120,7 @@ impl MonitorHub {
                 info,
                 target: "local".into(),
                 data_dir: self.data_dir.clone(),
-                conduit: None,
+                topaz: None,
                 local_socket: None,
                 local_server: None,
                 cancel_tx,
@@ -206,7 +206,7 @@ impl MonitorBroker for MonitorHub {
                     info: info.clone(),
                     target: spec.target.clone(),
                     data_dir: self.data_dir.clone(),
-                    conduit: self.conduit.clone(),
+                    topaz: self.topaz.clone(),
                     local_socket: self.local_socket.lock().unwrap().clone(),
                     local_server: self.local_server.clone(),
                     cancel_tx,
@@ -234,7 +234,7 @@ impl MonitorBroker for MonitorHub {
         let session_id = self.session_id.clone();
         let poll_target = MonitorPollTarget {
             data_dir: self.data_dir.clone(),
-            conduit: self.conduit.clone(),
+            topaz: self.topaz.clone(),
             local_socket: self.local_socket.lock().unwrap().clone(),
             local_server: self.local_server.clone(),
         };
@@ -307,7 +307,7 @@ impl MonitorBroker for MonitorHub {
                 let remote = super::remote_for(
                     &self.data_dir,
                     &target,
-                    self.conduit.clone(),
+                    self.topaz.clone(),
                     local_socket,
                     self.local_server.clone(),
                 );
@@ -323,7 +323,7 @@ impl MonitorBroker for MonitorHub {
 
 struct MonitorPollTarget {
     data_dir: PathBuf,
-    conduit: Option<PathBuf>,
+    topaz: Option<PathBuf>,
     local_socket: Option<PathBuf>,
     local_server: Option<AgentServer>,
 }
@@ -339,7 +339,7 @@ async fn poll_monitor_loop(
     let remote = super::remote_for(
         &poll_target.data_dir,
         &spec.target,
-        poll_target.conduit,
+        poll_target.topaz,
         poll_target.local_socket,
         poll_target.local_server,
     );

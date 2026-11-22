@@ -2,7 +2,7 @@
 //!
 //! Backed by `regex`, `globset`, and `ignore::WalkBuilder`. Skips
 //! VCS/build/protected directories (`.git`, `target`, `node_modules`, `.ssh`,
-//! `.aws`, `.jade`, `.conduit`, `.gnupg`, `.kube`, `.codex`, `.agents`), avoids
+//! `.aws`, `.jade`, `.topaz`, `.gnupg`, `.kube`, `.codex`, `.agents`), avoids
 //! symlink escapes, honors repo `.gitignore`, ignores binary files and `.env*`
 //! secret files, and bounds traversal and output volume.
 
@@ -21,7 +21,7 @@ const SKIP_DIRS: &[&str] = &[
     ".ssh",
     ".aws",
     ".jade",
-    ".conduit",
+    ".topaz",
     ".gnupg",
     ".kube",
     ".codex",
@@ -88,7 +88,7 @@ fn is_protected_search_root(canon: &Path) -> bool {
                 | ".ssh"
                 | ".aws"
                 | ".jade"
-                | ".conduit"
+                | ".topaz"
                 | ".gnupg"
                 | ".kube"
                 | ".codex"

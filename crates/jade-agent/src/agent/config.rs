@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Clone)]
 pub struct TurnConfig {
     pub data_dir: PathBuf,
-    pub conduit: Option<PathBuf>,
+    pub topaz: Option<PathBuf>,
     pub local_socket: Option<PathBuf>,
     pub local_server: Option<jade_service::AgentServer>,
     pub target: String,

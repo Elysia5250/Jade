@@ -156,7 +156,7 @@ impl Runtime {
         };
         let cfg = TurnConfig {
             data_dir: self.data_dir.clone(),
-            conduit: self.conduit.clone(),
+            topaz: self.topaz.clone(),
             local_socket: prepared.local_socket,
             local_server: self.local_server.clone(),
             target: prepared.target.clone(),

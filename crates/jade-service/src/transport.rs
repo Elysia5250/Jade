@@ -163,19 +163,19 @@ impl AgentDialer for UnixDialer {
 }
 
 /// Build a dialer for a target name: `local` goes to this machine's daemon
-/// socket, any other name goes to `conduit run`'s control socket.
+/// socket, any other name goes to `topaz run`'s control socket.
 ///
-/// `conduit_socket` overrides `$CONDUIT_CONTROL_SOCK` / `~/.conduit/control.sock`.
+/// `topaz_socket` overrides `$TOPAZ_CONTROL_SOCK` / `~/.topaz/control.sock`.
 #[cfg(unix)]
 pub fn dialer_for(
     data_dir: &std::path::Path,
     target: &str,
-    conduit_socket: Option<PathBuf>,
+    topaz_socket: Option<PathBuf>,
 ) -> Box<dyn AgentDialer> {
     if target == "local" || target.is_empty() {
         Box::new(UnixDialer::new(data_dir.join("jade.sock")))
     } else {
-        let socket = conduit_socket.unwrap_or_else(crate::conduit::default_control_socket);
-        Box::new(crate::conduit::ConduitDialer::new(socket))
+        let socket = topaz_socket.unwrap_or_else(crate::topaz::default_control_socket);
+        Box::new(crate::topaz::TopazDialer::new(socket))
     }
 }

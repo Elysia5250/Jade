@@ -2,6 +2,7 @@
 use super::bar::{render_split_bar, BarSegment};
 use crate::tui::*;
 use jade_agent::agent::delegate_pref::DelegateLevel;
+use jade_agent::agent::voice_pref::VoiceStyle;
 
 pub(super) fn draw_status(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     if area.width == 0 || area.height == 0 {
@@ -76,6 +77,15 @@ fn build_left_segments(app: &App, theme: &Theme) -> Vec<BarSegment> {
         left.push(BarSegment::plain(
             vec![Span::styled(
                 format!("delegate:{}", app.inputs.catalog.delegate_level.as_str()),
+                Style::default().fg(theme.secondary),
+            )],
+            3,
+        ));
+    }
+    if app.inputs.catalog.voice_style != VoiceStyle::Engineer {
+        left.push(BarSegment::plain(
+            vec![Span::styled(
+                format!("voice:{}", app.inputs.catalog.voice_style.as_str()),
                 Style::default().fg(theme.secondary),
             )],
             3,

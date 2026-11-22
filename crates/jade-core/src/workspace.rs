@@ -19,7 +19,7 @@ const SKIP_DIRS: &[&str] = &[
     ".ssh",
     ".aws",
     ".jade",
-    ".conduit",
+    ".topaz",
     ".gnupg",
     ".kube",
     ".codex",

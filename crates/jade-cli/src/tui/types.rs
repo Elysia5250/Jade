@@ -80,6 +80,7 @@ pub(crate) enum HitTarget {
     HubSelectTab(HubTab),
     HubSelectFocus(HubFocus),
     HubSession(usize),
+    HubDeactivateSession,
     HubWorkspace(usize),
     HubControl(HubControl),
     HubOpenPath,
@@ -211,6 +212,7 @@ pub(crate) enum HubControl {
     Effort,
     Budget,
     Delegate,
+    Voice,
     Permission,
     Trust,
     Target,
@@ -222,12 +224,13 @@ pub(crate) enum HubControl {
 }
 
 impl HubControl {
-    pub(crate) const ALL: [Self; 13] = [
+    pub(crate) const ALL: [Self; 14] = [
         Self::Provider,
         Self::Model,
         Self::Effort,
         Self::Budget,
         Self::Delegate,
+        Self::Voice,
         Self::Permission,
         Self::Trust,
         Self::Target,
@@ -281,6 +284,13 @@ pub(crate) struct HubSessionRow {
     pub(crate) running: bool,
     pub(crate) queued: usize,
     pub(crate) is_current: bool,
+    pub(crate) in_daemon: bool,
+}
+
+impl HubSessionRow {
+    pub(crate) fn is_active(&self) -> bool {
+        self.is_current || self.running || self.queued > 0 || self.in_daemon
+    }
 }
 
 #[derive(Clone)]

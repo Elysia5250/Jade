@@ -30,11 +30,7 @@ pub(crate) enum McpCmd {
     },
 }
 
-pub(crate) async fn cmd_mcp(
-    data_dir: PathBuf,
-    cmd: McpCmd,
-    conduit: Option<PathBuf>,
-) -> Result<()> {
+pub(crate) async fn cmd_mcp(data_dir: PathBuf, cmd: McpCmd, topaz: Option<PathBuf>) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| data_dir.clone());
     match cmd {
         McpCmd::Serve { mode } => {
@@ -42,7 +38,7 @@ pub(crate) async fn cmd_mcp(
                 .as_deref()
                 .and_then(PermissionMode::parse)
                 .unwrap_or(PermissionMode::Default);
-            server::serve(data_dir, conduit, parsed).await
+            server::serve(data_dir, topaz, parsed).await
         }
         McpCmd::List => {
             let report = config::load_mcp_configs(&data_dir, &cwd);

@@ -5,7 +5,7 @@
 
 ## Context
 
-The console, headless CLI, and daemon exchange high-frequency streaming events (`TextDelta`, `ReasoningDelta`, tool outputs, snapshots) and RPCs (`Op`/`Reply`) over local Unix sockets (`agent.sock`, `jade.sock`) and conduit WebSocket streams. We need compact, low-overhead framing without pulling in a heavy schema compiler or codegen pipeline.
+The console, headless CLI, and daemon exchange high-frequency streaming events (`TextDelta`, `ReasoningDelta`, tool outputs, snapshots) and RPCs (`Op`/`Reply`) over local Unix sockets (`agent.sock`, `jade.sock`) and topaz WebSocket streams. We need compact, low-overhead framing without pulling in a heavy schema compiler or codegen pipeline.
 
 ## Decision
 

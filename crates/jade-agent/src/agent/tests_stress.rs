@@ -204,7 +204,7 @@ async fn stress_250_step_loop_with_compaction_and_fd_rss_profile() {
 
     let cfg = TurnConfig {
         data_dir: data.clone(),
-        conduit: None,
+        topaz: None,
         local_socket: None,
         local_server: None,
         target: "local".into(),
@@ -362,7 +362,7 @@ async fn stress_8way_parallel_subagents_and_midflight_abort() {
 
     let host = SubagentHost {
         data_dir: data.clone(),
-        conduit: None,
+        topaz: None,
         local_socket: None,
         local_server: None,
         target: "local".into(),

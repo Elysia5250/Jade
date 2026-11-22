@@ -47,7 +47,7 @@ pub(crate) fn side_system(target: &str, cwd: &Path) -> String {
          You are in plan mode: read, discuss, and write the plan only to `.jade/plans/*.md`.\n\
          Do not call `delegate`, `job`, `todo`, or `monitor`. \
          When the plan is ready, write that markdown file and stop.\n\
-         User-visible replies use the Steps shell. Choices go only in `ask`.\n",
+         User-visible replies follow the Discussion / Research / Planning phase style. Choices go only in `ask`.\n",
     );
     prompt
 }

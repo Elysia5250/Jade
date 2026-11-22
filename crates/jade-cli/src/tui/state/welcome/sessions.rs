@@ -188,22 +188,46 @@ impl App {
         }
     }
 
-    pub(super) fn interrupt_selected_session(&mut self) {
+    pub(in crate::tui) fn deactivate_selected_session(&mut self) {
         let Some(row) = self.selected_hub_session().cloned() else {
             return;
         };
-        if !row.running {
+        if !row.is_active() {
             if let Some(w) = self.ui.welcome.as_mut() {
-                w.error = Some("selected session is not running".into());
+                w.error = Some("selected session is not active".into());
+                w.confirm_delete = None;
             }
             return;
         }
-        self.sync_agent(AgentReq::Interrupt { id: row.id });
-        self.set_toast(format!("interrupted {}", row.title), false);
+        if row.is_current {
+            self.flush_session_now();
+            self.agent.stream = None;
+            self.agent.ready = false;
+            self.agent.running = false;
+            self.agent.snapshot = None;
+            self.agent.queued.clear();
+            self.agent.outbox.clear();
+            self.agent.active_assistant_id = None;
+            self.agent.active_tool_items.clear();
+            self.agent.active_monitors.clear();
+            self.agent.pending_ask = None;
+            self.agent.turn_started_at = None;
+            if let Some(w) = self.ui.welcome.as_mut() {
+                w.can_return = false;
+            }
+        }
+        if row.running || row.queued > 0 {
+            self.sync_agent(AgentReq::Interrupt { id: row.id.clone() });
+        }
+        self.sync_agent(AgentReq::CloseSession { id: row.id.clone() });
+        self.inputs.live_sessions.retain(|s| s.id != row.id);
         if let Some(w) = self.ui.welcome.as_mut() {
-            w.live_refreshed_at = None;
+            w.live_refreshed_at = Some(Instant::now());
+            w.confirm_delete = None;
             w.error = None;
         }
+        self.reload_hub_lists();
+        self.set_toast(format!("deactivated {}", row.title), false);
     }
 
     pub(super) fn request_delete_selected_session(&mut self) {
@@ -213,7 +237,9 @@ impl App {
         let can_return = self.ui.welcome.as_ref().is_some_and(|w| w.can_return);
         if (can_return && row.id == self.session.current.id) || row.running {
             if let Some(w) = self.ui.welcome.as_mut() {
-                w.error = Some("cannot delete an active or running session".into());
+                w.error = Some(
+                    "cannot delete an active or running session — press x to deactivate".into(),
+                );
                 w.confirm_delete = None;
             }
             return;
@@ -263,6 +289,7 @@ fn build_session_rows(
         let info = live.get(&s.id);
         rows.push(HubSessionRow {
             is_current: has_current && s.id == current_id,
+            in_daemon: info.is_some(),
             running: info.is_some_and(|i| i.running),
             queued: info.map(|i| i.queued).unwrap_or(0),
             id: s.id,
@@ -293,6 +320,7 @@ fn build_session_rows(
             running: info.running,
             queued: info.queued,
             is_current: has_current && info.id == current_id,
+            in_daemon: true,
         });
     }
     rows

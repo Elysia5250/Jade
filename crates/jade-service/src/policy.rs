@@ -1,7 +1,7 @@
 //! Server-side security floor for remote `AgentServer` callers.
 //!
 //! Local same-user callers are already trusted on their own machine. Remote
-//! Conduit peers—even when allowlisted—must not disable OS sandboxing or read/
+//! Topaz peers—even when allowlisted—must not disable OS sandboxing or read/
 //! mutate host credentials, `.git`/`.env`, or daemon control state.
 
 use jade_core::fs::{home_dir, resolve};

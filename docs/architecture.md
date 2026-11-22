@@ -13,7 +13,7 @@ Jade is a daemon-owned agent with a thin terminal client.
                                                            │ service 16 RPC
                                                            ▼
                                             ┌──────────────────────────────┐
-                                            │ jade-service / conduit      │
+                                            │ jade-service / topaz      │
                                             │ local or remote jobs         │
                                             └──────────────────────────────┘
 ```
@@ -106,4 +106,4 @@ crates/jade-cli/src/
 - Skills & MCP: `crates/jade-agent/src/{skills,mcp}/`
 - Console: `crates/jade-cli/src/tui/`
 - Research and rationale: `docs/achieved/HARNESS-RESEARCH.md` (archived snapshot, 2026-11-16)
-- Cross-repo `conduit` / `grain` / `jade` split archive: root `ARCHITECTURE.md` (kept in sync across the three repos; this file is the live internal map for `jade`)
+- Cross-repo `topaz` / `grain` / `jade` split archive: root `ARCHITECTURE.md` (kept in sync across the three repos; this file is the live internal map for `jade`)

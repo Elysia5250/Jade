@@ -109,7 +109,7 @@ async fn overflow_triggers_one_compaction_retry_and_second_failure_errors() {
     ];
     let cfg = TurnConfig {
         data_dir: dir.clone(),
-        conduit: None,
+        topaz: None,
         local_socket: Some(dir.join("unused.sock")),
         local_server: None,
         target: "local".into(),
@@ -302,7 +302,7 @@ async fn custom_tool_and_provider_registries_run_end_to_end() {
     };
     let cfg = TurnConfig {
         data_dir: dir.clone(),
-        conduit: None,
+        topaz: None,
         local_socket: Some(dir.join("unused.sock")),
         local_server: None,
         target: "local".into(),
@@ -558,7 +558,7 @@ async fn model_driven_plan_mode_lifecycle_enforces_plan_file_and_restores_mode()
     let local_server = jade_service::AgentServer::new(jobs_dir, host);
     let cfg = TurnConfig {
         data_dir: data.clone(),
-        conduit: None,
+        topaz: None,
         local_socket: None,
         local_server: Some(local_server),
         target: "local".into(),
@@ -715,7 +715,7 @@ async fn headless_loop_hides_and_blocks_mode_tool() {
     };
     let cfg = TurnConfig {
         data_dir: dir.clone(),
-        conduit: None,
+        topaz: None,
         local_socket: Some(dir.join("unused.sock")),
         local_server: None,
         target: "local".into(),

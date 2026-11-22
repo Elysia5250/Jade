@@ -56,17 +56,17 @@ jade daemon install        # launchd / systemd --user
 curl -fsSL ... | sh -s -- --service
 ```
 
-## 独立运行（不装 conduit）
+## 独立运行（不装 topaz）
 
-jade 是可以单独用的：本地守护进程 + job 模型 + TUI/MCP 都不依赖 conduit。
+jade 是可以单独用的：本地守护进程 + job 模型 + TUI/MCP 都不依赖 topaz。
 
 ```bash
-jade status                 # conduit: not running
+jade status                 # topaz: not running
 jade run "echo hi"          # 照常工作
 jade ui                     # 机器列表里只有 local 和当前目标
 ```
 
-`jade serve` 默认会尝试挂 conduit 的 accept 池；conduit 不在时会静默退避重试，不影响本地使用。
+`jade serve` 默认会尝试挂 topaz 的 accept 池；topaz 不在时会静默退避重试，不影响本地使用。
 完全不想让它尝试就加 `--local-only`。
 
 ## 发版（维护者）

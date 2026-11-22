@@ -20,7 +20,7 @@ fn machine_prop() -> Value {
     json!({
         "type": "string",
         "default": "local",
-        "description": "Target machine: `local` or a conduit device name/id.",
+        "description": "Target machine: `local` or a topaz device name/id.",
     })
 }
 

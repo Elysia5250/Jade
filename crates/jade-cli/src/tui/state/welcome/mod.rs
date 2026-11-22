@@ -232,7 +232,7 @@ impl App {
                 self.begin_rename_selected_session();
             }
             KeyCode::Char('x') if tab == HubTab::Sessions => {
-                self.interrupt_selected_session();
+                self.deactivate_selected_session();
             }
             KeyCode::Char('d') if tab == HubTab::Sessions => {
                 self.request_delete_selected_session();

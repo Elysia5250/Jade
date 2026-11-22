@@ -19,7 +19,7 @@ impl App {
     pub(in crate::tui) fn new(
         data_dir: PathBuf,
         target: String,
-        conduit: Option<PathBuf>,
+        topaz: Option<PathBuf>,
         cwd: PathBuf,
     ) -> Self {
         let prefs = super::ui_prefs::load(&data_dir);
@@ -36,7 +36,7 @@ impl App {
         let (notice_tx, notice_rx) = mpsc::unbounded_channel();
         Self {
             data_dir,
-            conduit,
+            topaz,
             notice_tx,
             notice_rx,
             inputs: inputs::Inputs::default(),

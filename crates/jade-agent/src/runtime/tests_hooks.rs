@@ -156,7 +156,7 @@ async fn session_start_and_user_prompt_submit_thread_hook_context_and_block() {
         let hook_state = st.hook_state.lock().unwrap().clone();
         TurnConfig {
             data_dir: data.clone(),
-            conduit: None,
+            topaz: None,
             local_socket: None,
             local_server: None,
             target: "local".into(),

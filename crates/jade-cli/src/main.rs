@@ -4,8 +4,8 @@
 //! survives the terminal that started it: `jade submit` returns a job id and
 //! `jade logs -f` can reattach from anywhere.
 //!
-//! Remote targets (`--on laptop`) go through `conduit run`'s control socket.
-//! jade never links conduit: it is an HTTP/WebSocket client of that socket.
+//! Remote targets (`--on laptop`) go through `topaz run`'s control socket.
+//! jade never links topaz: it is an HTTP/WebSocket client of that socket.
 
 mod auth_cli;
 mod cli_ops;
@@ -27,8 +27,8 @@ use jade_agent::{daemon, runtime};
 use jade_core::{parse_mode, AgentConfigStore};
 use jade_proto::{Job, JobState, SubmitRequest};
 use jade_service::{
-    default_control_socket, dialer_for, spawn_accept_pool, AgentDialer, AgentServer, ConduitClient,
-    Remote,
+    default_control_socket, dialer_for, spawn_accept_pool, AgentDialer, AgentServer, Remote,
+    TopazClient,
 };
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -48,14 +48,14 @@ struct Cli {
     #[arg(long, global = true, env = "JADE_DATA_DIR")]
     data_dir: Option<PathBuf>,
 
-    /// Target machine: `local` or a conduit device name/id/ip.
+    /// Target machine: `local` or a topaz device name/id/ip.
     #[arg(long, global = true, default_value = "local")]
     on: String,
 
-    /// conduit control socket (default: $CONDUIT_CONTROL_SOCK or
-    /// ~/.conduit/control.sock).
-    #[arg(long, global = true, env = "CONDUIT_CONTROL_SOCK")]
-    conduit_socket: Option<PathBuf>,
+    /// topaz control socket (default: $TOPAZ_CONTROL_SOCK or
+    /// ~/.topaz/control.sock).
+    #[arg(long, global = true, env = "TOPAZ_CONTROL_SOCK")]
+    topaz_socket: Option<PathBuf>,
 
     /// Working directory for the TUI and local jobs (default: cwd).
     #[arg(long, global = true, env = "JADE_CWD")]
@@ -86,13 +86,13 @@ struct Cli {
 pub(crate) struct Ctx {
     pub(crate) data_dir: PathBuf,
     pub(crate) on: String,
-    pub(crate) conduit: Option<PathBuf>,
+    pub(crate) topaz: Option<PathBuf>,
     pub(crate) cwd: PathBuf,
 }
 
 impl Ctx {
-    pub(crate) fn conduit_socket(&self) -> PathBuf {
-        self.conduit.clone().unwrap_or_else(default_control_socket)
+    pub(crate) fn topaz_socket(&self) -> PathBuf {
+        self.topaz.clone().unwrap_or_else(default_control_socket)
     }
 
     pub(crate) async fn remote(&self) -> Result<Remote<AnyDialer>> {
@@ -102,7 +102,7 @@ impl Ctx {
         Ok(Remote::new(dialer_for(
             &self.data_dir,
             &self.on,
-            Some(self.conduit_socket()),
+            Some(self.topaz_socket()),
         )))
     }
 
@@ -110,7 +110,7 @@ impl Ctx {
         Remote::new(dialer_for(
             &self.data_dir,
             target,
-            Some(self.conduit_socket()),
+            Some(self.topaz_socket()),
         ))
     }
 
@@ -221,7 +221,7 @@ async fn main() -> Result<()> {
     let ctx = Ctx {
         data_dir,
         on: cli.on.clone(),
-        conduit: cli.conduit_socket.clone(),
+        topaz: cli.topaz_socket.clone(),
         cwd,
     };
     let pick_workspace =
@@ -236,7 +236,7 @@ async fn main() -> Result<()> {
         return tui::run(
             ctx.data_dir,
             ctx.on,
-            ctx.conduit,
+            ctx.topaz,
             ctx.cwd,
             cli.continue_last,
             cli.session,
@@ -295,7 +295,7 @@ async fn main() -> Result<()> {
                 socket,
                 local_only,
                 accept_pool,
-                ctx.conduit_socket(),
+                ctx.topaz_socket(),
             )
             .await
         }
@@ -326,7 +326,7 @@ async fn main() -> Result<()> {
             tui::run(
                 ctx.data_dir,
                 ctx.on,
-                ctx.conduit,
+                ctx.topaz,
                 ctx.cwd,
                 cli.continue_last,
                 cli.session,
@@ -336,7 +336,7 @@ async fn main() -> Result<()> {
             .await
         }
         Commands::Mcp { cmd } => {
-            mcp_cli::cmd_mcp(ctx.data_dir.clone(), cmd, ctx.conduit.clone()).await
+            mcp_cli::cmd_mcp(ctx.data_dir.clone(), cmd, ctx.topaz.clone()).await
         }
         Commands::Plugin { cmd } => plugin_cli::cmd_plugin(&ctx.data_dir, &ctx.cwd, cmd),
     }
@@ -443,7 +443,7 @@ async fn cmd_serve(
     socket: Option<PathBuf>,
     local_only: bool,
     accept_pool: usize,
-    conduit_socket: PathBuf,
+    topaz_socket: PathBuf,
 ) -> Result<()> {
     // Serialize instances before touching the socket: a second daemon would
     // otherwise unlink the live one and share the job store with it.
@@ -463,7 +463,7 @@ async fn cmd_serve(
     jade_core::fs::set_mode_strict(&agent_path, 0o600)?;
     let sessions = runtime::Runtime::with_local_server(
         data_dir.clone(),
-        Some(conduit_socket.clone()),
+        Some(topaz_socket.clone()),
         Some(server.clone()),
     );
     tokio::spawn(runtime::serve(sessions.clone(), agent_listener));
@@ -491,16 +491,16 @@ async fn cmd_serve(
 
     let mut pool = None;
     if local_only {
-        println!("conduit: disabled (--local-only)");
+        println!("topaz: disabled (--local-only)");
     } else {
         println!(
-            "conduit: watching {} ({} accept slot(s))",
-            conduit_socket.display(),
+            "topaz: watching {} ({} accept slot(s))",
+            topaz_socket.display(),
             accept_pool
         );
         pool = Some(spawn_accept_pool(
             server.clone(),
-            ConduitClient::new(conduit_socket),
+            TopazClient::new(topaz_socket),
             accept_pool,
         ));
     }

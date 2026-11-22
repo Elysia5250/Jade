@@ -36,7 +36,7 @@ pub struct AgentConfigStore {
 /// Authenticated origin of a service request.
 ///
 /// Only same-user local Unix socket connections (verified via `SO_PEERCRED`)
-/// or in-process callers construct [`Caller::Local`]; remote Conduit handoffs
+/// or in-process callers construct [`Caller::Local`]; remote Topaz handoffs
 /// must always use [`Caller::Remote`] so a peer named `"local"` cannot bypass
 /// [`gate`].
 #[derive(Debug, Clone, PartialEq, Eq)]

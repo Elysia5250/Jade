@@ -528,7 +528,7 @@ async fn on_action(
             *remote = Remote::new(dialer_for(
                 &app.data_dir,
                 &app.jobs.target,
-                app.conduit.clone(),
+                app.topaz.clone(),
             ));
             app.refresh(remote).await;
             Ok(false)

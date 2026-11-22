@@ -25,7 +25,7 @@ const MAX_BATCH_TASKS: usize = 8;
 #[derive(Clone)]
 pub(crate) struct SubagentHost {
     pub(crate) data_dir: PathBuf,
-    pub(crate) conduit: Option<PathBuf>,
+    pub(crate) topaz: Option<PathBuf>,
     pub(crate) local_socket: Option<PathBuf>,
     pub(crate) local_server: Option<jade_service::AgentServer>,
     pub(crate) target: String,
@@ -362,7 +362,7 @@ mod tests {
         };
         let host = SubagentHost {
             data_dir: dir.clone(),
-            conduit: None,
+            topaz: None,
             local_socket: None,
             local_server: None,
             target: "local".into(),

@@ -410,6 +410,9 @@ impl App {
                 HitTarget::HubSession(idx) => {
                     return self.hub_click_session(idx);
                 }
+                HitTarget::HubDeactivateSession => {
+                    self.deactivate_selected_session();
+                }
                 HitTarget::HubWorkspace(idx) => {
                     self.hub_click_workspace(idx);
                 }

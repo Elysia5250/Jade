@@ -128,7 +128,7 @@ impl Live {
         let monitors = MonitorHub::new(
             id.to_string(),
             data_dir.to_path_buf(),
-            runtime.conduit.clone(),
+            runtime.topaz.clone(),
             runtime.local_server.clone(),
             Arc::downgrade(runtime),
         );

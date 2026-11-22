@@ -32,8 +32,8 @@ re-checking invariants by hand:
   - `jade-core` (2 warnings): `job.rs:293` (`type_complexity`),
     `seatbelt.rs:23` (`single_element_loop`).
   - `jade-service` (3 errors, 3 warnings): `client.rs:313`, `remote.rs:34`,
-    `remote.rs:66` (`clippy::never_loop` — deny by default); `conduit/ws.rs:46`,
-    `conduit/ws.rs:150`, `server.rs:506`.
+    `remote.rs:66` (`clippy::never_loop` — deny by default); `topaz/ws.rs:46`,
+    `topaz/ws.rs:150`, `server.rs:506`.
   - `jade-cli` clippy warnings remain to be audited once `jade-service` passes.
 - Running `cargo test --workspace` on macOS already surfaces a real
   macOS-only test failure that Linux CI missed:
@@ -95,7 +95,7 @@ re-checking invariants by hand:
     workspace paths in `tui/view/welcome.rs` before the `  (resumes)` tag.
   - `jade-service/src/client.rs` `tmpdir`: add atomic sequence + pid to
     prevent parallel macOS tests colliding on 1µs `SystemTime` timestamps.
-  - `jade-service/tests/{conduit_control,stress_server}.rs` `tmpdir`: use
+  - `jade-service/tests/{topaz_control,stress_server}.rs` `tmpdir`: use
     short `/tmp` paths so Unix socket paths stay under macOS `SUN_LEN` (104 bytes).
 - [x] Update `.github/workflows/ci.yml`:
   - add `cargo fmt --all -- --check`
@@ -136,7 +136,7 @@ re-checking invariants by hand:
   Terminal-Bench runs; keep `benchmarks/terminal-bench/` as-is without gating
   engineering work on benchmark runs.
 - **Root `ARCHITECTURE.md` preserved**: It is a cross-repo archive shared with
-  `conduit` and `grain`; `docs/architecture.md` remains the live internal map
+  `topaz` and `grain`; `docs/architecture.md` remains the live internal map
   for `jade`.
 - **Single `jade-agent` crate first**: Do not try to split `agent`,
   `permissions`, `runtime`, `mcp`, and `skills` into five tiny crates up front;

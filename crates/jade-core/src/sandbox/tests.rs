@@ -101,11 +101,11 @@ fn bwrap_places_namespace_flags_and_masks_secrets_after_bind() {
     };
     let fake_home = tmpdir("bwrap-home");
     let jade_dir = fake_home.join(".jade");
-    let conduit_dir = fake_home.join(".conduit");
+    let topaz_dir = fake_home.join(".topaz");
     let ssh_dir = fake_home.join(".ssh");
     let nested_dir = fake_home.join("proj").join("sub");
     std::fs::create_dir_all(&jade_dir).unwrap();
-    std::fs::create_dir_all(&conduit_dir).unwrap();
+    std::fs::create_dir_all(&topaz_dir).unwrap();
     std::fs::create_dir_all(&ssh_dir).unwrap();
     std::fs::create_dir_all(&nested_dir).unwrap();
     std::fs::write(jade_dir.join("auth.json"), "{}").unwrap();
@@ -122,7 +122,7 @@ fn bwrap_places_namespace_flags_and_masks_secrets_after_bind() {
         &[fake_home.join("proj").display().to_string()],
         true,
         false,
-        &[jade_dir.clone(), conduit_dir.clone(), ssh_dir.clone()],
+        &[jade_dir.clone(), topaz_dir.clone(), ssh_dir.clone()],
         &[],
     )
     .unwrap();
@@ -147,7 +147,7 @@ fn bwrap_places_namespace_flags_and_masks_secrets_after_bind() {
         .windows(2)
         .position(|w| w[0] == "--bind" && w[1] == fake_home.display().to_string())
         .expect("missing home bind");
-    for secret in [&jade_dir, &conduit_dir, &ssh_dir] {
+    for secret in [&jade_dir, &topaz_dir, &ssh_dir] {
         let tmpfs_idx = prep
             .argv
             .windows(2)

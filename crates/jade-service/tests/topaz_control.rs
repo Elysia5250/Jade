@@ -1,7 +1,7 @@
-//! Integration tests against a mock `conduit run` control socket.
+//! Integration tests against a mock `topaz run` control socket.
 //!
-//! The real thing is not implemented on the conduit side yet, so this pins the
-//! contract from `docs/CONDUIT-INTEGRATION.md`: HTTP/1.1 + WebSocket over a Unix
+//! The real thing is not implemented on the topaz side yet, so this pins the
+//! contract from `docs/TOPAZ-INTEGRATION.md`: HTTP/1.1 + WebSocket over a Unix
 //! socket, `/v1/services/16/open/{target}`, `/v1/services/16/accept?name=jade`,
 //! the text handoff frame, and JSON errors.
 
@@ -10,7 +10,7 @@ use jade_core::AgentConfig;
 use jade_proto::codec::{read_framed, write_framed};
 use jade_proto::{ClientMsg, Op, Reply, SandboxPolicy, SubmitRequest, TaskSpec, DEFAULT_GROUP};
 use jade_service::{
-    spawn_accept_pool, AgentServer, ConduitClient, ConduitDialer, Remote, StaticHost, WsByteStream,
+    spawn_accept_pool, AgentServer, Remote, StaticHost, TopazClient, TopazDialer, WsByteStream,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -134,9 +134,9 @@ async fn dials_and_runs_a_job_through_the_control_socket() {
         }
     });
 
-    let remote = Remote::new(ConduitDialer::new(socket.clone()));
+    let remote = Remote::new(TopazDialer::new(socket.clone()));
     let job = remote
-        .submit("laptop", shell("echo through-conduit"))
+        .submit("laptop", shell("echo through-topaz"))
         .await
         .expect("submit over the control socket");
     assert!(job.id > 0);
@@ -151,7 +151,7 @@ async fn dials_and_runs_a_job_through_the_control_socket() {
         .await
         .expect("follow the log");
     assert_eq!(finished, Some(0));
-    assert!(text.contains("through-conduit"), "{text}");
+    assert!(text.contains("through-topaz"), "{text}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -161,7 +161,7 @@ async fn accept_pool_serves_the_handed_off_peer_and_trusts_its_identity() {
     let dir = tmpdir("accept");
     let socket = dir.join("control.sock");
     let listener = UnixListener::bind(&socket).unwrap();
-    // Only the conduit-authenticated device may run anything here.
+    // Only the topaz-authenticated device may run anything here.
     let server = AgentServer::with_device(
         dir.clone(),
         host(true, &["dev-remote"]),
@@ -175,7 +175,7 @@ async fn accept_pool_serves_the_handed_off_peer_and_trusts_its_identity() {
         assert!(path.starts_with("/v1/services/16/accept"), "{path}");
         let mut ws = upgrade(stream, &headers).await;
 
-        // 1. conduit hands off the authenticated caller.
+        // 1. topaz hands off the authenticated caller.
         ws.send(Message::text(
             r#"{"event":"accepted","service_id":16,"peer_device_id":"dev-remote","peer_name":"workstation","connection":"direct"}"#,
         ))
@@ -199,7 +199,7 @@ async fn accept_pool_serves_the_handed_off_peer_and_trusts_its_identity() {
         }
     });
 
-    let pool = spawn_accept_pool(server, ConduitClient::new(socket.clone()), 1);
+    let pool = spawn_accept_pool(server, TopazClient::new(socket.clone()), 1);
     let device = tokio::time::timeout(Duration::from_secs(5), rx)
         .await
         .expect("the pool should hand off within 5s")
@@ -243,7 +243,7 @@ async fn a_non_allowlisted_handoff_is_refused() {
         tx.send(matches!(reply, Reply::Denied { .. })).unwrap();
     });
 
-    let pool = spawn_accept_pool(server, ConduitClient::new(socket.clone()), 1);
+    let pool = spawn_accept_pool(server, TopazClient::new(socket.clone()), 1);
     let denied = tokio::time::timeout(Duration::from_secs(5), rx)
         .await
         .expect("handoff within 5s")
@@ -273,7 +273,7 @@ async fn http_errors_carry_the_reason_to_the_caller() {
         }
     });
 
-    let err = Remote::new(ConduitDialer::new(socket.clone()))
+    let err = Remote::new(TopazDialer::new(socket.clone()))
         .probe("ghost")
         .await
         .unwrap_err()
@@ -281,7 +281,7 @@ async fn http_errors_carry_the_reason_to_the_caller() {
     assert!(err.contains("not an active device"), "{err}");
     assert!(err.contains("404"), "{err}");
 
-    let err = Remote::new(ConduitDialer::new(socket.clone()))
+    let err = Remote::new(TopazDialer::new(socket.clone()))
         .probe("box")
         .await
         .unwrap_err()
@@ -339,7 +339,7 @@ async fn reads_status_and_devices_over_plain_http() {
         }
     });
 
-    let client = ConduitClient::new(socket.clone());
+    let client = TopazClient::new(socket.clone());
     let devices = client.devices().await.unwrap();
     assert_eq!(devices.devices.len(), 2);
     assert_eq!(devices.devices[1].name, "laptop");
@@ -388,7 +388,7 @@ async fn watches_live_status_events() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     });
 
-    let client = ConduitClient::new(socket.clone());
+    let client = TopazClient::new(socket.clone());
     let rx = client.watch().await.expect("initial snapshot");
     {
         let status = rx.borrow();

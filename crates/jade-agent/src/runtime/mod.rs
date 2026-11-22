@@ -40,21 +40,21 @@ pub fn socket_path(data_dir: &Path) -> PathBuf {
 pub(crate) fn remote_for(
     data_dir: &Path,
     target: &str,
-    conduit: Option<PathBuf>,
+    topaz: Option<PathBuf>,
     local_socket: Option<PathBuf>,
     local_server: Option<jade_service::AgentServer>,
 ) -> jade_service::Remote<Box<dyn jade_service::AgentDialer>> {
     let is_local = target.is_empty() || target == "local";
     if is_local {
         if local_server.is_some() {
-            let dialer = jade_service::dialer_for(data_dir, target, conduit);
+            let dialer = jade_service::dialer_for(data_dir, target, topaz);
             return jade_service::Remote::with_local(dialer, local_server);
         }
         if let Some(sock) = local_socket {
             return jade_service::Remote::new(Box::new(jade_service::UnixDialer::new(sock)));
         }
     }
-    jade_service::Remote::new(jade_service::dialer_for(data_dir, target, conduit))
+    jade_service::Remote::new(jade_service::dialer_for(data_dir, target, topaz))
 }
 
 #[cfg(test)]

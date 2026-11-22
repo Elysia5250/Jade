@@ -361,6 +361,28 @@ impl App {
         );
     }
 
+    pub(in crate::tui) fn run_voice_command(&mut self, arg: &str) {
+        use jade_agent::agent::voice_pref::{self, VoiceStyle};
+        if arg.is_empty() {
+            let style = voice_pref::load(&self.data_dir);
+            self.set_toast(format!("voice: {style} (expert, engineer, plain)"), false);
+            return;
+        }
+        let Some(style) = VoiceStyle::parse(arg) else {
+            self.set_toast("usage: /voice [expert|engineer|plain]", true);
+            return;
+        };
+        if let Err(err) = voice_pref::set(&self.data_dir, style) {
+            self.set_toast(err, true);
+            return;
+        }
+        self.inputs.invalidate_catalog();
+        self.set_toast(
+            format!("voice: {style} (applies on the next turn)"),
+            false,
+        );
+    }
+
     pub(in crate::tui) fn run_effort_command(&mut self, arg: &str) {
         use jade_agent::agent::effort;
         let level = effort::load(&self.data_dir);

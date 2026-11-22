@@ -348,3 +348,136 @@ fn memory_create_edit_toggle_and_delete() {
     assert!(!path.exists());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn hub_deactivates_daemon_active_session_and_rejects_inactive() {
+    let dir = tmpdir("deact-live");
+    let s1 = save_dummy_session(&dir, &dir, "idle work");
+    let s2 = save_dummy_session(&dir, &dir, "running job");
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.open_welcome();
+
+    app.apply_notice(UiNotice::LiveSessions(vec![
+        jade_agent::runtime::SessionInfo {
+            id: s2.id.clone(),
+            cwd: dir.clone(),
+            target: "local".into(),
+            running: true,
+            queued: 2,
+        },
+    ]));
+
+    let screen = render_text(&mut app, 124, 34);
+    assert!(screen.contains("ACTIVE IN DAEMON"), "{screen}");
+    assert!(screen.contains("x deactivate"), "{screen}");
+    assert!(screen.contains("[x] deactivate"), "{screen}");
+
+    // Deactivate the selected live daemon session
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert!(app.inputs.live_sessions.is_empty());
+    let row = app
+        .ui
+        .welcome
+        .as_ref()
+        .unwrap()
+        .sessions
+        .iter()
+        .find(|r| r.id == s2.id)
+        .unwrap();
+    assert!(!row.running);
+    assert_eq!(row.queued, 0);
+    assert!(!row.in_daemon);
+    assert!(!row.is_active());
+
+    let after = render_text(&mut app, 124, 34);
+    assert!(!after.contains("ACTIVE IN DAEMON"), "{after}");
+    assert!(!after.contains("[x] deactivate"), "{after}");
+
+    // Deactivating an already inactive session reports an error
+    let s1_idx = app
+        .ui
+        .welcome
+        .as_ref()
+        .unwrap()
+        .sessions
+        .iter()
+        .position(|r| r.id == s1.id)
+        .unwrap();
+    app.ui.welcome.as_mut().unwrap().selected_session = s1_idx;
+    app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+    assert_eq!(
+        app.ui.welcome.as_ref().unwrap().error.as_deref(),
+        Some("selected session is not active")
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn hub_deactivates_current_session_detaching_and_allowing_delete() {
+    let dir = tmpdir("deact-cur");
+    let saved = save_dummy_session(&dir, &dir, "active chat");
+    let cur_id = saved.id.clone();
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.load_existing_session(saved);
+    app.return_to_hub();
+
+    // Current session is active and cannot be deleted yet
+    let before = render_text(&mut app, 124, 34);
+    assert!(before.contains("[Esc] return to session"), "{before}");
+    assert!(before.contains("[x] deactivate"), "{before}");
+
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+    let err = app.ui.welcome.as_ref().unwrap().error.clone().unwrap();
+    assert!(
+        err.contains("cannot delete an active or running session"),
+        "{err}"
+    );
+
+    // Clicking the [x] deactivate hit region detaches current session
+    let hit = app
+        .ui
+        .hit_regions
+        .iter()
+        .find(|h| matches!(h.target, HitTarget::HubDeactivateSession))
+        .expect("HubDeactivateSession hit region")
+        .rect;
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: hit.x + 1,
+        row: hit.y,
+        modifiers: KeyModifiers::NONE,
+    });
+    app.handle_mouse(MouseEvent {
+        kind: MouseEventKind::Up(MouseButton::Left),
+        column: hit.x + 1,
+        row: hit.y,
+        modifiers: KeyModifiers::NONE,
+    });
+
+    assert!(!app.ui.welcome.as_ref().unwrap().can_return);
+    assert!(app.agent.stream.is_none());
+    assert!(!app.selected_hub_session().unwrap().is_current);
+
+    // Esc no longer leaves Hub
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.ui.welcome.is_some());
+
+    // Now two-step delete succeeds
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+    assert_eq!(
+        app.ui.welcome.as_ref().unwrap().confirm_delete.as_deref(),
+        Some(cur_id.as_str())
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+    assert!(!app
+        .ui
+        .welcome
+        .as_ref()
+        .unwrap()
+        .sessions
+        .iter()
+        .any(|s| s.id == cur_id));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

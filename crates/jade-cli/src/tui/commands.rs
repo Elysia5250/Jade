@@ -9,6 +9,7 @@ pub(crate) enum SlashCmdKind {
     Handoff,
     Budget,
     Delegate,
+    Voice,
     Effort,
     Mode,
     Permissions,
@@ -112,6 +113,13 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         about: "how readily the agent calls subagents",
     },
     SlashCommand {
+        kind: SlashCmdKind::Voice,
+        name: "voice",
+        aliases: &["style", "tone"],
+        args: "[expert|engineer|plain]",
+        about: "output register and terminology depth",
+    },
+    SlashCommand {
         kind: SlashCmdKind::Effort,
         name: "effort",
         aliases: &[],
@@ -186,7 +194,7 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "machine",
         aliases: &["machines"],
         args: "[name]",
-        about: "switch target machine (local or conduit peer)",
+        about: "switch target machine (local or topaz peer)",
     },
     SlashCommand {
         kind: SlashCmdKind::New,

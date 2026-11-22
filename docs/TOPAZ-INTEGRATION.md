@@ -1,22 +1,22 @@
-# Conduit ↔ Jade 运行时联动与集成契约（v2）
+# Topaz ↔ Jade 运行时联动与集成契约（v2）
 
-> 本文档定义 **独立 VPN 网络底座 `conduit`** 与 **独立 Agent 产品 `jade`** 之间的运行时通信契约。
+> 本文档定义 **独立 VPN 网络底座 `topaz`** 与 **独立 Agent 产品 `jade`** 之间的运行时通信契约。
 >
 > **核心原则**：
-> 1. **零编译期耦合**：`conduit` 与 `jade` 各自作为独立项目演进，Workspace 之间**没有任何 Cargo 依赖**。
-> 2. **单一网络守护进程**：由 `conduit run` 独占管理设备密钥、QUIC/Relay 组网、TUN 虚拟网卡（`100.64.0.0/10`）、本地域名解析（`*.conduit`）与本地控制套接字 `~/.conduit/control.sock`。
+> 1. **零编译期耦合**：`topaz` 与 `jade` 各自作为独立项目演进，Workspace 之间**没有任何 Cargo 依赖**。
+> 2. **单一网络守护进程**：由 `topaz run` 独占管理设备密钥、QUIC/Relay 组网、TUN 虚拟网卡（`100.64.0.0/10`）、本地域名解析（`*.topaz`）与本地控制套接字 `~/.topaz/control.sock`。
 > 3. **双通道互补**：`jade` 同时支持 **通过 `control.sock` 进行服务流桥接（`service_id = 16`，无 TUN 也可用且自带 mTLS 身份）** 与 **通过虚拟 IP / 短域名进行 L3 直连（需开启 TUN）**。
 
 ---
 
 ## 1. 为什么不再使用旧版 `jade/bridge`
 
-旧版 `jade/bridge` 通过 Cargo path 依赖引入 `conduit-*` crate，并在独立进程内启动第二个 `conduit_fabric::Engine`。在 `conduit` 转为独立 VPN 产品后，这种做法存在根本冲突：
+旧版 `jade/bridge` 通过 Cargo path 依赖引入 `topaz-*` crate，并在独立进程内启动第二个 `topaz_fabric::Engine`。在 `topaz` 转为独立 VPN 产品后，这种做法存在根本冲突：
 
-- `conduit run` 已经通过 `~/.conduit/control.sock` 实行数据目录单实例锁，并独占管理 QUIC 端口与 TUN 网卡；
-- 如果再启动 `jade-bridge`，会与 `conduit run` 争抢设备身份、重复向 `coord` 注册端点，且无法共享同一个 mesh 会话与虚拟网卡。
+- `topaz run` 已经通过 `~/.topaz/control.sock` 实行数据目录单实例锁，并独占管理 QUIC 端口与 TUN 网卡；
+- 如果再启动 `jade-bridge`，会与 `topaz run` 争抢设备身份、重复向 `coord` 注册端点，且无法共享同一个 mesh 会话与虚拟网卡。
 
-因此，新的集成方式改为 **`jade` 直接在运行时连接 `conduit run` 暴露的 `~/.conduit/control.sock`**（Unix Domain Socket）。旧 `jade/bridge/` 可在迁移完成后下线或归档。
+因此，新的集成方式改为 **`jade` 直接在运行时连接 `topaz run` 暴露的 `~/.topaz/control.sock`**（Unix Domain Socket）。旧 `jade/bridge/` 可在迁移完成后下线或归档。
 
 ---
 
@@ -24,14 +24,14 @@
 
 | 项目 | 约定值 | 说明 |
 | :--- | :--- | :--- |
-| 控制套接字默认路径 | `$CONDUIT_DATA_DIR/control.sock`，否则 `$HOME/.conduit/control.sock` | 稳定契约；`conduit socket-path` 直接打印该路径，客户端也可用 `--conduit-socket <PATH>` / `CONDUIT_CONTROL_SOCK` 覆盖 |
-| 跨权限访问 | `conduit run` 若以 `sudo` 启动 TUN，会将 `control.sock` 属主/权限保持为原用户可读写（`0660`） | `jade serve` 与 `jade` CLI 始终以普通用户运行，无需 root |
-| 注册服务号 | `AGENT_SERVICE_ID = 16` | `conduit` 保留 `1..=15` 给核心能力，`16..=1023` 为注册应用服务段 |
+| 控制套接字默认路径 | `$TOPAZ_DATA_DIR/control.sock`，否则 `$HOME/.topaz/control.sock` | 稳定契约；`topaz socket-path` 直接打印该路径，客户端也可用 `--topaz-socket <PATH>` / `TOPAZ_CONTROL_SOCK` 覆盖 |
+| 跨权限访问 | `topaz run` 若以 `sudo` 启动 TUN，会将 `control.sock` 属主/权限保持为原用户可读写（`0660`） | `jade serve` 与 `jade` CLI 始终以普通用户运行，无需 root |
+| 注册服务号 | `AGENT_SERVICE_ID = 16` | `topaz` 保留 `1..=15` 给核心能力，`16..=1023` 为注册应用服务段 |
 | 传输层协议 | Unix Domain Socket 上的 **HTTP/1.1 + JSON** 与 **WebSocket（RFC 6455）** | 复用标准 HTTP/WS 协议，无自定义二进制信封 |
 
 ---
 
-## 3. 节点发现与实时事件（`jade` 与 `conduit tui` 共用）
+## 3. 节点发现与实时事件（`jade` 与 `topaz tui` 共用）
 
 ### 3.1 `GET /v1/status`
 返回当前本机与活跃对端状态快照（含虚拟 IP 与已挂接本地服务摘要）：
@@ -78,7 +78,7 @@
 
 > 字段兼容性：
 > - `dns_name`、`virtual_ip` 在尚未分配或离线/旧数据时可能为 `null`；`tun` 在 `--no-tun` 模式下 `enabled` 为 `false`。
-> - `peers[].services` 为对端通过 `conduit` 核心发现通道（`service::DISCOVERY = 4`）实时通告的**远端在线插件列表**（对端离线或未挂接任何插件时为 `[]`；旧版本节点兼容缺省为 `[]`）。主控 Agent 可据此直接区分“只开 VPN 的纯组网节点”与“已挂接 `jade`（`service_id = 16`）的可调度节点”。
+> - `peers[].services` 为对端通过 `topaz` 核心发现通道（`service::DISCOVERY = 4`）实时通告的**远端在线插件列表**（对端离线或未挂接任何插件时为 `[]`；旧版本节点兼容缺省为 `[]`）。主控 Agent 可据此直接区分“只开 VPN 的纯组网节点”与“已挂接 `jade`（`service_id = 16`）的可调度节点”。
 
 ### 3.2 `GET /v1/devices`
 返回账号下全部已验证证书设备（含离线/已吊销设备）：
@@ -124,16 +124,16 @@
 
 ## 4. 方式一：`control.sock` Service 流桥接（`service_id = 16`，推荐默认）
 
-即使未启动 TUN（如 `--no-tun`、容器内或无 root 权限），`jade` 也可以通过 `control.sock` 的 WebSocket 桥接复用 `conduit` 的 QUIC/Relay 多路复用流，并由 `conduit` 直接用 **mTLS 证书**担保对端 `device_id`。
+即使未启动 TUN（如 `--no-tun`、容器内或无 root 权限），`jade` 也可以通过 `control.sock` 的 WebSocket 桥接复用 `topaz` 的 QUIC/Relay 多路复用流，并由 `topaz` 直接用 **mTLS 证书**担保对端 `device_id`。
 
-`jade` 只需封装一个极小的 `WsByteStream`（将 WebSocket `Message::Binary` 适配为 `AsyncRead + AsyncWrite + Unpin + Send`；drop / `poll_shutdown` 时发送 WS `Close`，`conduit` 侧随即半闭底层 `Channel`）。
+`jade` 只需封装一个极小的 `WsByteStream`（将 WebSocket `Message::Binary` 适配为 `AsyncRead + AsyncWrite + Unpin + Send`；drop / `poll_shutdown` 时发送 WS `Close`，`topaz` 侧随即半闭底层 `Channel`）。
 
 ### 4.1 出站开流（Client / `AgentDialer` 侧）
 
 - **请求**：`GET /v1/services/16/open/{target}`（WebSocket Upgrade）
-- **`{target}` 解析优先级（由 `conduit` 在当前 `active` 设备中匹配，不含本机）**：
+- **`{target}` 解析优先级（由 `topaz` 在当前 `active` 设备中匹配，不含本机）**：
   1. 精确匹配 `device_id`
-  2. 精确匹配 `dns_name`（忽略大小写，允许带或不带 `.conduit` 后缀）
+  2. 精确匹配 `dns_name`（忽略大小写，允许带或不带 `.topaz` 后缀）
   3. 精确匹配 `virtual_ip`（如 `100.64.0.2`）
   4. 唯一匹配 `DeviceCert.name`（忽略大小写）
 - **升级失败（非 `101` HTTP 错误响应约定）**：
@@ -146,7 +146,7 @@
   - `503 service_not_registered`：对端在线、且**已发送过 DISCOVERY**，但其通告列表没有该 `service_id`（例如纯 VPN 节点）
 - **前置拒绝的边界**：`service_not_registered` 只在“已有活跃会话 + 收到过对端 DISCOVERY”时给出。旧版本对端从不发送发现帧，不能被误拒；无活跃会话时不前置拒绝，仍交给 `EngineHandle::open` 按需拨号，失败映射为 `peer_offline`。
 - **升级成功（`101 Switching Protocols`）**：
-  - 响应头附带：`X-Conduit-Peer-Id`、`X-Conduit-Peer-Name`、以及可选的 `X-Conduit-Peer-Ip`；
+  - 响应头附带：`X-Topaz-Peer-Id`、`X-Topaz-Peer-Name`、以及可选的 `X-Topaz-Peer-Ip`；
   - 升级后即为**纯净的全双工透明字节流**，双向透传 `jade-proto` v2 帧（`Op` / `Reply` / `ClientMsg`），无需任何前缀帧。
 
 ### 4.2 入站接单（`jade serve` 侧 — Accept Pool 模型）
@@ -155,11 +155,11 @@
 - **注册 ≠ 空闲容量**：`services[].online` 表示“已注册”，`services[].listeners` 只表示当前空闲连接数。两者分离后，`/v1/events` 与 `peers[].services` 不会因为并发高峰而抖动。
 - **宽限期（20 秒）**：最后一个空闲连接被交接消耗后，注册与对端通告继续保留 `DRAIN_GRACE = 20s`，给 `jade` 补池的时间；宽限期内仍无连接才真正下线。
 - **有界等待（2 秒）**：宽限期内到达的入站流会暂存在每服务最多 32 条的队列里等新连接，最多等 `PENDING_WAIT = 2s`，超时才关闭。并发突刺不再被静默丢弃。
-- **断开立即下线**：`/accept` WebSocket 断开（进程退出、崩溃、CONDUIT 重启）会立刻撤销注册与通告，不享受宽限期，避免把流量调度到已死的节点。
+- **断开立即下线**：`/accept` WebSocket 断开（进程退出、崩溃、TOPAZ 重启）会立刻撤销注册与通告，不享受宽限期，避免把流量调度到已死的节点。
 - **推荐池大小**：`jade serve` 维持 **2~4 条**空闲等待连接（类似 `accept` 队列），断线后按指数退避自动重连；每当一条连接被分配给入站流，立刻补充一条新的连接。
 - **交接协议（非常关键）**：
-  1. 当远端设备向本机发起 `service_id = 16` 的流时，`conduit` 从空闲池取出一条 `/v1/services/16/accept` WebSocket 连接；
-  2. `conduit` 发送**唯一一帧 `Message::Text`** 作为调用方身份交接元数据：
+  1. 当远端设备向本机发起 `service_id = 16` 的流时，`topaz` 从空闲池取出一条 `/v1/services/16/accept` WebSocket 连接；
+  2. `topaz` 发送**唯一一帧 `Message::Text`** 作为调用方身份交接元数据：
      ```json
      {
        "event": "accepted",
@@ -171,12 +171,12 @@
        "connection": "direct"
      }
      ```
-  3. 从**下一帧开始**，该 WebSocket 连接进入**纯净全双工二进制透传模式**，直接桥接对端的 `conduit_net::Channel`；
-  4. `jade serve` 收到 `Message::Text` 解析出 `peer_device_id`（由 `conduit` mTLS 严格认证，不可伪造）后，包装剩余二进制流为 `WsByteStream`，`tokio::spawn(agent_server.serve_stream(&peer_device_id, stream))` 并立刻补齐 accept 池。
-- **异常处理**：如果远端开流时本地没有空闲连接，`conduit` 会在宽限期内最多等待 2 秒；等不到才关闭该入站 `Channel`（不阻塞网元循环，远端最终收到 EOF）。
+  3. 从**下一帧开始**，该 WebSocket 连接进入**纯净全双工二进制透传模式**，直接桥接对端的 `topaz_net::Channel`；
+  4. `jade serve` 收到 `Message::Text` 解析出 `peer_device_id`（由 `topaz` mTLS 严格认证，不可伪造）后，包装剩余二进制流为 `WsByteStream`，`tokio::spawn(agent_server.serve_stream(&peer_device_id, stream))` 并立刻补齐 accept 池。
+- **异常处理**：如果远端开流时本地没有空闲连接，`topaz` 会在宽限期内最多等待 2 秒；等不到才关闭该入站 `Channel`（不阻塞网元循环，远端最终收到 EOF）。
 
 ```text
-jade --on laptop                 conduit (local)              conduit (laptop)             jade serve (laptop)
+jade --on laptop                 topaz (local)              topaz (laptop)             jade serve (laptop)
       │                                 │                             │                             │
       │                                 │                             │◀── WS /v1/services/16/accept (空闲等待)
       │── WS /v1/services/16/open/laptop│                             │                             │
@@ -189,9 +189,9 @@ jade --on laptop                 conduit (local)              conduit (laptop)  
 
 ---
 
-## 5. L3 虚拟内网（TUN + `*.conduit`）——不属于 Agent 契约
+## 5. L3 虚拟内网（TUN + `*.topaz`）——不属于 Agent 契约
 
-`100.64.0.0/10` 与 `*.conduit` 的定位是让**用户自己的工具**（ssh、curl、数据库、浏览器、grain 同步）像局域网服务一样互通。
+`100.64.0.0/10` 与 `*.topaz` 的定位是让**用户自己的工具**（ssh、curl、数据库、浏览器、grain 同步）像局域网服务一样互通。
 
 **Agent 通信只走 `control.sock` 的 WebSocket 桥（`service_id = 16`）**，不使用 L3：
 
@@ -205,7 +205,7 @@ jade --on laptop                 conduit (local)              conduit (laptop)  
 
 ## 6. `jade` 远端工具链插件架构：并发模型与同机共生设计（#4 架构约定）
 
-面向“**主控端跑单个 AI Agent，同时操纵多台机器**”的定位，远端机器不需要运行完整 LLM/推理循环，也**不应把工具执行塞进 `conduit` 进程**（`conduit run` 开启 TUN 时可能以 `sudo`/`CAP_NET_ADMIN` 运行，而工作区命令/文件操作必须限制在普通用户权限内）。
+面向“**主控端跑单个 AI Agent，同时操纵多台机器**”的定位，远端机器不需要运行完整 LLM/推理循环，也**不应把工具执行塞进 `topaz` 进程**（`topaz run` 开启 TUN 时可能以 `sudo`/`CAP_NET_ADMIN` 运行，而工作区命令/文件操作必须限制在普通用户权限内）。
 
 ### 6.1 一机单实例双入口共生模型（解决“被控机也装了 `jade`”）
 
@@ -214,7 +214,7 @@ jade --on laptop                 conduit (local)              conduit (laptop)  
 ```text
                       ┌─── 本地入口：~/.jade/jade.sock （供本机 jade ui / mcp / cli 使用）
 唯一后台：jade serve ─┤
-                      └─── 远程入口：conduit /v1/services/16/accept （供主控 Agent 跨机调度）
+                      └─── 远程入口：topaz /v1/services/16/accept （供主控 Agent 跨机调度）
                              │
                              ▼
                   共享同一个 AgentServer + Allowlist + Job 持久化存储
@@ -230,8 +230,8 @@ jade --on laptop                 conduit (local)              conduit (laptop)  
 ### 6.2 多路并发保障（瞬时突刺有界等待，不静默丢弃）
 
 并发由传输层、桥接池、执行层三层协同完成：
-1. **传输层（`conduit-net::Multiplexer`）**：单条 QUIC/Relay 会话内置多路复用，支持任意数量独立 `Channel`（每条流独立 2 MiB 背压队列 + 小帧优先调度），同一控制端并发对同一目标开多条操作流不会队头阻塞。
-2. **桥接层（`conduit-cli` Accept 池）**：`jade serve` 维持 **2~4 条**挂起 `GET /v1/services/16/accept` WebSocket 连接；每当一条远端 `/v1/services/16/open/{target}` 到达，`conduit` 的 `ServiceRegistry` 立即弹出一根空闲 WS 发送 `"accepted"` 交接帧，`jade serve` 当即 `tokio::spawn` 处理并异步补回空闲池。瞬时超过池深度的流在 20 秒注册宽限内最多等待 2 秒，不会静默丢弃。
+1. **传输层（`topaz-net::Multiplexer`）**：单条 QUIC/Relay 会话内置多路复用，支持任意数量独立 `Channel`（每条流独立 2 MiB 背压队列 + 小帧优先调度），同一控制端并发对同一目标开多条操作流不会队头阻塞。
+2. **桥接层（`topaz-cli` Accept 池）**：`jade serve` 维持 **2~4 条**挂起 `GET /v1/services/16/accept` WebSocket 连接；每当一条远端 `/v1/services/16/open/{target}` 到达，`topaz` 的 `ServiceRegistry` 立即弹出一根空闲 WS 发送 `"accepted"` 交接帧，`jade serve` 当即 `tokio::spawn` 处理并异步补回空闲池。瞬时超过池深度的流在 20 秒注册宽限内最多等待 2 秒，不会静默丢弃。
 3. **执行层（`jade`）**：长耗时操作转后台 `Job` 落盘异步执行；单控 Agent 可同一时刻向 N 台机器并行下发 `exec`/`read`/`edit` 并同时订阅多路 `Job` 日志流。
 
 ### 6.3 远端服务发现消费（单控 Agent 调度）
@@ -245,22 +245,22 @@ jade --on laptop                 conduit (local)              conduit (laptop)  
 ## 7. 给 `jade` 仓库的实现清单
 
 > **当前进度同步**：
-> - `conduit` 侧核心能力与联调进度：
+> - `topaz` 侧核心能力与联调进度：
 >   - **Step 1–2（已完成）**：QUIC/Relay 数据报与并发 Eager Mesh 底座
->   - **Step 3（已完成）**：`conduit-coord` IPAM（`100.64.0.0/10` + 唯一 `dns_name`）与状态字段输出
->   - **Step 4（已完成）**：`conduit-vpn`（Linux/macOS TUN 与 `*.conduit` 本地 DNS，支持 `--no-tun`）
+>   - **Step 3（已完成）**：`topaz-coord` IPAM（`100.64.0.0/10` + 唯一 `dns_name`）与状态字段输出
+>   - **Step 4（已完成）**：`topaz-vpn`（Linux/macOS TUN 与 `*.topaz` 本地 DNS，支持 `--no-tun`）
 >   - **Step 5（已完成）**：`control.sock` 上的 `/v1/events` 实时推送与 `/v1/services/{id}/open|accept` 双向桥接（所有非 `101` 错误均保证携带 `Content-Length` + JSON `{"error": "..."}`）
->   - **Step 6（已完成）**：跨节点 `peers[].services` 实时发现、`conduit run --detach`、以及 OpenCode 风格 `conduit tui`
-> - `jade` 侧可直接接入 `/v1/events` 实时推送在线机器（含远端 `peers[].services`）与本机 `service 16` 的 `listeners` 数量，并与 `conduit run` 进行端到端联调：
+>   - **Step 6（已完成）**：跨节点 `peers[].services` 实时发现、`topaz run --detach`、以及 OpenCode 风格 `topaz tui`
+> - `jade` 侧可直接接入 `/v1/events` 实时推送在线机器（含远端 `peers[].services`）与本机 `service 16` 的 `listeners` 数量，并与 `topaz run` 进行端到端联调：
 
-1. **在 `jade-service` 新增 `conduit` 运行时适配器（纯 UDS + WS，不引入 `conduit-*` 依赖）**：
+1. **在 `jade-service` 新增 `topaz` 运行时适配器（纯 UDS + WS，不引入 `topaz-*` 依赖）**：
    - 新增 `WsByteStream`（`AsyncRead + AsyncWrite` 封装 WebSocket Binary 帧）。
-   - 新增 `ConduitClient`（连接 `CONDUIT_CONTROL_SOCK` / `~/.conduit/control.sock`）：
+   - 新增 `TopazClient`（连接 `TOPAZ_CONTROL_SOCK` / `~/.topaz/control.sock`）：
      - `devices()` / `status()` / `subscribe_events()`（解析本机 `services` 及远端 `peers[].services`，`#[serde(default)]` 兼容缺省空数组）
-     - `ConduitDialer`（实现 `AgentDialer`）：默认走 `GET /v1/services/16/open/{peer}`；可选支持 L3 模式（通过 `devices()` 解析 `virtual_ip` 直连 `<ip>:<port>`）。
-   - 修改 `jade_service::dialer_for`：除 `local` 外使用 `ConduitDialer`（或在迁移期保留 `JADE_BRIDGE_SOCK` 兼容 `RouteDialer`）。
+     - `TopazDialer`（实现 `AgentDialer`）：默认走 `GET /v1/services/16/open/{peer}`；可选支持 L3 模式（通过 `devices()` 解析 `virtual_ip` 直连 `<ip>:<port>`）。
+   - 修改 `jade_service::dialer_for`：除 `local` 外使用 `TopazDialer`（或在迁移期保留 `JADE_BRIDGE_SOCK` 兼容 `RouteDialer`）。
 2. **在 `jade-cli` 的 `jade serve` 接入入站桥接与角色开关**：
-   - 后台常驻任务连接 `control.sock` 的 `GET /v1/services/16/accept?name=jade`，维持 2~4 条等待连接，断线指数退避重连（`conduit` 未启动时静默等待重试，不影响本地 `jade.sock` 正常使用）。
+   - 后台常驻任务连接 `control.sock` 的 `GET /v1/services/16/accept?name=jade`，维持 2~4 条等待连接，断线指数退避重连（`topaz` 未启动时静默等待重试，不影响本地 `jade.sock` 正常使用）。
    - 收到 `"event": "accepted"` 文本帧后，读取 `peer_device_id` 并 `tokio::spawn(server.serve_stream(&peer_device_id, ws_byte_stream))`。
    - 若同时启用 L3 TCP 监听（可选 `--listen-vpn <port>`），对接入连接按 `remote_ip -> device_id` 反查后再调用 `AgentServer::serve_stream(&device_id, tcp_stream)`。
    - 按需提供 `--worker-only`（仅注册 `service 16` 被控接单）与 `--local-only`（不向外暴露 `service 16`，仅本地使用）选项。

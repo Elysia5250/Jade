@@ -28,6 +28,7 @@ mod tests_phase5;
 #[cfg(test)]
 mod tests_stress;
 pub mod tools;
+pub mod voice_pref;
 
 pub use asks::AskBroker;
 pub use config::{TurnConfig, TurnUsage};

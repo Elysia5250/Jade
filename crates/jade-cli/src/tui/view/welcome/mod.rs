@@ -194,7 +194,7 @@ fn draw_footer(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
     } else {
         let esc = if w.can_return { "  ·  Esc return" } else { "" };
         Line::styled(
-            format!(" ↑↓/jk move  ·  Enter open  ·  n new session  ·  / search  ·  r rename  ·  d del  ·  Tab controls{esc}"),
+            format!(" ↑↓/jk move  ·  Enter open  ·  n new  ·  / search  ·  r rename  ·  x deactivate  ·  d del  ·  Tab controls{esc}"),
             Style::default().fg(theme.dim),
         )
     };

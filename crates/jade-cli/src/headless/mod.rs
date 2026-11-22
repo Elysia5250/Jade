@@ -219,7 +219,7 @@ pub(crate) async fn run_with_writers<WOut: Write, WErr: Write>(
     let started = Instant::now();
     let runtime = Runtime::with_local_server(
         ctx.data_dir.clone(),
-        ctx.conduit.clone(),
+        ctx.topaz.clone(),
         local_headless.as_ref().map(|s| s.server.clone()),
     );
     let live = runtime
@@ -423,7 +423,7 @@ mod tests {
         let ctx = Ctx {
             data_dir: data.clone(),
             on: "local".into(),
-            conduit: None,
+            topaz: None,
             cwd: work.clone(),
         };
 
@@ -484,7 +484,7 @@ mod tests {
         let ctx = Ctx {
             data_dir: data.clone(),
             on: "local".into(),
-            conduit: None,
+            topaz: None,
             cwd: work,
         };
         let mut out = Vec::new();

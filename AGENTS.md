@@ -28,7 +28,7 @@ recall, interrupt, daemon survival).
 - `crates/jade-proto`: wire types and framing. No domain logic, no UI.
 - `crates/jade-core`: job store and execution primitives. No UI, no provider
   SDKs.
-- `crates/jade-service`: daemon/server, conduit adapter, remote RPC. No TUI.
+- `crates/jade-service`: daemon/server, topaz adapter, remote RPC. No TUI.
 - `crates/jade-agent`: daemon-owned `runtime/`, `agent/` loop (providers,
   tools, prompt, context compaction), `permissions/`, `hooks/`, `skills/`,
   `mcp/`, `auth/`, `session`, `memory`, `worktree`, and `daemon`. No `ratatui`

@@ -369,11 +369,11 @@ fn render_session_row(
     frame.render_widget(Paragraph::new(lines), rect);
 }
 
-fn draw_session_preview(frame: &mut Frame, app: &App, theme: &Theme, area: Rect) {
+fn draw_session_preview(frame: &mut Frame, app: &mut App, theme: &Theme, area: Rect) {
     let sep = "─".repeat(area.width as usize);
     let mut lines = vec![Line::styled(sep, Style::default().fg(theme.border))];
     let width = area.width as usize;
-    if let Some(row) = app.selected_hub_session() {
+    if let Some(row) = app.selected_hub_session().cloned() {
         let ctx_info = if row.prompt_tokens > 0 {
             let cap = app.inputs.catalog.compact_at.max(1);
             let (filled, empty) = context_bar(row.prompt_tokens, cap);
@@ -385,13 +385,46 @@ fn draw_session_preview(frame: &mut Frame, app: &App, theme: &Theme, area: Rect)
         } else {
             String::new()
         };
-        let header = truncate_width(&format!(" PREVIEW · {}", row.title), width);
-        lines.push(Line::styled(
-            header,
-            Style::default()
-                .fg(theme.secondary)
-                .add_modifier(Modifier::BOLD),
-        ));
+        if row.is_active() {
+            let badge = " [x] deactivate ";
+            let badge_w = display_width(badge);
+            let left_budget = width.saturating_sub(badge_w + 1);
+            let header = truncate_width(&format!(" PREVIEW · {}", row.title), left_budget);
+            let gap = width.saturating_sub(display_width(&header) + badge_w);
+            if area.height >= 2 {
+                let bx = area.x + area.width.saturating_sub(badge_w as u16);
+                app.ui.hit_regions.push(HitRegion {
+                    rect: Rect {
+                        x: bx,
+                        y: area.y + 1,
+                        width: (badge_w as u16).min(area.width),
+                        height: 1,
+                    },
+                    target: HitTarget::HubDeactivateSession,
+                });
+            }
+            lines.push(Line::from(vec![
+                Span::styled(
+                    header,
+                    Style::default()
+                        .fg(theme.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" ".repeat(gap)),
+                Span::styled(
+                    badge,
+                    Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        } else {
+            let header = truncate_width(&format!(" PREVIEW · {}", row.title), width);
+            lines.push(Line::styled(
+                header,
+                Style::default()
+                    .fg(theme.secondary)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
         let path_line = truncate_width(
             &format!(" {}  [{}]{ctx_info}", collapse_home(&row.cwd), row.target),
             width,
