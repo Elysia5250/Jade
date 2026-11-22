@@ -1,9 +1,11 @@
 //! `jade mcp` CLI subcommands (`serve`, `list`, `tools`).
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Subcommand;
 use jade_agent::mcp::{client, config, server};
 use jade_agent::permissions::PermissionMode;
+use jade_agent::runtime::{AgentReq, AgentResp};
+use jade_agent::{daemon, runtime};
 use std::path::PathBuf;
 
 #[derive(Subcommand, Debug)]
@@ -27,6 +29,16 @@ pub(crate) enum McpCmd {
     Prompts {
         /// Optional MCP server name filter.
         server: Option<String>,
+    },
+    /// List live pooled MCP server processes managed by the daemon.
+    Ps,
+    /// Stop a live pooled MCP server process (or all with `--all`).
+    Stop {
+        /// Server name to stop.
+        name: Option<String>,
+        /// Stop all live pooled MCP server processes.
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -112,6 +124,55 @@ pub(crate) async fn cmd_mcp(data_dir: PathBuf, cmd: McpCmd, topaz: Option<PathBu
                 println!("  [{}] {}  {}", p.server, p.name, p.description);
             }
             Ok(())
+        }
+        McpCmd::Ps => {
+            if !daemon::is_running(&data_dir).await {
+                println!("daemon not running (no live MCP server processes)");
+                return Ok(());
+            }
+            let list = match runtime::request(&data_dir, &AgentReq::ProcessList).await? {
+                AgentResp::ProcessList(list) => list,
+                AgentResp::Error(err) => bail!("{err}"),
+                other => bail!("unexpected daemon reply: {other:?}"),
+            };
+            if list.mcp_servers.is_empty() {
+                println!("no live MCP server processes");
+                return Ok(());
+            }
+            for m in list.mcp_servers {
+                let pid = m
+                    .pid
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".into());
+                println!(
+                    "{:<18} {:<6} {:<7} pid={:<7} idle={:<6} {}",
+                    m.name,
+                    m.transport,
+                    m.scope,
+                    pid,
+                    crate::ps_cli::format_duration_short(m.idle_secs),
+                    m.cwd.display()
+                );
+            }
+            Ok(())
+        }
+        McpCmd::Stop { name, all } => {
+            if !all && name.is_none() {
+                bail!("specify a server name or pass `--all` to stop all live MCP servers");
+            }
+            if !daemon::is_running(&data_dir).await {
+                println!("daemon not running");
+                return Ok(());
+            }
+            let target = if all { None } else { name };
+            match runtime::request(&data_dir, &AgentReq::StopMcp { name: target }).await? {
+                AgentResp::Stopped { count } => {
+                    println!("stopped {count} MCP server process(es)");
+                    Ok(())
+                }
+                AgentResp::Error(err) => bail!("{err}"),
+                other => bail!("unexpected daemon reply: {other:?}"),
+            }
         }
     }
 }

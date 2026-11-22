@@ -110,6 +110,20 @@ impl McpTransport {
         }
     }
 
+    pub fn pid(&self) -> Option<u32> {
+        match self {
+            Self::Stdio(s) => s.pid,
+            Self::Http(_) => None,
+        }
+    }
+
+    pub fn transport_label(&self) -> &'static str {
+        match self {
+            Self::Stdio(_) => "stdio",
+            Self::Http(_) => "http",
+        }
+    }
+
     pub async fn request(
         &mut self,
         method: &str,

@@ -105,6 +105,92 @@ impl App {
         );
     }
 
+    pub(in crate::tui) fn run_ps_command(&mut self, arg: &str) {
+        let trimmed = arg.trim();
+        let data_dir = self.data_dir.clone();
+        let notice = self.notice_tx.clone();
+        let sid = self.session.current.id.clone();
+
+        if trimmed == "sleep" {
+            self.set_toast("entering L2 cool sleep.", false);
+            tokio::spawn(async move {
+                let (msg, err) = match runtime::request(&data_dir, &AgentReq::Sleep).await {
+                    Ok(AgentResp::Slept {
+                        sessions,
+                        mcp_servers,
+                    }) => (
+                        format!(
+                            "daemon entered L2 cool sleep: dehydrated {sessions} session(s), stopped {mcp_servers} MCP server(s)"
+                        ),
+                        false,
+                    ),
+                    Ok(AgentResp::Error(reason)) => (reason, true),
+                    Ok(_) => ("unexpected daemon reply to sleep".into(), true),
+                    Err(err) => (format!("daemon sleep failed: {err:#}"), true),
+                };
+                let _ = notice.send(UiNotice::Notice {
+                    session_id: sid,
+                    msg,
+                    err,
+                });
+            });
+            return;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("stop-mcp") {
+            let target_arg = rest.trim();
+            if target_arg.is_empty() {
+                self.set_toast("usage: /ps stop-mcp <name|all>", true);
+                return;
+            }
+            let name = if target_arg == "all" {
+                None
+            } else {
+                Some(target_arg.to_string())
+            };
+            self.set_toast("stopping MCP server(s).", false);
+            tokio::spawn(async move {
+                let (msg, err) =
+                    match runtime::request(&data_dir, &AgentReq::StopMcp { name }).await {
+                        Ok(AgentResp::Stopped { count }) => {
+                            (format!("stopped {count} MCP server process(es)"), false)
+                        }
+                        Ok(AgentResp::Error(reason)) => (reason, true),
+                        Ok(_) => ("unexpected daemon reply to stop-mcp".into(), true),
+                        Err(err) => (format!("stop-mcp failed: {err:#}"), true),
+                    };
+                let _ = notice.send(UiNotice::Notice {
+                    session_id: sid,
+                    msg,
+                    err,
+                });
+            });
+            return;
+        }
+
+        if !trimmed.is_empty() {
+            self.set_toast("usage: /ps [sleep|stop-mcp <name|all>]", true);
+            return;
+        }
+
+        self.set_toast("loading daemon process list.", false);
+        tokio::spawn(async move {
+            let (msg, err) = match runtime::request(&data_dir, &AgentReq::ProcessList).await {
+                Ok(AgentResp::ProcessList(list)) => {
+                    (crate::ps_cli::format_process_list(&list).trim_end().to_string(), false)
+                }
+                Ok(AgentResp::Error(reason)) => (reason, true),
+                Ok(_) => ("unexpected daemon reply to process list".into(), true),
+                Err(err) => (format!("ps failed: {err:#}"), true),
+            };
+            let _ = notice.send(UiNotice::Notice {
+                session_id: sid,
+                msg,
+                err,
+            });
+        });
+    }
+
     pub(in crate::tui) fn run_mcp_command(&mut self, arg: &str) {
         let report =
             jade_agent::mcp::config::load_mcp_configs(&self.data_dir, &self.session.current.cwd);

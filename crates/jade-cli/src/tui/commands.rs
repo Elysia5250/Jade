@@ -30,6 +30,7 @@ pub(crate) enum SlashCmdKind {
     Open,
     Mouse,
     Jobs,
+    Ps,
     Logs,
     Cancel,
     Monitor,
@@ -160,6 +161,13 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         aliases: &[],
         args: "[probe]",
         about: "inspect configured MCP servers or probe live tools",
+    },
+    SlashCommand {
+        kind: SlashCmdKind::Ps,
+        name: "ps",
+        aliases: &["procs", "processes"],
+        args: "[sleep|stop-mcp <name|all>]",
+        about: "inspect daemon background processes, trigger L2 sleep, or stop MCP servers",
     },
     SlashCommand {
         kind: SlashCmdKind::Plugin,

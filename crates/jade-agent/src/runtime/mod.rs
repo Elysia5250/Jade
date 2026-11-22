@@ -7,6 +7,7 @@ mod client;
 mod control;
 pub(crate) mod hello;
 mod hooks;
+mod lifecycle;
 mod listen;
 mod live;
 mod monitors;
@@ -28,7 +29,10 @@ mod tests_stress;
 pub use client::{attach, request, tell, AttachOrigin};
 pub use listen::serve;
 #[allow(unused_imports)]
-pub use protocol::{AgentReq, AgentResp, SendMode, SeqEvent, SessionInfo};
+pub use protocol::{
+    ActiveMonitorEntry, AgentReq, AgentResp, LiveSessionEntry, McpProcessEntry,
+    RuntimeProcessList, SendMode, SeqEvent, SessionInfo,
+};
 pub use server::Runtime;
 
 use std::path::{Path, PathBuf};

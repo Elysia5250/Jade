@@ -11,7 +11,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
-const DEFAULT_MAX_IDLE: Duration = Duration::from_secs(30 * 60);
+const DEFAULT_MAX_IDLE: Duration = Duration::from_secs(15 * 60);
+
+#[derive(Debug, Clone)]
+pub struct McpActiveServer {
+    pub name: String,
+    pub scope: String,
+    pub transport: String,
+    pub pid: Option<u32>,
+    pub cwd: PathBuf,
+    pub idle_secs: u64,
+}
 
 struct PoolEntry {
     fingerprint: String,
@@ -98,6 +108,91 @@ impl McpPool {
         connected
     }
 
+    /// List all currently live pooled MCP server connections across workspaces.
+    pub async fn list_active(&self) -> Vec<McpActiveServer> {
+        let snapshot: Vec<(PathBuf, Arc<McpManager>, u64)> = {
+            let guard = self.entries.lock().await;
+            let now = Instant::now();
+            guard
+                .iter()
+                .map(|(cwd, entry)| {
+                    (
+                        cwd.clone(),
+                        Arc::clone(&entry.manager),
+                        now.duration_since(entry.last_used).as_secs(),
+                    )
+                })
+                .collect()
+        };
+        let mut out = Vec::new();
+        for (cwd, mgr, idle_secs) in snapshot {
+            for (name, scope, transport, pid) in mgr.active_servers().await {
+                out.push(McpActiveServer {
+                    name,
+                    scope: scope.label().to_string(),
+                    transport: transport.to_string(),
+                    pid,
+                    cwd: cwd.clone(),
+                    idle_secs,
+                });
+            }
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name).then(a.cwd.cmp(&b.cwd)));
+        out
+    }
+
+    /// Reap pooled entries idle for at least `max_idle`, returning the number
+    /// of MCP server connections dropped.
+    pub async fn reap_idle(&self, max_idle: Duration) -> usize {
+        let mut guard = self.entries.lock().await;
+        evict_expired(&mut guard, max_idle)
+    }
+
+    /// Stop a named MCP server (dropping its workspace pool entry) or all
+    /// pooled MCP servers when `name` is `None`. Returns dropped server count.
+    pub async fn stop(&self, name: Option<&str>) -> usize {
+        let mut guard = self.entries.lock().await;
+        match name {
+            None => {
+                let count = guard.values().map(|e| e.manager.server_count()).sum();
+                guard.clear();
+                count
+            }
+            Some(target) => {
+                let mut count = 0;
+                guard.retain(|cwd, entry| {
+                    let matched =
+                        entry.manager.has_server(target) || cwd.display().to_string() == target;
+                    if matched {
+                        count += entry.manager.server_count();
+                        false
+                    } else {
+                        true
+                    }
+                });
+                count
+            }
+        }
+    }
+
+    /// Drop all pooled MCP connections except those belonging to `active_cwds`.
+    /// Used by L2 Cool Hibernation so in-flight turns keep their MCP servers.
+    pub async fn stop_except(&self, active_cwds: &[PathBuf]) -> usize {
+        let keep: std::collections::HashSet<PathBuf> =
+            active_cwds.iter().map(|p| Self::key_for(p)).collect();
+        let mut guard = self.entries.lock().await;
+        let mut count = 0;
+        guard.retain(|cwd, entry| {
+            if keep.contains(cwd) {
+                true
+            } else {
+                count += entry.manager.server_count();
+                false
+            }
+        });
+        count
+    }
+
     /// Drop cached connections for `cwd` (e.g. on session close or cwd switch).
     pub async fn invalidate(&self, cwd: &Path) {
         let key = Self::key_for(cwd);
@@ -110,9 +205,18 @@ impl McpPool {
     }
 }
 
-fn evict_expired(entries: &mut HashMap<PathBuf, PoolEntry>, max_idle: Duration) {
+fn evict_expired(entries: &mut HashMap<PathBuf, PoolEntry>, max_idle: Duration) -> usize {
     let now = Instant::now();
-    entries.retain(|_, entry| now.duration_since(entry.last_used) < max_idle);
+    let mut dropped = 0;
+    entries.retain(|_, entry| {
+        if now.duration_since(entry.last_used) < max_idle {
+            true
+        } else {
+            dropped += entry.manager.server_count();
+            false
+        }
+    });
+    dropped
 }
 
 #[cfg(test)]
@@ -306,6 +410,63 @@ done
         assert!(after
             .iter()
             .any(|s| s["function"]["name"] == "mcp__big__gamma_sql"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn pool_list_active_stop_and_reap_idle() {
+        let root = tmpdir("lifecycle");
+        let data = root.join("data");
+        let cwd = root.join("repo");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let script = r#"
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"initialize"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-03-26","capabilities":{"tools":{}}}}\n' "$id"
+      ;;
+    *'"tools/list"'*)
+      printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[]}}\n' "$id"
+      ;;
+  esac
+done
+"#;
+        std::fs::write(
+            data.join("mcp.json"),
+            serde_json::to_string(&json!({
+                "mcpServers": {
+                    "alpha": { "command": "sh", "args": ["-c", script] }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let pool = McpPool::new(data.clone());
+        let _ = pool.get_or_connect(&cwd).await;
+
+        let active = pool.list_active().await;
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].name, "alpha");
+        assert_eq!(active[0].transport, "stdio");
+        assert!(active[0].pid.is_some());
+
+        // Non-matching name stops nothing.
+        assert_eq!(pool.stop(Some("nonexistent")).await, 0);
+        assert_eq!(pool.list_active().await.len(), 1);
+
+        // Matching name drops the server cleanly.
+        assert_eq!(pool.stop(Some("alpha")).await, 1);
+        assert!(pool.list_active().await.is_empty());
+
+        // Reconnect and verify reap_idle with zero TTL reaps it.
+        let _ = pool.get_or_connect(&cwd).await;
+        assert_eq!(pool.reap_idle(Duration::ZERO).await, 1);
+        assert!(pool.list_active().await.is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
     }

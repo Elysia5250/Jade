@@ -160,6 +160,16 @@ pub enum AgentReq {
         id: String,
         ask_id: u64,
     },
+    /// Unified snapshot of daemon-managed background processes (sessions,
+    /// monitors, pooled MCP servers, and jobs).
+    ProcessList,
+    /// Stop a named pooled MCP server (or all pooled MCP servers when `None`).
+    StopMcp {
+        name: Option<String>,
+    },
+    /// Enter L2 Cool Hibernation immediately: dehydrate evictable idle sessions
+    /// and stop idle MCP child processes.
+    Sleep,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,6 +218,62 @@ pub enum AgentResp {
     },
     Ack,
     Error(String),
+    /// Unified snapshot of daemon-managed background processes.
+    ProcessList(RuntimeProcessList),
+    /// Number of pooled MCP server connections stopped.
+    Stopped {
+        count: usize,
+    },
+    /// Resources reclaimed by entering L2 Cool Hibernation.
+    Slept {
+        sessions: usize,
+        mcp_servers: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveSessionEntry {
+    pub id: String,
+    pub cwd: PathBuf,
+    pub target: String,
+    pub running: bool,
+    pub queued: usize,
+    pub idle_secs: u64,
+    pub active_monitors: usize,
+    pub subscribers: usize,
+    pub side_running: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActiveMonitorEntry {
+    pub session_id: String,
+    pub id: u64,
+    pub job_id: u64,
+    pub label: String,
+    pub pattern: String,
+    pub trigger_count: u32,
+    pub owns_job: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpProcessEntry {
+    pub name: String,
+    pub scope: String,
+    pub transport: String,
+    pub pid: Option<u32>,
+    pub cwd: PathBuf,
+    pub idle_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeProcessList {
+    pub daemon_pid: u32,
+    pub uptime_secs: u64,
+    pub sleeping: bool,
+    pub sessions: Vec<LiveSessionEntry>,
+    pub monitors: Vec<ActiveMonitorEntry>,
+    pub mcp_servers: Vec<McpProcessEntry>,
+    pub jobs: Vec<jade_proto::Job>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -486,6 +552,11 @@ mod tests {
                 cwd: PathBuf::from("/work/mcp"),
             },
             AgentReq::RefreshModels,
+            AgentReq::ProcessList,
+            AgentReq::StopMcp {
+                name: Some("github".into()),
+            },
+            AgentReq::Sleep,
         ]
     }
 
@@ -514,6 +585,9 @@ mod tests {
             AgentReq::AskTouched { .. } => 20,
             AgentReq::SendImages { .. } => 21,
             AgentReq::GetPermissions { .. } => 22,
+            AgentReq::ProcessList => 23,
+            AgentReq::StopMcp { .. } => 24,
+            AgentReq::Sleep => 25,
         }
     }
 
@@ -567,6 +641,45 @@ mod tests {
             },
             AgentResp::Ack,
             AgentResp::Error("no such session: s9".into()),
+            AgentResp::ProcessList(RuntimeProcessList {
+                daemon_pid: 4242,
+                uptime_secs: 120,
+                sleeping: false,
+                sessions: vec![LiveSessionEntry {
+                    id: "s1".into(),
+                    cwd: PathBuf::from("/work"),
+                    target: "local".into(),
+                    running: false,
+                    queued: 0,
+                    idle_secs: 15,
+                    active_monitors: 1,
+                    subscribers: 1,
+                    side_running: false,
+                }],
+                monitors: vec![ActiveMonitorEntry {
+                    session_id: "s1".into(),
+                    id: 1,
+                    job_id: 7,
+                    label: "watch".into(),
+                    pattern: "err".into(),
+                    trigger_count: 2,
+                    owns_job: true,
+                }],
+                mcp_servers: vec![McpProcessEntry {
+                    name: "github".into(),
+                    scope: "user".into(),
+                    transport: "stdio".into(),
+                    pid: Some(9001),
+                    cwd: PathBuf::from("/work"),
+                    idle_secs: 30,
+                }],
+                jobs: Vec::new(),
+            }),
+            AgentResp::Stopped { count: 2 },
+            AgentResp::Slept {
+                sessions: 3,
+                mcp_servers: 1,
+            },
         ]
     }
 
@@ -585,6 +698,9 @@ mod tests {
             AgentResp::Ack => 10,
             AgentResp::Error(_) => 11,
             AgentResp::PermissionsStatus { .. } => 12,
+            AgentResp::ProcessList(_) => 13,
+            AgentResp::Stopped { .. } => 14,
+            AgentResp::Slept { .. } => 15,
         }
     }
 
@@ -606,8 +722,8 @@ mod tests {
     fn every_agent_req_and_resp_round_trips_postcard() {
         let mut reqs = sample_reqs_open();
         reqs.extend(sample_reqs_edit());
-        assert_each(reqs, req_index, 23);
-        assert_each(sample_resps(), resp_index, 13);
+        assert_each(reqs, req_index, 26);
+        assert_each(sample_resps(), resp_index, 16);
         assert_postcard(&AgentHello {
             protocol_version: AGENT_PROTOCOL_VERSION,
             incarnation_id: 7,

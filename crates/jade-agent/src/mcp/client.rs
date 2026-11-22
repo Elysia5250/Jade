@@ -146,6 +146,28 @@ impl McpManager {
         self.statuses.read().unwrap().clone()
     }
 
+    pub fn server_count(&self) -> usize {
+        self.servers.len()
+    }
+
+    pub fn has_server(&self, name: &str) -> bool {
+        self.servers.contains_key(name)
+    }
+
+    pub async fn active_servers(&self) -> Vec<(String, McpScope, &'static str, Option<u32>)> {
+        let mut out = Vec::with_capacity(self.servers.len());
+        for (name, srv) in &self.servers {
+            let guard = srv.transport.lock().await;
+            out.push((
+                name.clone(),
+                srv.cfg.scope,
+                guard.transport_label(),
+                guard.pid(),
+            ));
+        }
+        out
+    }
+
     pub fn managed_error(&self) -> Option<&str> {
         self.managed_error.as_deref()
     }

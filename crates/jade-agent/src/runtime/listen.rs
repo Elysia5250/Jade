@@ -14,6 +14,15 @@ use tracing::debug;
 
 /// Serve the console control socket until cancelled.
 pub async fn serve(runtime: Arc<Runtime>, listener: tokio::net::UnixListener) {
+    let reaper = runtime.spawn_reaper();
+    struct AbortOnDrop(tokio::task::JoinHandle<()>);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let _reaper_guard = AbortOnDrop(reaper);
+
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(pair) => pair,
@@ -316,6 +325,25 @@ where
             }
             Err(err) => fail(wr, format!("{err:#}")).await?,
         },
+        AgentReq::ProcessList => {
+            let list = runtime.process_list().await;
+            write_framed(wr, &AgentResp::ProcessList(list)).await?;
+        }
+        AgentReq::StopMcp { name } => {
+            let count = runtime.stop_mcp(name.as_deref()).await;
+            write_framed(wr, &AgentResp::Stopped { count }).await?;
+        }
+        AgentReq::Sleep => {
+            let (sessions, mcp_servers) = runtime.sleep_now().await;
+            write_framed(
+                wr,
+                &AgentResp::Slept {
+                    sessions,
+                    mcp_servers,
+                },
+            )
+            .await?;
+        }
         other => bail!("unhandled edit request: {other:?}"),
     }
     Ok(())

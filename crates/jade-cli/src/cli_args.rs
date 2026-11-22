@@ -17,6 +17,12 @@ pub(crate) enum Commands {
     },
     /// Show policy, daemon state, topaz status, and job counts.
     Status,
+    /// Show all daemon-managed background processes (sessions, jobs, monitors, MCP servers).
+    Ps {
+        /// Output machine-readable JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Connect an LLM provider (API key, OAuth, or custom endpoint).
     Login,
     /// Manage LLM provider credentials.
@@ -151,6 +157,10 @@ pub(crate) enum DaemonCmd {
     Start,
     /// Ask the daemon to shut down.
     Stop,
+    /// Restart the daemon cleanly.
+    Restart,
+    /// Enter L2 cool hibernation (dehydrate idle sessions and stop idle MCP servers).
+    Sleep,
     /// Report whether the daemon is running.
     Status,
 }

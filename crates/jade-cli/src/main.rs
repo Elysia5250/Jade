@@ -12,6 +12,7 @@ mod cli_ops;
 mod headless;
 mod mcp_cli;
 mod plugin_cli;
+mod ps_cli;
 mod tui;
 
 mod cli_args;
@@ -254,6 +255,7 @@ async fn main() -> Result<()> {
             headless::run_ask(&ctx, cont, cli.session, cli.headless, prompt).await
         }
         Commands::Status => cmd_status(&ctx).await,
+        Commands::Ps { json } => ps_cli::cmd_ps(&ctx.data_dir, json).await,
         Commands::Login => auth_cli::cmd_auth_login(&ctx.data_dir).await,
         Commands::Auth { cmd } => match cmd {
             AuthCmd::Login => auth_cli::cmd_auth_login(&ctx.data_dir).await,
@@ -425,6 +427,8 @@ async fn cmd_daemon(data_dir: &Path, cmd: DaemonCmd) -> Result<()> {
             }
             bail!("the daemon ignored SIGTERM for 3s");
         }
+        DaemonCmd::Restart => ps_cli::cmd_daemon_restart(data_dir).await,
+        DaemonCmd::Sleep => ps_cli::cmd_daemon_sleep(data_dir).await,
         DaemonCmd::Status => {
             println!("autostart: {}", daemon::autostart_line());
             if daemon::is_running(data_dir).await {

@@ -369,6 +369,10 @@ impl App {
                 self.run_mcp_command(arg);
                 Action::None
             }
+            SlashCmdKind::Ps => {
+                self.run_ps_command(arg);
+                Action::None
+            }
             SlashCmdKind::Plugin => {
                 self.run_plugin_command(arg);
                 Action::None

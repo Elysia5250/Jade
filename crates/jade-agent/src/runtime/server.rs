@@ -25,7 +25,8 @@ pub struct Runtime {
     pub(crate) topaz: Option<PathBuf>,
     pub(crate) local_server: Option<AgentServer>,
     pub(crate) mcp_pool: Arc<crate::mcp::pool::McpPool>,
-    sessions: Mutex<HashMap<String, Arc<Mutex<Live>>>>,
+    pub(crate) sessions: Mutex<HashMap<String, Arc<Mutex<Live>>>>,
+    pub(crate) started_at: Instant,
     incarnation_id: u64,
 }
 
@@ -50,6 +51,7 @@ impl Runtime {
             local_server,
             mcp_pool,
             sessions: Mutex::new(HashMap::new()),
+            started_at: Instant::now(),
             incarnation_id: new_incarnation(),
         })
     }
