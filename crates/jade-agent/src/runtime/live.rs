@@ -248,8 +248,19 @@ impl Live {
         self.pump = None;
     }
 
+    /// Whether this live session can be dehydrated from memory without
+    /// disrupting an active turn, background monitor, sidechat, or client.
+    pub(crate) fn is_evictable(&self) -> bool {
+        self.phase == LivePhase::Idle
+            && !self.running
+            && self.monitors.active_count() == 0
+            && !self.side.as_ref().is_some_and(|s| s.running)
+            && !self.subs.iter().any(|tx| !tx.is_closed())
+    }
+
     /// Drop the oldest idle sessions until there is room for one more insert.
-    /// Busy sessions and the id about to be inserted (not in the map) stay.
+    /// Busy sessions, sessions with active monitors/sidechat/subscribers, and
+    /// the id about to be inserted (not in the map) stay.
     pub(crate) fn evict_idle_sessions(map: &mut HashMap<String, Arc<Mutex<Live>>>) {
         if map.len() < MAX_IDLE_SESSIONS {
             return;
@@ -257,7 +268,7 @@ impl Live {
         let mut idle = Vec::new();
         for (id, live) in map.iter() {
             let state = live.lock().unwrap();
-            if state.phase == LivePhase::Idle && !state.running {
+            if state.is_evictable() {
                 idle.push((id.clone(), state.last_used));
             }
         }
@@ -362,4 +373,66 @@ fn cap_text(text: &str, max: usize) -> String {
     let mut out = text[..end].to_string();
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::MonitorInfo;
+    use std::time::Duration;
+
+    #[test]
+    fn evict_idle_sessions_preserves_monitored_and_subscribed_sessions() {
+        let dir = std::env::temp_dir().join("jade-live-evict-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let rt = Runtime::new(dir.clone());
+        let mut map = HashMap::new();
+        let now = Instant::now();
+
+        // Oldest session has an active monitor — must survive eviction.
+        let mut monitored = Live::new(&rt, &dir, "monitored", dir.clone(), "local".into(), vec![]);
+        monitored.last_used = now - Duration::from_secs(300);
+        monitored.monitors.seed_active_for_test(MonitorInfo {
+            id: 1,
+            job_id: 99,
+            label: "watch".into(),
+            pattern: "err".into(),
+            command: "tail -f app.log".into(),
+            trigger_count: 0,
+            max_triggers: None,
+            owns_job: false,
+            active: true,
+        });
+        assert!(!monitored.is_evictable());
+        map.insert("monitored".into(), Arc::new(Mutex::new(monitored)));
+
+        // Second oldest has an attached client subscriber — must survive eviction.
+        let mut subscribed =
+            Live::new(&rt, &dir, "subscribed", dir.clone(), "local".into(), vec![]);
+        subscribed.last_used = now - Duration::from_secs(200);
+        let _rx = subscribed.subscribe();
+        assert!(!subscribed.is_evictable());
+        map.insert("subscribed".into(), Arc::new(Mutex::new(subscribed)));
+
+        // Fill remaining slots with truly idle sessions.
+        for i in 0..MAX_IDLE_SESSIONS {
+            let id = format!("idle-{i}");
+            let mut idle = Live::new(&rt, &dir, &id, dir.clone(), "local".into(), vec![]);
+            idle.last_used = now - Duration::from_secs(100 - i as u64);
+            map.insert(id, Arc::new(Mutex::new(idle)));
+        }
+
+        Live::evict_idle_sessions(&mut map);
+        assert!(map.contains_key("monitored"), "monitored session was evicted");
+        assert!(
+            map.contains_key("subscribed"),
+            "subscribed session was evicted"
+        );
+        assert!(
+            !map.contains_key("idle-0"),
+            "oldest truly idle session should be evicted"
+        );
+        assert!(map.len() < MAX_IDLE_SESSIONS);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

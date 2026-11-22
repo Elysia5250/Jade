@@ -412,3 +412,20 @@ async fn watches_live_status_events() {
     assert!(seen_two, "the second push never arrived");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn disabled_accept_pool_does_not_connect_to_topaz() {
+    let dir = tmpdir("disabled-pool");
+    let socket = dir.join("control.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    let server = AgentServer::new(dir.clone(), host(false, &[]));
+
+    let pool = spawn_accept_pool(server, TopazClient::new(socket.clone()), 4);
+    let accepted = tokio::time::timeout(Duration::from_millis(250), listener.accept()).await;
+    assert!(
+        accepted.is_err(),
+        "accept pool must stay dormant while remote execution is disabled"
+    );
+    pool.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}

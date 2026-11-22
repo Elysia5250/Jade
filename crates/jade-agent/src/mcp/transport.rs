@@ -32,12 +32,21 @@ pub enum McpTransport {
 }
 
 pub struct StdioTransport {
+    pid: Option<u32>,
     _child: Child,
     _scratch: ScratchGuard,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: AtomicU64,
     tools_dirty: AtomicBool,
+}
+
+impl Drop for StdioTransport {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid {
+            jade_core::exec::kill_group(pid);
+        }
+    }
 }
 
 pub struct HttpTransport {
@@ -218,6 +227,8 @@ impl StdioTransport {
             }
             c
         };
+        #[cfg(unix)]
+        cmd.process_group(0);
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -225,9 +236,11 @@ impl StdioTransport {
         let mut child = cmd
             .spawn()
             .with_context(|| format!("spawning MCP server `{command}`"))?;
+        let pid = child.id();
         let stdin = child.stdin.take().context("MCP child stdin missing")?;
         let stdout = BufReader::new(child.stdout.take().context("MCP child stdout missing")?);
         Ok(Self {
+            pid,
             _child: child,
             _scratch: scratch,
             stdin,
@@ -461,4 +474,65 @@ pub(crate) fn parse_sse_rpc_response(body: &str, expected_id: u64) -> Result<Val
     }
 
     fallback.context("MCP SSE stream did not contain a JSON-RPC response")
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn pid_alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    #[tokio::test]
+    async fn stdio_drop_kills_grandchild_process_group() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("jade-mcp-pgid-{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("grandchild.pid");
+        let script = format!("sleep 30 & echo $! > {}; wait", pid_file.display());
+
+        let transport = StdioTransport::spawn(
+            "sh",
+            &["-c".to_string(), script],
+            &BTreeMap::new(),
+            None,
+            McpScope::User,
+            &dir,
+        )
+        .expect("spawn stdio MCP mock");
+
+        let mut gpid = None;
+        for _ in 0..40 {
+            if let Ok(text) = std::fs::read_to_string(&pid_file) {
+                if let Ok(pid) = text.trim().parse::<u32>() {
+                    gpid = Some(pid);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let gpid = gpid.expect("grandchild pid should be recorded");
+        assert!(pid_alive(gpid), "grandchild {gpid} should be running");
+
+        drop(transport);
+
+        let mut dead = false;
+        for _ in 0..40 {
+            if !pid_alive(gpid) {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(dead, "grandchild {gpid} leaked after StdioTransport drop");
+    }
 }

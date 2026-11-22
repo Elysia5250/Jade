@@ -184,31 +184,33 @@ impl App {
         while let Ok(notice) = self.notice_rx.try_recv() {
             notices.push(notice);
         }
-        let saw = !notices.is_empty();
+        let mut changed = false;
         for notice in notices {
-            self.apply_notice(notice);
+            changed |= self.apply_notice(notice);
         }
-        saw
+        changed
     }
 
-    pub(in crate::tui) fn apply_notice(&mut self, notice: UiNotice) {
+    pub(in crate::tui) fn apply_notice(&mut self, notice: UiNotice) -> bool {
         match notice {
             UiNotice::DaemonReady => {
                 self.jobs.last_refresh = Instant::now()
-                    .checked_sub(self.jobs.interval)
+                    .checked_sub(Duration::from_secs(60))
                     .unwrap_or_else(Instant::now);
                 self.agent.retry_at = Instant::now();
                 self.inputs.invalidate_catalog();
                 if self.ui.welcome.is_none() && self.agent.stream.is_none() {
                     self.spawn_agent_attach();
                 }
+                true
             }
             UiNotice::TopazWatch(rx) => {
                 self.jobs.watch = Some(rx);
+                true
             }
             UiNotice::Requeue { session_id, items } => {
                 if session_id != self.session.current.id {
-                    return;
+                    return false;
                 }
                 self.agent.offline = true;
                 self.agent.ready = false;
@@ -218,27 +220,29 @@ impl App {
                     self.agent.outbox.push_front(item);
                 }
                 self.set_toast("daemon offline - prompt queued", true);
+                true
             }
             UiNotice::Recalled {
                 session_id,
                 text: Some(text),
             } => {
                 if session_id != self.session.current.id {
-                    return;
+                    return false;
                 }
                 // The daemon's copy is authoritative; this also catches
                 // follow-ups queued by an earlier console.
                 self.ui.input = text;
                 self.ui.input_cursor = self.ui.input.chars().count();
                 self.ui.focus = Focus::Input;
+                true
             }
-            UiNotice::Recalled { text: None, .. } => {}
+            UiNotice::Recalled { text: None, .. } => false,
             UiNotice::Checkpoints {
                 session_id,
                 mut list,
             } => {
                 if session_id != self.session.current.id {
-                    return;
+                    return false;
                 }
                 if list.is_empty() {
                     self.set_toast("no checkpoints recorded yet", false);
@@ -249,6 +253,7 @@ impl App {
                         selected: 0,
                     }));
                 }
+                true
             }
             UiNotice::Toast {
                 session_id,
@@ -257,10 +262,11 @@ impl App {
             } => {
                 if let Some(sid) = session_id {
                     if sid != self.session.current.id {
-                        return;
+                        return false;
                     }
                 }
                 self.set_toast(msg, err);
+                true
             }
             UiNotice::Notice {
                 session_id,
@@ -268,15 +274,15 @@ impl App {
                 err,
             } => {
                 if session_id != self.session.current.id {
-                    return;
+                    return false;
                 }
                 self.push_notice(msg, err);
+                true
             }
-            UiNotice::LiveSessions(list) => {
-                self.apply_hub_live_sessions(list);
-            }
+            UiNotice::LiveSessions(list) => self.apply_hub_live_sessions(list),
             UiNotice::McpProbeLines(lines) => {
                 self.apply_hub_mcp_probe(lines);
+                true
             }
         }
     }

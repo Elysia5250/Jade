@@ -12,7 +12,10 @@ use tokio::signal::unix::{signal, Signal, SignalKind};
 
 const FRAME_MS: u64 = 33;
 const ASK_FRAME_MS: u64 = 250;
+const TTY_POLL_MS: u64 = 250;
 const SHELL_POLL: Duration = Duration::from_millis(200);
+const IDLE_JOB_POLL: Duration = Duration::from_secs(10);
+const WELCOME_JOB_POLL: Duration = Duration::from_secs(30);
 
 type ModelMsg = (String, Vec<jade_agent::agent::context::ListedModel>);
 
@@ -136,7 +139,7 @@ fn tty_reader(tx: mpsc::UnboundedSender<Event>, stop: Arc<AtomicBool>) {
         if stop.load(Ordering::Acquire) || tx.is_closed() {
             break;
         }
-        match event::poll(Duration::from_millis(50)) {
+        match event::poll(Duration::from_millis(TTY_POLL_MS)) {
             Ok(true) => match event::read() {
                 Ok(ev) => {
                     if stop.load(Ordering::Acquire) || tx.send(ev).is_err() {
@@ -207,7 +210,7 @@ async fn dispatch_wake(
     wake: ConsoleWake,
     redraw: &mut bool,
 ) -> Result<bool> {
-    let sync_inputs = !matches!(wake, ConsoleWake::Timer { .. });
+    let mut sync_inputs = !matches!(wake, ConsoleWake::Timer { .. });
     match wake {
         ConsoleWake::Term(None) | ConsoleWake::Signal => return Ok(true),
         ConsoleWake::Term(Some(ev)) => {
@@ -225,8 +228,11 @@ async fn dispatch_wake(
             }
         }
         ConsoleWake::Notice(Some(notice)) => {
-            app.apply_notice(notice);
-            *redraw = true;
+            if app.apply_notice(notice) {
+                *redraw = true;
+            } else {
+                sync_inputs = false;
+            }
         }
         ConsoleWake::Notice(None) => {}
         ConsoleWake::Agent(message) => {
@@ -323,6 +329,22 @@ async fn sleep_for(delay: Option<Duration>) {
     }
 }
 
+fn effective_job_interval(app: &App) -> Duration {
+    if app.ui.welcome.is_some() {
+        return app.jobs.interval.max(WELCOME_JOB_POLL);
+    }
+    let has_active_jobs = app.jobs.list.iter().any(|job| !job.state.is_done());
+    if has_active_jobs
+        || !app.jobs.shell_watches.is_empty()
+        || !app.jobs.connected
+        || app.agent.running
+    {
+        app.jobs.interval
+    } else {
+        app.jobs.interval.max(IDLE_JOB_POLL)
+    }
+}
+
 fn next_wake(app: &App) -> Option<WakePlan> {
     let mut best = None;
     if let Some(after) = animation_tick(app) {
@@ -334,10 +356,7 @@ fn next_wake(app: &App) -> Option<WakePlan> {
             push_wake(&mut best, left, true);
         }
     }
-    let refresh_left = app
-        .jobs
-        .interval
-        .saturating_sub(app.jobs.last_refresh.elapsed());
+    let refresh_left = effective_job_interval(app).saturating_sub(app.jobs.last_refresh.elapsed());
     push_wake(&mut best, refresh_left, false);
     if !app.jobs.shell_watches.is_empty() {
         let left = SHELL_POLL.saturating_sub(app.jobs.last_shell_poll.elapsed());
@@ -368,7 +387,7 @@ fn push_wake(best: &mut Option<WakePlan>, after: Duration, draw: bool) {
 
 async fn settle_background(app: &mut App, remote: &Remote<AnyDialer>) -> bool {
     let mut dirty = false;
-    if app.jobs.last_refresh.elapsed() >= app.jobs.interval {
+    if app.jobs.last_refresh.elapsed() >= effective_job_interval(app) {
         let before = job_fingerprint(app);
         let connected = app.jobs.connected;
         app.refresh(remote).await;
@@ -677,6 +696,52 @@ mod tests {
             app.persist_session();
         }
         assert!(path.is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn idle_connected_session_backs_off_job_poll() {
+        let dir = tmpdir();
+        let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+        app.jobs.connected = true;
+        app.agent.running = false;
+        assert_eq!(effective_job_interval(&app), IDLE_JOB_POLL);
+
+        app.agent.running = true;
+        assert_eq!(effective_job_interval(&app), app.jobs.interval);
+
+        app.agent.running = false;
+        app.jobs.connected = false;
+        assert_eq!(effective_job_interval(&app), app.jobs.interval);
+
+        app.jobs.connected = true;
+        app.open_welcome();
+        assert_eq!(effective_job_interval(&app), WELCOME_JOB_POLL);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unchanged_hub_live_sessions_notice_is_noop() {
+        let dir = tmpdir();
+        let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+        app.open_welcome();
+        let s1 = jade_agent::runtime::SessionInfo {
+            id: "a".into(),
+            cwd: dir.clone(),
+            target: "local".into(),
+            running: false,
+            queued: 0,
+        };
+        let s2 = jade_agent::runtime::SessionInfo {
+            id: "b".into(),
+            cwd: dir.clone(),
+            target: "local".into(),
+            running: true,
+            queued: 1,
+        };
+        assert!(app.apply_notice(UiNotice::LiveSessions(vec![s2.clone(), s1.clone()])));
+        // Same set in a different order must not trigger reload/redraw.
+        assert!(!app.apply_notice(UiNotice::LiveSessions(vec![s1, s2])));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

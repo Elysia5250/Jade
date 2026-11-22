@@ -231,3 +231,40 @@ async fn shutdown_persists_terminal_state_and_rejects_submit() {
     assert!(jobs.submit(shell("echo no"), "local").is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn monitor_jobs_do_not_starve_interactive_jobs() {
+    let dir = tmpdir("monitor-pool");
+    let jobs = Jobs::open(dir.clone(), 1);
+    let mut m1_req = shell("sleep 30");
+    m1_req.group = MONITOR_GROUP.to_string();
+    let mut m2_req = shell("sleep 30");
+    m2_req.group = MONITOR_GROUP.to_string();
+
+    let m1 = jobs.submit(m1_req, "local").unwrap();
+    let m2 = jobs.submit(m2_req, "local").unwrap();
+    assert!(matches!(m1.state, JobState::Running { .. }));
+    assert!(matches!(m2.state, JobState::Running { .. }));
+
+    // Even with 2 running monitors and max_jobs=1, interactive exec starts immediately.
+    let interactive = jobs.submit(shell("echo ok"), "local").unwrap();
+    assert!(
+        matches!(interactive.state, JobState::Running { .. }),
+        "monitor jobs must not block interactive exec slots: {:?}",
+        interactive.state
+    );
+
+    let mut finished = false;
+    for _ in 0..200 {
+        if let Some(j) = jobs.get(interactive.id) {
+            if matches!(j.state.result(), Some(JobResult::Success)) {
+                finished = true;
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    jobs.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(finished, "interactive job should finish while monitors run");
+}

@@ -8,7 +8,9 @@ use crate::exec::{self, ExecSpec};
 use crate::fs;
 use crate::log::{self, JobLogs, LogWriter};
 use anyhow::{bail, Result};
-use jade_proto::{Job, JobId, JobResult, JobState, SandboxPolicy, SubmitRequest, DEFAULT_GROUP};
+use jade_proto::{
+    Job, JobId, JobResult, JobState, SandboxPolicy, SubmitRequest, DEFAULT_GROUP, MONITOR_GROUP,
+};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
@@ -18,6 +20,8 @@ use tokio::sync::Notify;
 
 /// Finished jobs kept in the table (and their logs on disk).
 pub const KEEP_JOBS: usize = 100;
+/// Independent concurrency cap for long-running background monitor jobs.
+pub const MAX_MONITOR_JOBS: usize = 16;
 const STATE_FILE: &str = "state.json";
 
 pub fn now_ms() -> u64 {
@@ -80,6 +84,9 @@ impl Jobs {
             groups: BTreeMap::new(),
         };
         table.groups.insert(DEFAULT_GROUP.to_string(), max_jobs);
+        table
+            .groups
+            .insert(MONITOR_GROUP.to_string(), MAX_MONITOR_JOBS);
 
         let state_path = logs.dir().join(STATE_FILE);
         // A corrupt state must not be treated as an empty table: pruning would
@@ -167,7 +174,10 @@ impl Jobs {
                 t.groups.insert(DEFAULT_GROUP.to_string(), max_jobs);
                 changed = true;
             }
-            for limit in t.groups.values_mut() {
+            for (group, limit) in t.groups.iter_mut() {
+                if group == MONITOR_GROUP {
+                    continue;
+                }
                 if *limit != max_jobs {
                     *limit = max_jobs;
                     changed = true;
@@ -372,19 +382,29 @@ impl Jobs {
                 .collect();
             let mut starts = Vec::new();
             for id in queued {
-                let total_running = t
-                    .jobs
-                    .values()
-                    .filter(|e| matches!(e.job.state, JobState::Running { .. }))
-                    .count();
-                if total_running >= global_limit {
-                    break;
-                }
                 let (group, limit) = {
                     let e = t.jobs.get(&id).expect("id from the same map");
-                    let limit = t.groups.get(&e.job.group).copied().unwrap_or(global_limit);
+                    let default = if e.job.group == MONITOR_GROUP {
+                        MAX_MONITOR_JOBS
+                    } else {
+                        global_limit
+                    };
+                    let limit = t.groups.get(&e.job.group).copied().unwrap_or(default);
                     (e.job.group.clone(), limit.max(1))
                 };
+                if group != MONITOR_GROUP {
+                    let interactive_running = t
+                        .jobs
+                        .values()
+                        .filter(|e| {
+                            e.job.group != MONITOR_GROUP
+                                && matches!(e.job.state, JobState::Running { .. })
+                        })
+                        .count();
+                    if interactive_running >= global_limit {
+                        continue;
+                    }
+                }
                 let running = t
                     .jobs
                     .values()

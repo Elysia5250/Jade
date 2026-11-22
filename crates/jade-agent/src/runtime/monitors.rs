@@ -110,6 +110,11 @@ impl MonitorHub {
         snapshot_locked(&g)
     }
 
+    pub(crate) fn active_count(&self) -> usize {
+        let g = self.inner.lock().unwrap();
+        g.monitors.values().filter(|e| e.info.active).count()
+    }
+
     #[cfg(test)]
     pub(crate) fn seed_active_for_test(&self, info: MonitorInfo) {
         let (cancel_tx, _rx) = watch::channel(false);

@@ -5,8 +5,12 @@ use crate::server::AgentServer;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tracing::{debug, info};
+
+const INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
+const GATE_POLL: Duration = Duration::from_secs(15);
 
 /// Workers and per-stream tasks spawned by [`spawn_accept_pool`].
 pub struct AcceptPool {
@@ -34,26 +38,75 @@ impl Drop for AcceptPool {
 /// Keep `size` idle accept connections parked on topaz and serve whatever is
 /// handed off. Each worker owns exactly one parked connection at a time, so the
 /// pool size is the number of simultaneous idle accepts.
+///
+/// Workers are only spawned while remote execution is enabled in host config
+/// and the topaz control socket exists, avoiding background dial/ping traffic
+/// on local-only daemons.
 pub fn spawn_accept_pool(server: AgentServer, client: TopazClient, size: usize) -> AcceptPool {
     let size = size.max(1);
-    let tasks = Arc::new(Mutex::new(Vec::with_capacity(size)));
+    let tasks = Arc::new(Mutex::new(Vec::with_capacity(size + 1)));
     let stop = Arc::new(AtomicBool::new(false));
     info!(
         socket = %client.socket().display(),
         pool = size,
-        "topaz accept pool started"
+        enabled = server.host().config().enabled,
+        "topaz accept supervisor started"
     );
-    for _ in 0..size {
-        let server = server.clone();
-        let client = client.clone();
-        let tasks_for_streams = Arc::clone(&tasks);
-        let worker_stop = Arc::clone(&stop);
-        let worker = tokio::spawn(async move {
-            accept_worker(server, client, tasks_for_streams, worker_stop).await;
-        });
-        push_task(&tasks, &stop, worker);
-    }
+    let tasks_for_sup = Arc::clone(&tasks);
+    let sup_stop = Arc::clone(&stop);
+    let sup = tokio::spawn(async move {
+        accept_supervisor(server, client, size, tasks_for_sup, sup_stop).await;
+    });
+    push_task(&tasks, &stop, sup);
     AcceptPool { tasks, stop }
+}
+
+async fn accept_supervisor(
+    server: AgentServer,
+    client: TopazClient,
+    size: usize,
+    tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    stop: Arc<AtomicBool>,
+) {
+    let mut workers: Vec<AbortHandle> = Vec::new();
+    let mut backoff = INITIAL_BACKOFF;
+    while !stop.load(Ordering::SeqCst) {
+        if !server.host().config().enabled {
+            abort_handles(&mut workers);
+            backoff = INITIAL_BACKOFF;
+            tokio::time::sleep(GATE_POLL).await;
+            continue;
+        }
+        workers.retain(|h| !h.is_finished());
+        if workers.is_empty() {
+            if !client.socket().exists() {
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(MAX_BACKOFF);
+                continue;
+            }
+            backoff = INITIAL_BACKOFF;
+            debug!(pool = size, "spawning topaz accept workers");
+            for _ in 0..size {
+                let server = server.clone();
+                let client = client.clone();
+                let tasks_for_streams = Arc::clone(&tasks);
+                let worker_stop = Arc::clone(&stop);
+                let worker = tokio::spawn(async move {
+                    accept_worker(server, client, tasks_for_streams, worker_stop).await;
+                });
+                workers.push(worker.abort_handle());
+                push_task(&tasks, &stop, worker);
+            }
+        }
+        tokio::time::sleep(GATE_POLL).await;
+    }
+    abort_handles(&mut workers);
+}
+
+fn abort_handles(handles: &mut Vec<AbortHandle>) {
+    for handle in handles.drain(..) {
+        handle.abort();
+    }
 }
 
 fn push_task(tasks: &Mutex<Vec<JoinHandle<()>>>, stop: &AtomicBool, handle: JoinHandle<()>) {
@@ -79,14 +132,14 @@ async fn accept_worker(
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     stop: Arc<AtomicBool>,
 ) {
-    let mut backoff = Duration::from_millis(250);
-    while !stop.load(Ordering::SeqCst) {
+    let mut backoff = INITIAL_BACKOFF;
+    while !stop.load(Ordering::SeqCst) && server.host().config().enabled {
         match client.accept().await {
             Ok(accept) => {
                 if stop.load(Ordering::SeqCst) {
                     break;
                 }
-                backoff = Duration::from_millis(250);
+                backoff = INITIAL_BACKOFF;
                 let peer = accept.peer_device_id.clone();
                 debug!(peer = %peer, "topaz handed off an inbound stream");
                 let server = server.clone();
@@ -108,7 +161,7 @@ async fn accept_worker(
                 // keep the local daemon fully usable.
                 debug!(error = %e, "no topaz accept connection; retrying");
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(5));
+                backoff = (backoff * 2).min(MAX_BACKOFF);
             }
         }
     }

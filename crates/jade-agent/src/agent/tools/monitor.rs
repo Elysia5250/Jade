@@ -6,7 +6,7 @@ use crate::agent::monitors::{MonitorBroker, MonitorStartSpec};
 use crate::permissions::PermissionEngine;
 use crate::tools_core::resolve_path;
 use anyhow::{bail, Context, Result};
-use jade_proto::{SubmitRequest, TaskSpec, DEFAULT_GROUP};
+use jade_proto::{SubmitRequest, TaskSpec, MONITOR_GROUP};
 use jade_service::{AgentDialer, Remote};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -95,7 +95,7 @@ pub(crate) async fn monitor_tool(
                     cwd: Some(job_cwd),
                     env: Vec::new(),
                     label: args["label"].as_str().map(|s| s.trim().to_string()),
-                    group: DEFAULT_GROUP.to_string(),
+                    group: MONITOR_GROUP.to_string(),
                     timeout_s,
                     sandbox: exec_auth.sandbox,
                 };

@@ -17,7 +17,7 @@ impl App {
         let has_current = self.ui.welcome.as_ref().is_some_and(|w| w.can_return);
 
         let mut sessions = build_session_rows(&self.data_dir, &live, &current_id, has_current);
-        let workspaces = build_workspace_rows(&here, &sessions, &self.data_dir);
+        let workspaces = build_workspace_rows(&here, &sessions);
 
         // Sort: running/queued first, then most recently updated.
         sessions.sort_by(|a, b| {
@@ -63,12 +63,17 @@ impl App {
 
     pub(in crate::tui) fn apply_hub_live_sessions(
         &mut self,
-        list: Vec<jade_agent::runtime::SessionInfo>,
-    ) {
+        mut list: Vec<jade_agent::runtime::SessionInfo>,
+    ) -> bool {
+        list.sort_by(|a, b| a.id.cmp(&b.id));
+        if list == self.inputs.live_sessions {
+            return false;
+        }
         self.inputs.live_sessions = list;
         if self.ui.welcome.is_some() {
             self.reload_hub_lists();
         }
+        true
     }
 
     pub(in crate::tui) fn filtered_hub_sessions(&self) -> Vec<usize> {
@@ -329,10 +334,8 @@ fn build_session_rows(
 fn build_workspace_rows(
     here: &std::path::Path,
     sessions: &[HubSessionRow],
-    data_dir: &std::path::Path,
 ) -> Vec<HubWorkspaceRow> {
     let mut map: BTreeMap<PathBuf, HubWorkspaceRow> = BTreeMap::new();
-    let here_resumes = exact_session_for_cwd(data_dir, here).is_some();
     map.insert(
         here.to_path_buf(),
         HubWorkspaceRow {
@@ -342,7 +345,7 @@ fn build_workspace_rows(
             session_count: 0,
             running_count: 0,
             is_here: true,
-            resumes: here_resumes,
+            resumes: false,
         },
     );
     for s in sessions {

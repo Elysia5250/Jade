@@ -74,6 +74,9 @@ pub const MAX_EXEC_TIMEOUT: u64 = 3600;
 pub const READ_LIMIT: u64 = 4 * 1024 * 1024;
 /// The group every job lands in unless the caller names another.
 pub const DEFAULT_GROUP: &str = "default";
+/// Dedicated group for long-running background monitor jobs so they do not
+/// starve interactive `exec` slots.
+pub const MONITOR_GROUP: &str = "monitor";
 /// Caller id used for same-user local connections (daemon socket).
 pub const LOCAL_CALLER: &str = "local";
 
