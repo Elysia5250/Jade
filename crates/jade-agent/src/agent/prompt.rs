@@ -70,6 +70,64 @@ impl EnvDiskSnapshot {
             Some(parts.join("\n\n"))
         }
     }
+
+    pub(crate) fn note_with_mode(
+        &self,
+        data_dir: &Path,
+        cwd: &Path,
+        permissions: &crate::permissions::PermissionEngine,
+        depth: u8,
+        interactive: bool,
+    ) -> Option<String> {
+        let mut base = self.note(data_dir, permissions.session_id(), depth);
+        if depth != 0 {
+            return base;
+        }
+        let block = active_mode_block(cwd, permissions, interactive);
+        match &mut base {
+            Some(existing) => {
+                existing.push_str("\n\n");
+                existing.push_str(&block);
+            }
+            None => base = Some(block),
+        }
+        base
+    }
+}
+
+fn active_mode_block(
+    cwd: &Path,
+    permissions: &crate::permissions::PermissionEngine,
+    interactive: bool,
+) -> String {
+    use crate::permissions::PermissionMode;
+    let mode = permissions.mode();
+    let mut out = format!("## Active permission mode\nCurrent mode: `{}`.", mode.label());
+    if mode == PermissionMode::Plan {
+        out.push_str(
+            "\nPlan mode is read-only for the workspace (read-only sandboxed shell only; writes are allowed only to `.jade/plans/*.md`).",
+        );
+        if interactive {
+            let restore = permissions.plan_exit_target();
+            if let Some(path) = permissions.latest_plan_file() {
+                let cwd_canon = crate::permissions::paths::canonicalize_with_missing_tail(cwd);
+                let rel = path.strip_prefix(&cwd_canon).unwrap_or(&path);
+                out.push_str(&format!(
+                    "\nWritten plan file: `{}`. When ready to implement, call `mode` with `action: \"exit_plan\"` to request user approval and return to `{}`.",
+                    rel.display(),
+                    restore.label()
+                ));
+            } else {
+                out.push_str(&format!(
+                    "\nWrite a non-empty plan file under `.jade/plans/<name>.md` before calling `mode` with `action: \"exit_plan\"` to request user approval and return to `{}`. Never leave plan mode via `set`.",
+                    restore.label()
+                ));
+            }
+        } else {
+            out.push_str("\nHeadless mode: mode switching is disabled.");
+        }
+    }
+    out
 }
 
 const VOICE: &str = r#"
@@ -121,7 +179,8 @@ pub(crate) fn build_system_prompt(target: &str, cwd: &Path) -> String {
          {}\
          - Use `exec` with a small wait for long commands, then `job` to follow or cancel. Report exact commands, job ids and exit codes; never invent tool output.\n\
          - Whenever a user sends a message or answers an `ask` and your first response calls a tool, always emit one `say` in the same response as the next real tool (for example `收到，先查看相关代码` or `On it, first read the prompt`). Also call `say` when you change phase, start work that will take a while, or the plan changes (for example `正在对列表缩进，接着改代码块对齐` or `Doing the list indent, then the code-block alignment`). Do not spend a turn on `say` alone, do not call it for every file read, and do not restate the request.\n\
-         - Use `ask` when a decision is genuinely ambiguous. Give 2-4 options. The question is at most 22 Chinese characters or 44 Latin letters; each label at most 8 Chinese characters or 16 Latin letters; each description at most 18 Chinese characters or 36 Latin letters, or omit it. Mark exactly one `recommended`. `recommended` only highlights an option; it does not decide for the user.",
+         - Use `ask` when a decision is genuinely ambiguous. Give 2-4 options. The question is at most 22 Chinese characters or 44 Latin letters; each label at most 8 Chinese characters or 16 Latin letters; each description at most 18 Chinese characters or 36 Latin letters, or omit it. Mark exactly one `recommended`. `recommended` only highlights an option; it does not decide for the user.\n\
+         - Only call `mode` when the user explicitly asks to make a plan (`action: \"enter_plan\"`) or explicitly asks to change the permission mode (`action: \"set\"`). Never switch modes or request privilege escalation spontaneously on normal coding tasks.",
         cwd.display(),
         host_line(target),
         super::snapshot::ORIENTATION_RULE

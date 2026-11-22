@@ -230,6 +230,28 @@ fn parse_env_protocol(raw: &str) -> Option<ProviderProtocol> {
     }
 }
 
+/// Parse `K=V,K2=V2` or `K:V,K2:V2` header pairs from `JADE_EXTRA_HEADERS`.
+pub fn parse_extra_headers_env(raw: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for part in raw.split(',') {
+        let item = part.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let split = item
+            .split_once('=')
+            .or_else(|| item.split_once(':'));
+        if let Some((k, v)) = split {
+            let k = k.trim();
+            let v = v.trim();
+            if !k.is_empty() && !v.is_empty() {
+                out.insert(k.to_string(), v.to_string());
+            }
+        }
+    }
+    out
+}
+
 pub(crate) fn merge_env_providers(
     map: &mut BTreeMap<String, StoredProvider>,
     env: &dyn Fn(&str) -> Option<String>,
@@ -258,6 +280,7 @@ pub(crate) fn merge_env_providers(
                 custom_models: Vec::new(),
                 fetched_models: Vec::new(),
                 model_routes: BTreeMap::new(),
+                extra_headers: BTreeMap::new(),
                 updated_ms: 0,
             },
         );
@@ -269,6 +292,9 @@ pub(crate) fn merge_env_providers(
             let protocol = non_empty_env(env, "JADE_PROTOCOL")
                 .and_then(|p| parse_env_protocol(&p))
                 .unwrap_or(ProviderProtocol::OpenAiChat);
+            let extra_headers = non_empty_env(env, "JADE_EXTRA_HEADERS")
+                .map(|raw| parse_extra_headers_env(&raw))
+                .unwrap_or_default();
             map.insert(
                 "custom".to_string(),
                 StoredProvider {
@@ -280,6 +306,7 @@ pub(crate) fn merge_env_providers(
                     custom_models: Vec::new(),
                     fetched_models: Vec::new(),
                     model_routes: BTreeMap::new(),
+                    extra_headers,
                     updated_ms: 0,
                 },
             );
@@ -459,6 +486,7 @@ mod tests {
             custom_models: models.into_iter().map(String::from).collect(),
             fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: now_ms(),
         }
     }

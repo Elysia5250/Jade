@@ -47,17 +47,19 @@ crates/jade-agent/src/
   worktree/               local git worktree management
   auth/                   provider credentials, OAuth/PKCE, routing
   hooks/                  deterministic lifecycle hooks
-  runtime/                daemon-side session runtime, client, attach protocol
+  plugins/                declarative plugin bundles (plugin.json) across Managed/User/Project
+  commands/               custom /command markdown prompt templates
+  runtime/                daemon-side session runtime, MCP pool, client, attach protocol
   agent/
     loop.rs               single agent loop, turn boundaries, overflow retry
-    prompt.rs             system prompt, project instructions, skills & todos injection
+    prompt.rs             system prompt, project instructions, skills, todos & active mode injection
     events.rs             AgentEvent + round-trip tests
     context/              catalog, tiered harness budgets, pruning, summary, tokens
-    tools/                fs, shell, search (glob/grep), web, todo, skill, say/ask
-    providers/            openai-chat, openai-codex, anthropic, SSE
+    tools/                narrow Tool trait/registry + fs, shell, search, web, todo, skill, say/ask/mode
+    providers/            narrow ModelProvider trait/registry + openai-chat, openai-codex, anthropic, SSE
   permissions/            modes, rules, paths, shell, approval, audit
   skills/                 SKILL.md discovery, frontmatter parser, trust gate
-  mcp/                    bidirectional MCP server (stdio) and client (stdio + HTTP/SSE)
+  mcp/                    bidirectional MCP server (stdio) and pooled client (stdio + HTTP/SSE, resources/prompts, deferred search)
 
 crates/jade-cli/src/
   main.rs                 CLI entrypoint and command dispatch
@@ -67,8 +69,8 @@ crates/jade-cli/src/
   tui/
     mod.rs                terminal setup; paint syncs snapshots, then draws
     drive.rs              event-driven console loop
-    inputs.rs             catalog, file preview, and diff snapshots
-    commands.rs           slash command registry (/compact, /handoff, /budget, /permissions, /mcp, /skill, ...)
+    inputs.rs             catalog (including custom /commands), file preview, and diff snapshots
+    commands.rs           slash command registry (/compact, /handoff, /budget, /permissions, /mcp, /plugin, /skill, ...)
     state/                App state, split by concern
     view/                 pure rendering over those snapshots
     links.rs              workspace index, depth-capped, inode-deduped

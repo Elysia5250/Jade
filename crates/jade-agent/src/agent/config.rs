@@ -1,8 +1,11 @@
 //! Turn configuration.
 use super::asks::AskBroker;
 use super::monitors::MonitorBroker;
+use super::providers::ProviderRegistry;
+use super::tools::ToolRegistry;
 use crate::auth::{ModelRef, StoredProvider};
 use crate::hooks::HookEngine;
+use crate::mcp::pool::McpPool;
 use crate::permissions::PermissionEngine;
 use crate::session::ChatMessage;
 use serde_json::Value;
@@ -30,6 +33,12 @@ pub struct TurnConfig {
     pub permissions: Arc<PermissionEngine>,
     /// Optional daemon-side background monitor broker (root turn only).
     pub monitors: Option<Arc<dyn MonitorBroker>>,
+    /// Optional daemon-managed persistent MCP connection pool.
+    pub mcp_pool: Option<Arc<McpPool>>,
+    /// Optional custom tool registry (defaults to built-in tools when `None`).
+    pub tools: Option<Arc<ToolRegistry>>,
+    /// Optional custom provider adapter registry (defaults to built-in protocols when `None`).
+    pub providers: Option<Arc<ProviderRegistry>>,
     /// Deterministic lifecycle hook engine for this session/subagent.
     pub hooks: Option<Arc<HookEngine>>,
     /// Explicit initial `HookContext.state` passed into the turn.

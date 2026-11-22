@@ -114,6 +114,7 @@ fn provider() -> StoredProvider {
         custom_models: Vec::new(),
         fetched_models: Vec::new(),
         model_routes: Default::default(),
+        extra_headers: Default::default(),
         updated_ms: 0,
     }
 }
@@ -491,10 +492,7 @@ fn mid_turn_synthetic_env_preserves_reasoning_and_empty_tools_omitted() {
         "sys",
         &history,
         None,
-        &ToolFilter {
-            depth: 0,
-            allowed: Some(Vec::new()),
-        },
+        &ToolFilter::none(),
         &[],
         "sess-empty",
     );

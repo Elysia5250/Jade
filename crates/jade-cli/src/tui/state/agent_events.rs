@@ -395,7 +395,11 @@ impl App {
                 self.set_toast("started clean handoff session", false);
             }
             AgentEvent::PermissionModeChanged { mode } => {
+                let changed = self.session.perm_mode != mode;
                 self.session.perm_mode = mode;
+                if changed && !self.agent.skip_replay_tokens {
+                    self.set_toast(format!("permissions: {}", mode.label()), false);
+                }
             }
             AgentEvent::FileChanged {
                 path,

@@ -15,6 +15,7 @@ pub(crate) enum SlashCmdKind {
     Plan,
     Trust,
     Mcp,
+    Plugin,
     Skill,
     Cd,
     Worktree,
@@ -44,6 +45,13 @@ pub(crate) struct SlashCommand {
     pub aliases: &'static [&'static str],
     pub args: &'static str,
     pub about: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SlashMenuItem<'a> {
+    pub name: &'a str,
+    pub args: &'a str,
+    pub about: &'a str,
 }
 
 pub(crate) fn lookup_slash(name: &str) -> Option<SlashCmdKind> {
@@ -144,6 +152,13 @@ pub(crate) const SLASH_COMMANDS: &[SlashCommand] = &[
         aliases: &[],
         args: "[probe]",
         about: "inspect configured MCP servers or probe live tools",
+    },
+    SlashCommand {
+        kind: SlashCmdKind::Plugin,
+        name: "plugin",
+        aliases: &["plugins"],
+        args: "[list|inspect|enable|disable <id>]",
+        about: "list, inspect, or toggle declarative plugins",
     },
     SlashCommand {
         kind: SlashCmdKind::Skill,

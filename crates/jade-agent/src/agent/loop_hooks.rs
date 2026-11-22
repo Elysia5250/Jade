@@ -13,7 +13,7 @@ use crate::hooks::{
     confirm_hook_ask, emit_hook_event, HookContext, HookDecision, HookEngine, HookEvent,
     MAX_STOP_HOOK_REENTRIES,
 };
-use crate::mcp::client::McpManager;
+use crate::mcp::extras::McpTurnView;
 use crate::permissions::PermissionEngine;
 use crate::session::{ChatMessage, ChatRole, ToolCall};
 use anyhow::{bail, Result};
@@ -157,105 +157,113 @@ impl TurnHookSession {
     ) -> Vec<PreparedTool> {
         let mut prepared = Vec::with_capacity(tool_calls.len());
         for tc in tool_calls {
-            let args: Value = match serde_json::from_str(&tc.arguments) {
-                Ok(value) => value,
-                Err(err) => {
-                    prepared.push(PreparedTool {
-                        call: tc.clone(),
-                        effective_args: Value::Null,
-                        blocked_error: Some(format!(
-                            "invalid JSON tool arguments for `{}`: {err}",
-                            tc.name
-                        )),
-                        pre_context: Vec::new(),
-                    });
-                    continue;
-                }
-            };
-            let Some(engine) = &self.engine else {
-                prepared.push(PreparedTool {
-                    call: tc.clone(),
-                    effective_args: args,
-                    blocked_error: None,
-                    pre_context: Vec::new(),
-                });
-                continue;
-            };
-
-            let mut ctx = self.base_ctx(HookEvent::PreToolUse, step);
-            ctx.tool_name = Some(tc.name.clone());
-            ctx.tool_call_id = Some(tc.id.clone());
-            ctx.tool_input = Some(args.clone());
-
-            let out = engine.dispatch(ctx).await;
-            emit_hook_event(tx, &out);
-            self.state = out.state;
-
-            let mut effective_args = out.tool_input.unwrap_or(args);
-            let mut pre_context = out.additional_context;
-            let mut blocked_error = match out.decision {
-                HookDecision::Continue => None,
-                HookDecision::Ask { reason, by, .. } => {
-                    confirm_hook_ask(asks, tx, HookEvent::PreToolUse, &reason, &by)
-                        .await
-                        .err()
-                }
-                HookDecision::Block { reason, .. } | HookDecision::Deny { reason, .. } => {
-                    Some(format!("blocked by PreToolUse hook: {reason}"))
-                }
-            };
-
-            if blocked_error.is_none()
-                && tc.name == "monitor"
-                && effective_args["action"].as_str() == Some("start")
-            {
-                if let Some(cmd) = effective_args["command"]
-                    .as_str()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    let mut exec_input = json!({ "command": cmd });
-                    if let Some(raw_cwd) = effective_args["cwd"].as_str() {
-                        exec_input["cwd"] = Value::String(raw_cwd.to_string());
-                    }
-                    let mut exec_ctx = self.base_ctx(HookEvent::PreToolUse, step);
-                    exec_ctx.tool_name = Some("exec".into());
-                    exec_ctx.tool_call_id = Some(tc.id.clone());
-                    exec_ctx.tool_input = Some(exec_input);
-                    let exec_out = engine.dispatch(exec_ctx).await;
-                    emit_hook_event(tx, &exec_out);
-                    self.state = exec_out.state;
-                    pre_context.extend(exec_out.additional_context);
-                    if let Some(updated) = exec_out.tool_input {
-                        if let Some(new_cmd) = updated.get("command").and_then(Value::as_str) {
-                            effective_args["command"] = Value::String(new_cmd.to_string());
-                        }
-                        if let Some(new_cwd) = updated.get("cwd").and_then(Value::as_str) {
-                            effective_args["cwd"] = Value::String(new_cwd.to_string());
-                        }
-                    }
-                    blocked_error = match exec_out.decision {
-                        HookDecision::Continue => None,
-                        HookDecision::Ask { reason, by, .. } => {
-                            confirm_hook_ask(asks, tx, HookEvent::PreToolUse, &reason, &by)
-                                .await
-                                .err()
-                        }
-                        HookDecision::Block { reason, .. } | HookDecision::Deny { reason, .. } => {
-                            Some(format!("blocked by PreToolUse hook: {reason}"))
-                        }
-                    };
-                }
-            }
-
-            prepared.push(PreparedTool {
-                call: tc.clone(),
-                effective_args,
-                blocked_error,
-                pre_context,
-            });
+            prepared.push(self.prepare_single_tool(step, tc, asks, tx).await);
         }
         prepared
+    }
+
+    async fn prepare_single_tool(
+        &mut self,
+        step: usize,
+        tc: &ToolCall,
+        asks: &Arc<AskBroker>,
+        tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) -> PreparedTool {
+        let args: Value = match serde_json::from_str(&tc.arguments) {
+            Ok(value) => value,
+            Err(err) => {
+                return PreparedTool {
+                    call: tc.clone(),
+                    effective_args: Value::Null,
+                    blocked_error: Some(format!(
+                        "invalid JSON tool arguments for `{}`: {err}",
+                        tc.name
+                    )),
+                    pre_context: Vec::new(),
+                };
+            }
+        };
+        let Some(engine) = &self.engine else {
+            return PreparedTool {
+                call: tc.clone(),
+                effective_args: args,
+                blocked_error: None,
+                pre_context: Vec::new(),
+            };
+        };
+
+        let mut ctx = self.base_ctx(HookEvent::PreToolUse, step);
+        ctx.tool_name = Some(tc.name.clone());
+        ctx.tool_call_id = Some(tc.id.clone());
+        ctx.tool_input = Some(args.clone());
+
+        let out = engine.dispatch(ctx).await;
+        emit_hook_event(tx, &out);
+        self.state = out.state;
+
+        let mut effective_args = out.tool_input.unwrap_or(args);
+        let mut pre_context = out.additional_context;
+        let mut blocked_error = match out.decision {
+            HookDecision::Continue => None,
+            HookDecision::Ask { reason, by, .. } => {
+                confirm_hook_ask(asks, tx, HookEvent::PreToolUse, &reason, &by)
+                    .await
+                    .err()
+            }
+            HookDecision::Block { reason, .. } | HookDecision::Deny { reason, .. } => {
+                Some(format!("blocked by PreToolUse hook: {reason}"))
+            }
+        };
+
+        if blocked_error.is_none()
+            && tc.name == "monitor"
+            && effective_args["action"].as_str() == Some("start")
+        {
+            if let Some(cmd) = effective_args["command"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let mut exec_input = json!({ "command": cmd });
+                if let Some(raw_cwd) = effective_args["cwd"].as_str() {
+                    exec_input["cwd"] = Value::String(raw_cwd.to_string());
+                }
+                let mut exec_ctx = self.base_ctx(HookEvent::PreToolUse, step);
+                exec_ctx.tool_name = Some("exec".into());
+                exec_ctx.tool_call_id = Some(tc.id.clone());
+                exec_ctx.tool_input = Some(exec_input);
+                let exec_out = engine.dispatch(exec_ctx).await;
+                emit_hook_event(tx, &exec_out);
+                self.state = exec_out.state;
+                pre_context.extend(exec_out.additional_context);
+                if let Some(updated) = exec_out.tool_input {
+                    if let Some(new_cmd) = updated.get("command").and_then(Value::as_str) {
+                        effective_args["command"] = Value::String(new_cmd.to_string());
+                    }
+                    if let Some(new_cwd) = updated.get("cwd").and_then(Value::as_str) {
+                        effective_args["cwd"] = Value::String(new_cwd.to_string());
+                    }
+                }
+                blocked_error = match exec_out.decision {
+                    HookDecision::Continue => None,
+                    HookDecision::Ask { reason, by, .. } => {
+                        confirm_hook_ask(asks, tx, HookEvent::PreToolUse, &reason, &by)
+                            .await
+                            .err()
+                    }
+                    HookDecision::Block { reason, .. } | HookDecision::Deny { reason, .. } => {
+                        Some(format!("blocked by PreToolUse hook: {reason}"))
+                    }
+                };
+            }
+        }
+
+        PreparedTool {
+            call: tc.clone(),
+            effective_args,
+            blocked_error,
+            pre_context,
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -428,17 +436,19 @@ impl TurnHookSession {
         tx: &mpsc::UnboundedSender<AgentEvent>,
         asks: &Arc<AskBroker>,
         permissions: &Arc<PermissionEngine>,
-        mcp: Option<&McpManager>,
+        mcp: Option<&McpTurnView>,
+        tools: Option<&crate::agent::tools::ToolRegistry>,
         tool_filter: &mut ToolFilter,
         subagent_host: Option<&SubagentHost>,
         monitors: Option<&Arc<dyn MonitorBroker>>,
     ) -> (u64, u64) {
         let all_readonly_batch = batch_is_parallel_readonly(tool_calls);
 
-        let prepared = self.prepare_tool_batch(step, tool_calls, asks, tx).await;
-        let shared_filter = &*tool_filter;
-
-        let outcomes: Vec<ToolExecOutcome> = if all_readonly_batch {
+        let (prepared, outcomes): (Vec<PreparedTool>, Vec<ToolExecOutcome>) = if all_readonly_batch
+        {
+            self.permission_mode = permissions.mode().label().to_string();
+            let prepared = self.prepare_tool_batch(step, tool_calls, asks, tx).await;
+            let shared_filter = &*tool_filter;
             let limit = Arc::new(tokio::sync::Semaphore::new(READONLY_BATCH_LIMIT));
             let futs = prepared.iter().map(|p| {
                 let limit = Arc::clone(&limit);
@@ -454,6 +464,7 @@ impl TurnHookSession {
                         asks,
                         permissions,
                         mcp,
+                        tools,
                         shared_filter,
                         subagent_host,
                         monitors,
@@ -461,10 +472,14 @@ impl TurnHookSession {
                     .await
                 }
             });
-            join_all(futs).await
+            let outcomes = join_all(futs).await;
+            (prepared, outcomes)
         } else {
-            let mut seq_outcomes = Vec::with_capacity(prepared.len());
-            for p in &prepared {
+            let mut prepared = Vec::with_capacity(tool_calls.len());
+            let mut seq_outcomes = Vec::with_capacity(tool_calls.len());
+            for tc in tool_calls {
+                self.permission_mode = permissions.mode().label().to_string();
+                let p = self.prepare_single_tool(step, tc, asks, tx).await;
                 let snapshot = if p.call.name == "delegate" {
                     Some(self.state.clone())
                 } else {
@@ -474,25 +489,32 @@ impl TurnHookSession {
                     remote,
                     target,
                     cwd,
-                    p,
+                    &p,
                     snapshot,
                     tx,
                     asks,
                     permissions,
                     mcp,
-                    shared_filter,
+                    tools,
+                    &*tool_filter,
                     subagent_host,
                     monitors,
                 )
                 .await;
+                self.permission_mode = permissions.mode().label().to_string();
                 if let Some(next_state) = &outcome.updated_hook_state {
                     self.state = next_state.clone();
                 }
+                if let Some(names) = &outcome.skill_allow {
+                    tool_filter.restrict_to(names);
+                }
+                prepared.push(p);
                 seq_outcomes.push(outcome);
             }
-            seq_outcomes
+            (prepared, seq_outcomes)
         };
 
+        self.permission_mode = permissions.mode().label().to_string();
         for outcome in &outcomes {
             if let Some(names) = &outcome.skill_allow {
                 tool_filter.restrict_to(names);

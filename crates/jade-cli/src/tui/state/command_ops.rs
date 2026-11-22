@@ -158,6 +158,119 @@ impl App {
         self.push_notice(lines.join("\n"), false);
     }
 
+    pub(in crate::tui) fn run_plugin_command(&mut self, arg: &str) {
+        let trimmed = arg.trim();
+        let (sub, rest) = match trimmed.split_once(char::is_whitespace) {
+            Some((s, r)) => (s, r.trim()),
+            None => (trimmed, ""),
+        };
+        match sub {
+            "" | "list" => {
+                let report = jade_agent::plugins::discover_plugins(
+                    &self.data_dir,
+                    &self.session.current.cwd,
+                );
+                let mut lines = Vec::new();
+                for p in &report.skipped_untrusted {
+                    lines.push(format!(
+                        "skipped untrusted plugin: {} (run `/trust on` to enable)",
+                        p.display()
+                    ));
+                }
+                for p in &report.plugins {
+                    lines.push(format!(
+                        "{} v{} [{} · {}] {}",
+                        p.id,
+                        p.version,
+                        p.scope.label(),
+                        if p.enabled { "enabled" } else { "disabled" },
+                        p.description
+                    ));
+                }
+                if lines.is_empty() {
+                    lines.push("Plugins: none installed (~/.jade/plugins or .jade/plugins)".into());
+                }
+                self.push_notice(lines.join("\n"), false);
+            }
+            "enable" if !rest.is_empty() => {
+                match jade_agent::plugins::set_plugin_enabled(&self.data_dir, rest, true) {
+                    Ok(()) => {
+                        self.inputs.invalidate_catalog();
+                        self.set_toast(format!("plugin enabled: {rest}"), false);
+                    }
+                    Err(e) => self.set_toast(format!("{e:#}"), true),
+                }
+            }
+            "disable" if !rest.is_empty() => {
+                let report = jade_agent::plugins::discover_plugins(
+                    &self.data_dir,
+                    &self.session.current.cwd,
+                );
+                if report.plugins.iter().any(|p| {
+                    p.id.eq_ignore_ascii_case(rest)
+                        && p.scope == jade_agent::plugins::PluginScope::Managed
+                }) {
+                    self.set_toast(format!("cannot disable managed plugin `{rest}`"), true);
+                    return;
+                }
+                match jade_agent::plugins::set_plugin_enabled(&self.data_dir, rest, false) {
+                    Ok(()) => {
+                        self.inputs.invalidate_catalog();
+                        self.set_toast(format!("plugin disabled: {rest}"), false);
+                    }
+                    Err(e) => self.set_toast(format!("{e:#}"), true),
+                }
+            }
+            "inspect" if !rest.is_empty() => {
+                let report = jade_agent::plugins::discover_plugins(
+                    &self.data_dir,
+                    &self.session.current.cwd,
+                );
+                let Some(p) = report
+                    .plugins
+                    .into_iter()
+                    .find(|p| p.id.eq_ignore_ascii_case(rest))
+                else {
+                    self.set_toast(format!("unknown plugin: {rest}"), true);
+                    return;
+                };
+                let mut lines = vec![format!(
+                    "{} ({}) v{} [{}]",
+                    p.name,
+                    p.id,
+                    p.version,
+                    p.scope.label()
+                )];
+                if p.skills_dir.is_some() {
+                    lines.push("  component: skills".into());
+                }
+                if p.agents_dir.is_some() {
+                    lines.push("  component: agents".into());
+                }
+                if p.commands_dir.is_some() {
+                    lines.push("  component: commands".into());
+                }
+                if p.hooks_file.is_some() {
+                    lines.push("  component: hooks".into());
+                }
+                if p.mcp_file.is_some() {
+                    lines.push("  component: mcp".into());
+                }
+                if p.permissions_file.is_some() {
+                    lines.push("  component: permissions (deny/ask active)".into());
+                }
+                if !p.suggested_allows.is_empty() {
+                    lines.push(format!(
+                        "  suggested allows (not auto-applied): {}",
+                        p.suggested_allows.join(", ")
+                    ));
+                }
+                self.push_notice(lines.join("\n"), false);
+            }
+            _ => self.set_toast("usage: /plugin [list|inspect <id>|enable <id>|disable <id>]", true),
+        }
+    }
+
     pub(in crate::tui) fn run_skill_command(&mut self, arg: &str) {
         let name = arg.trim();
         if name.is_empty() {

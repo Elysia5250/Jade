@@ -11,6 +11,7 @@ mod auth_cli;
 mod cli_ops;
 mod headless;
 mod mcp_cli;
+mod plugin_cli;
 mod tui;
 
 mod cli_args;
@@ -256,6 +257,22 @@ async fn main() -> Result<()> {
         Commands::Login => auth_cli::cmd_auth_login(&ctx.data_dir).await,
         Commands::Auth { cmd } => match cmd {
             AuthCmd::Login => auth_cli::cmd_auth_login(&ctx.data_dir).await,
+            AuthCmd::Add {
+                id,
+                base_url,
+                protocol,
+                api_key,
+                models,
+                headers,
+            } => auth_cli::cmd_auth_add(
+                &ctx.data_dir,
+                id,
+                base_url,
+                protocol,
+                api_key,
+                models,
+                headers,
+            ),
             AuthCmd::List => auth_cli::cmd_auth_list(&ctx.data_dir).await,
             AuthCmd::Logout { provider } => {
                 auth_cli::cmd_auth_logout(&ctx.data_dir, provider).await
@@ -321,6 +338,7 @@ async fn main() -> Result<()> {
         Commands::Mcp { cmd } => {
             mcp_cli::cmd_mcp(ctx.data_dir.clone(), cmd, ctx.conduit.clone()).await
         }
+        Commands::Plugin { cmd } => plugin_cli::cmd_plugin(&ctx.data_dir, &ctx.cwd, cmd),
     }
 }
 

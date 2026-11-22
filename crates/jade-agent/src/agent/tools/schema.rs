@@ -1,7 +1,40 @@
-//! Tool schemas for the three wire protocols.
+//! Tool schemas for the three wire protocols, projected from [`ToolSpec`].
+use super::registry::ToolSpec;
 use serde_json::{json, Value};
 
+pub(crate) fn builtin_tool_specs() -> Vec<ToolSpec> {
+    let mutating = |name: &str| {
+        matches!(
+            name,
+            "exec" | "write" | "edit" | "job" | "todo" | "monitor" | "delegate"
+        )
+    };
+    raw_builtin_tools_json()
+        .into_iter()
+        .filter_map(|v| {
+            let f = v.get("function")?;
+            let name = f["name"].as_str()?.to_string();
+            let description = f["description"].as_str().unwrap_or("").to_string();
+            let parameters = f.get("parameters").cloned().unwrap_or_else(|| json!({}));
+            let mutates = mutating(&name);
+            Some(ToolSpec {
+                name,
+                description,
+                parameters,
+                mutates,
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn openai_tools_json() -> Vec<Value> {
+    builtin_tool_specs()
+        .iter()
+        .map(ToolSpec::to_openai_json)
+        .collect()
+}
+
+fn raw_builtin_tools_json() -> Vec<Value> {
     vec![
         json!({
             "type": "function",
@@ -285,13 +318,31 @@ pub(crate) fn openai_tools_json() -> Vec<Value> {
                 }
             }
         }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": "mode",
+                "description": "Switch the active session permission mode (`enter_plan`, `exit_plan`, or `set`). Only call when the user explicitly asks to make a plan or explicitly requests changing permission mode. Downgrades apply immediately with a notice; upgrades require user confirmation. `exit_plan` requires a non-empty plan file written under `.jade/plans/*.md` during the current plan cycle and restores the pre-plan mode (or `accept-edits` if started in plan). Never request `turbo`, and never leave `plan` via `set`.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["enter_plan", "exit_plan", "set"] },
+                        "target": { "type": "string", "enum": ["plan", "default", "accept-edits", "auto"], "description": "Target mode (required when action=set; `turbo` is forbidden)." },
+                        "reason": { "type": "string", "description": "Short reason shown to the user and recorded in the audit log." },
+                        "plan_path": { "type": "string", "description": "Optional `.jade/plans/*.md` path written during this plan cycle (when action=exit_plan; defaults to the last written plan file)." }
+                    },
+                    "required": ["action"]
+                }
+            }
+        }),
     ]
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ToolFilter {
-    pub(crate) depth: u8,
-    pub(crate) allowed: Option<Vec<String>>,
+pub struct ToolFilter {
+    pub depth: u8,
+    pub allowed: Option<Vec<String>>,
+    pub non_interactive: bool,
 }
 
 impl ToolFilter {
@@ -300,11 +351,15 @@ impl ToolFilter {
         Self {
             depth: 0,
             allowed: Some(Vec::new()),
+            non_interactive: false,
         }
     }
 
     pub(crate) fn allows(&self, name: &str) -> bool {
-        if self.depth > 0 && matches!(name, "delegate" | "monitor") {
+        if self.depth > 0 && matches!(name, "delegate" | "monitor" | "mode") {
+            return false;
+        }
+        if self.non_interactive && name == "mode" {
             return false;
         }
         if let Some(allowed) = &self.allowed {
@@ -336,7 +391,14 @@ pub(crate) fn openai_tools_json_filtered(
     extra: &[Value],
 ) -> Vec<Value> {
     let mut all = openai_tools_json();
-    all.extend(extra.iter().cloned());
+    // Extra schemas (custom registry overrides or MCP tools) replace any built-in
+    // sharing the same name so embedders can cleanly override tool schemas.
+    for item in extra {
+        if let Some(name) = item["function"]["name"].as_str() {
+            all.retain(|existing| existing["function"]["name"].as_str() != Some(name));
+        }
+        all.push(item.clone());
+    }
     all.into_iter()
         .filter(|t| {
             let Some(name) = t["function"]["name"].as_str() else {
@@ -400,7 +462,13 @@ mod tests {
 
         let child_filter = ToolFilter {
             depth: 1,
-            allowed: Some(vec!["read".into(), "grep".into(), "delegate".into()]),
+            allowed: Some(vec![
+                "read".into(),
+                "grep".into(),
+                "delegate".into(),
+                "mode".into(),
+            ]),
+            non_interactive: false,
         };
         let child_tools = openai_tools_json_filtered(None, &child_filter, &[]);
         let names: Vec<&str> = child_tools
@@ -408,6 +476,16 @@ mod tests {
             .filter_map(|t| t["function"]["name"].as_str())
             .collect();
         assert_eq!(names, vec!["read", "grep"]);
+
+        let headless_filter = ToolFilter {
+            depth: 0,
+            allowed: None,
+            non_interactive: true,
+        };
+        let headless_tools = openai_tools_json_filtered(None, &headless_filter, &[]);
+        assert!(!headless_tools
+            .iter()
+            .any(|t| t["function"]["name"] == "mode"));
     }
 
     #[test]
@@ -427,6 +505,7 @@ mod tests {
         let mut narrow = ToolFilter {
             depth: 0,
             allowed: Some(vec!["read".into()]),
+            non_interactive: false,
         };
         narrow.restrict_to(&["grep".into()]);
         assert!(!narrow.allows("read"));

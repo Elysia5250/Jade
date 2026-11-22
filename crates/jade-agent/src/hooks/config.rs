@@ -96,7 +96,12 @@ fn effective_timeout_ms(event: HookEvent, raw: Option<u64>) -> u64 {
         .clamp(100, MAX_HOOK_TIMEOUT_MS)
 }
 
-fn push_scope_rules(scope: HookScope, file: HooksFile, out: &mut Vec<HookRule>) {
+fn push_scope_rules(
+    scope: HookScope,
+    id_prefix: Option<&str>,
+    file: HooksFile,
+    out: &mut Vec<HookRule>,
+) {
     for (ev_name, entries) in file.hooks {
         let Some(event) = HookEvent::parse(&ev_name) else {
             continue;
@@ -105,10 +110,14 @@ fn push_scope_rules(scope: HookScope, file: HooksFile, out: &mut Vec<HookRule>) 
             if !entry.enabled || entry.command.trim().is_empty() {
                 continue;
             }
-            let id = entry
+            let raw_id = entry
                 .id
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| format!("{}:{}:{}", scope.label(), event.label(), decl_index));
+            let id = match id_prefix {
+                Some(prefix) => format!("{prefix}{raw_id}"),
+                None => raw_id,
+            };
             let fail_closed = entry.fail_closed.unwrap_or_else(|| {
                 scope == HookScope::Managed
                     && !matches!(event.capability(), StageCapability::ObserveOnly)
@@ -154,21 +163,61 @@ pub fn load_hooks_checked(
 ) -> LoadedHooks {
     let mut rules = Vec::new();
     let mut managed_error = None;
+    let plugins = crate::plugins::enabled_plugins(data_dir, cwd);
 
     let managed_path = managed_hooks_path(managed_override);
     match read_hooks_file_strict(&managed_path) {
-        Ok(Some(file)) => push_scope_rules(HookScope::Managed, file, &mut rules),
+        Ok(Some(file)) => push_scope_rules(HookScope::Managed, None, file, &mut rules),
         Ok(None) => {}
         Err(err) => managed_error = Some(err),
     }
+    for p in plugins
+        .iter()
+        .filter(|p| p.scope == crate::plugins::PluginScope::Managed)
+    {
+        if let Some(file) = p.hooks_file.as_deref().and_then(read_hooks_file) {
+            push_scope_rules(
+                HookScope::Managed,
+                Some(&format!("plugin:{}:", p.id)),
+                file,
+                &mut rules,
+            );
+        }
+    }
 
     if let Some(file) = read_hooks_file(&user_hooks_path(data_dir)) {
-        push_scope_rules(HookScope::User, file, &mut rules);
+        push_scope_rules(HookScope::User, None, file, &mut rules);
+    }
+    for p in plugins
+        .iter()
+        .filter(|p| p.scope == crate::plugins::PluginScope::User)
+    {
+        if let Some(file) = p.hooks_file.as_deref().and_then(read_hooks_file) {
+            push_scope_rules(
+                HookScope::User,
+                Some(&format!("plugin:{}:", p.id)),
+                file,
+                &mut rules,
+            );
+        }
     }
 
     if trusted {
         if let Some(file) = read_hooks_file(&project_hooks_path(cwd)) {
-            push_scope_rules(HookScope::Project, file, &mut rules);
+            push_scope_rules(HookScope::Project, None, file, &mut rules);
+        }
+        for p in plugins
+            .iter()
+            .filter(|p| p.scope == crate::plugins::PluginScope::Project)
+        {
+            if let Some(file) = p.hooks_file.as_deref().and_then(read_hooks_file) {
+                push_scope_rules(
+                    HookScope::Project,
+                    Some(&format!("plugin:{}:", p.id)),
+                    file,
+                    &mut rules,
+                );
+            }
         }
     }
 

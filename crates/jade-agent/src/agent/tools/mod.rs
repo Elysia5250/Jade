@@ -5,7 +5,7 @@ use super::events::AgentEvent;
 use super::loop_hooks::PreparedTool;
 use super::monitors::MonitorBroker;
 use super::subagent::SubagentHost;
-use crate::mcp::client::McpManager;
+use crate::mcp::extras::McpTurnView;
 use crate::permissions::PermissionEngine;
 use anyhow::anyhow;
 use jade_service::{AgentDialer, Remote};
@@ -18,7 +18,9 @@ use tokio::sync::mpsc;
 
 mod ask;
 mod fs;
+mod mode;
 mod monitor;
+pub mod registry;
 mod schema;
 mod search;
 mod shell;
@@ -27,12 +29,16 @@ mod subagent;
 pub mod todo;
 pub(crate) mod web;
 
+pub use registry::{Tool, ToolExecContext, ToolExecResult, ToolRegistry, ToolSpec};
+pub use schema::ToolFilter;
+
 pub(crate) use ask::ask_tool;
 use fs::{edit_tool, ls_tool, read_tool, write_tool};
+use mode::{mode_tool, summarize_mode};
 use monitor::{monitor_tool, summarize_monitor};
 pub(crate) use schema::{
     anthropic_tools_json_filtered, openai_tools_json, openai_tools_json_filtered,
-    responses_tools_json_filtered, ToolFilter,
+    responses_tools_json_filtered,
 };
 use search::{glob_tool, grep_tool};
 use shell::{exec_tool, job_tool};
@@ -110,6 +116,24 @@ fn summarize_tool(name: &str, args: &Value) -> (String, String) {
         ),
         "delegate" => summarize_delegate(args),
         "monitor" => summarize_monitor(args),
+        "mode" => summarize_mode(args),
+        "mcp_search" => (
+            format!("mcp search {}", args["query"].as_str().unwrap_or("")),
+            String::new(),
+        ),
+        "mcp_resource" => (
+            format!(
+                "mcp resource {} {}",
+                args["action"].as_str().unwrap_or(""),
+                args["uri"]
+                    .as_str()
+                    .or_else(|| args["server"].as_str())
+                    .unwrap_or("")
+            )
+            .trim()
+            .to_string(),
+            String::new(),
+        ),
         mcp if mcp.starts_with("mcp__") => (
             mcp.trim_start_matches("mcp__").replace("__", ":"),
             String::new(),
@@ -128,14 +152,19 @@ pub(crate) async fn run_prepared_tool_call(
     tx: &mpsc::UnboundedSender<AgentEvent>,
     asks: &Arc<AskBroker>,
     permissions: &Arc<PermissionEngine>,
-    mcp: Option<&McpManager>,
+    mcp: Option<&McpTurnView>,
+    tools: Option<&ToolRegistry>,
     tool_filter: &ToolFilter,
     subagent_host: Option<&SubagentHost>,
     monitors: Option<&Arc<dyn MonitorBroker>>,
 ) -> ToolExecOutcome {
     let tc = &prepared.call;
     let args = &prepared.effective_args;
-    let (title, subtitle) = summarize_tool(&tc.name, args);
+    let custom_tool = tools.and_then(|r| r.get_custom(&tc.name));
+    let (title, subtitle) = match &custom_tool {
+        Some(tool) => tool.summarize(args),
+        None => summarize_tool(&tc.name, args),
+    };
     let _ = tx.send(AgentEvent::ToolStart {
         call_id: tc.id.clone(),
         name: tc.name.clone(),
@@ -153,13 +182,28 @@ pub(crate) async fn run_prepared_tool_call(
     } else if !tool_filter.allows(&tc.name) {
         Err(anyhow!("tool `{}` is not enabled for this agent", tc.name))
     } else {
-        let mcp_id = mcp.and_then(|m| m.tool_identity(&tc.name));
+        let mcp_id = mcp.and_then(|m| m.manager().tool_identity(&tc.name));
+        let mcp_id_ref = mcp_id.as_ref().map(|(s, t)| (s.as_str(), t.as_str()));
         match permissions
-            .authorize_tool_call_with_mcp(&tc.name, args, mcp_id, asks, tx)
+            .authorize_tool_call_with_mcp(&tc.name, args, mcp_id_ref, asks, tx)
             .await
         {
             Err(e) => Err(e),
-            Ok(auth) => match tc.name.as_str() {
+            Ok(auth) => if let Some(tool) = custom_tool {
+                let ctx = ToolExecContext {
+                    call_id: &tc.id,
+                    cwd,
+                    target,
+                    data_dir: permissions.data_dir(),
+                    session_id: permissions.session_id(),
+                    permissions,
+                    tx,
+                };
+                tool.execute(&ctx, args.clone())
+                    .await
+                    .map(|r| (r.text, r.exit_code))
+            } else {
+                match tc.name.as_str() {
                 "ask" => ask_tool(asks, tx, args).await.map(|s| (s, None)),
                 "exec" => exec_tool(remote, target, cwd, &tc.id, args, auth.sandbox, tx).await,
                 "read" => read_tool(remote, target, cwd, args)
@@ -170,6 +214,8 @@ pub(crate) async fn run_prepared_tool_call(
                     {
                         Ok((msg, snap)) => {
                             if let Some(s) = snap {
+                                permissions
+                                    .record_plan_file_write(&s.path, !s.after.trim().is_empty());
                                 let (added, removed) =
                                     crate::session::compute_diff_counts(&s.before, &s.after);
                                 let _ = tx.send(AgentEvent::FileChanged {
@@ -192,6 +238,7 @@ pub(crate) async fn run_prepared_tool_call(
                 {
                     Ok((msg, snap)) => {
                         if let Some(s) = snap {
+                            permissions.record_plan_file_write(&s.path, !s.after.trim().is_empty());
                             let (added, removed) =
                                 crate::session::compute_diff_counts(&s.before, &s.after);
                             let _ = tx.send(AgentEvent::FileChanged {
@@ -252,6 +299,9 @@ pub(crate) async fn run_prepared_tool_call(
                         .await
                         .map(|s| (s, None))
                 }
+                "mode" => mode_tool(target, cwd, args, asks, permissions, tx)
+                    .await
+                    .map(|s| (s, None)),
                 "say" => {
                     let text = args["text"].as_str().unwrap_or("").trim().to_string();
                     let kind = args["kind"].as_str().unwrap_or("progress").to_string();
@@ -260,14 +310,32 @@ pub(crate) async fn run_prepared_tool_call(
                     }
                     Ok(("ok".to_string(), None))
                 }
+                "mcp_search" => {
+                    if let Some(view) = mcp {
+                        view.search_and_activate(args).map(|s| (s, None))
+                    } else {
+                        Err(anyhow!("MCP client manager not available"))
+                    }
+                }
+                "mcp_resource" => {
+                    if let Some(view) = mcp {
+                        view.call_resource_tool(args).await.map(|s| (s, None))
+                    } else {
+                        Err(anyhow!("MCP client manager not available"))
+                    }
+                }
                 name if name.starts_with("mcp__") => {
-                    if let Some(mgr) = mcp {
-                        mgr.call_tool(name, args.clone()).await.map(|s| (s, None))
+                    if let Some(view) = mcp {
+                        view.manager()
+                            .call_tool(name, args.clone())
+                            .await
+                            .map(|s| (s, None))
                     } else {
                         Err(anyhow!("MCP client manager not available for `{name}`"))
                     }
                 }
                 other => Err(anyhow!("unknown tool `{other}`")),
+                }
             },
         }
     };

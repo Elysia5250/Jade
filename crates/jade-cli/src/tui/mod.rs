@@ -37,7 +37,7 @@ mod ui_prefs;
 mod view;
 
 pub(crate) use app_state::{AgentState, JobState, LoginState, SessionState, UiState};
-pub(crate) use commands::{lookup_slash, SlashCmdKind, SlashCommand, SLASH_COMMANDS};
+pub(crate) use commands::{lookup_slash, SlashCmdKind, SlashMenuItem, SLASH_COMMANDS};
 pub(crate) use decrypt::*;
 pub(crate) use markdown::*;
 pub(crate) use modals::*;

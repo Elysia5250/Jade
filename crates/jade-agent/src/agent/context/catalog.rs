@@ -634,6 +634,7 @@ mod tests {
             custom_models: vec!["deepseek-v4.1-flash".into()],
             fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: 0,
         };
         crate::auth::record_provider_login(&dir, sp, Some("deepseek-v4.1-flash".into())).unwrap();

@@ -65,7 +65,7 @@ pub(crate) async fn stream_openai_chat(
             .header("Editor-Version", "vscode/1.99.0")
             .header("Copilot-Integration-Id", "vscode-chat");
     }
-    req = super::apply_opencode_session(req, provider, session_id);
+    req = super::apply_extra_headers(req, provider, session_id);
 
     let resp = post_chat_retrying_stream_options(req, &mut body).await?;
 
@@ -279,6 +279,7 @@ mod tests {
             custom_models: vec![],
             fetched_models: vec![],
             model_routes: Default::default(),
+            extra_headers: Default::default(),
             updated_ms: 0,
         };
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -335,6 +336,7 @@ mod tests {
             custom_models: vec![],
             fetched_models: vec![],
             model_routes: Default::default(),
+            extra_headers: Default::default(),
             updated_ms: 0,
         };
         let data = std::env::temp_dir().join(format!(
@@ -421,6 +423,7 @@ mod tests {
             custom_models: vec![],
             fetched_models: vec![],
             model_routes: Default::default(),
+            extra_headers: Default::default(),
             updated_ms: 0,
         }
     }

@@ -66,7 +66,7 @@ pub(crate) async fn stream_anthropic(
             );
         }
     }
-    req = super::apply_opencode_session(req, provider, session_id);
+    req = super::apply_extra_headers(req, provider, session_id);
 
     let resp = super::send_with_retry(req, &body, "calling Anthropic API").await?;
     let status = resp.status();

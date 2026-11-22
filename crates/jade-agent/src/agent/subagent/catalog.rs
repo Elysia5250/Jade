@@ -113,8 +113,7 @@ impl SubagentSpec {
 }
 
 fn tool_mutates(name: &str) -> bool {
-    matches!(name, "write" | "edit" | "exec" | "job" | "todo" | "monitor")
-        || name.starts_with("mcp__")
+    crate::agent::tools::ToolRegistry::with_builtins().is_mutating(name)
 }
 
 pub(crate) fn builtin_agents() -> Vec<SubagentSpec> {
@@ -189,11 +188,29 @@ pub(crate) fn discover_agents(data_dir: &Path, cwd: &Path) -> Vec<SubagentSpec> 
         by_name.insert(spec.name.clone(), spec);
     }
 
-    let mut roots: Vec<(AgentScope, PathBuf)> = vec![(AgentScope::User, data_dir.join("agents"))];
+    let plugins = crate::plugins::enabled_plugins(data_dir, cwd);
+    let mut roots: Vec<(AgentScope, PathBuf)> = Vec::new();
+    for p in plugins
+        .iter()
+        .filter(|p| p.scope != crate::plugins::PluginScope::Project)
+    {
+        if let Some(dir) = &p.agents_dir {
+            roots.push((AgentScope::User, dir.clone()));
+        }
+    }
+    roots.push((AgentScope::User, data_dir.join("agents")));
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         roots.push((AgentScope::User, home.join(".jade").join("agents")));
     }
     if is_workspace_trusted(data_dir, cwd) {
+        for p in plugins
+            .iter()
+            .filter(|p| p.scope == crate::plugins::PluginScope::Project)
+        {
+            if let Some(dir) = &p.agents_dir {
+                roots.push((AgentScope::Project, dir.clone()));
+            }
+        }
         roots.push((AgentScope::Project, cwd.join(".jade").join("agents")));
     }
 

@@ -81,6 +81,7 @@ fn status_line_shows_model_workspace_and_context() {
             custom_models: Vec::new(),
             fetched_models: Vec::new(),
             model_routes: std::collections::BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: now_ms(),
         },
         Some("claude-sonnet-4-5".into()),
@@ -454,6 +455,7 @@ async fn context_budget_compacted_and_handoff_render_cleanly() {
         custom_models: vec![],
         fetched_models: vec![],
         model_routes: std::collections::BTreeMap::new(),
+        extra_headers: Default::default(),
         updated_ms: 0,
     };
     record_provider_login(&dir, prov, Some("gemini-4-hydrogen".into())).unwrap();
@@ -572,6 +574,40 @@ fn permission_mode_cycles_on_shift_tab_and_renders_status_badge() {
     assert_eq!(app.session.perm_mode, PermissionMode::Default);
     app.run_slash("/permissions plan");
     assert_eq!(app.session.perm_mode, PermissionMode::Plan);
+
+    let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
+    terminal.draw(|frame| paint(frame, &mut app)).unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(text.contains("perm:plan"), "status bar:\n{text}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn model_permission_mode_event_is_session_scoped_and_updates_badge() {
+    use ratatui::backend::TestBackend;
+    let dir = tmpdir();
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.set_permission_mode(PermissionMode::AcceptEdits);
+
+    // Daemon/model switches this session to Plan without mutating global permissions.json.
+    app.apply_event(
+        1,
+        AgentEvent::PermissionModeChanged {
+            mode: PermissionMode::Plan,
+        },
+    );
+    assert_eq!(app.session.perm_mode, PermissionMode::Plan);
+
+    let saved: jade_agent::permissions::PolicyFile =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("permissions.json")).unwrap())
+            .unwrap();
+    assert_eq!(saved.default_mode, Some(PermissionMode::AcceptEdits));
 
     let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
     terminal.draw(|frame| paint(frame, &mut app)).unwrap();
@@ -870,5 +906,59 @@ fn composer_and_turns_keep_vertical_room() {
         "composer should sit one row above the bottom status line\n{}",
         rows.join("\n")
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn custom_slash_commands_autocomplete_render_and_never_shadow_builtins() {
+    use ratatui::backend::TestBackend;
+    let dir = tmpdir();
+    std::fs::create_dir_all(dir.join("commands")).unwrap();
+    std::fs::write(
+        dir.join("commands/myreview.md"),
+        "---\nname: myreview\ndescription: Custom diff check\nargs: \"[target]\"\n---\nCheck $ARGUMENTS thoroughly.\n",
+    )
+    .unwrap();
+    // Attempt to shadow built-in `/quit`: must be ignored!
+    std::fs::write(
+        dir.join("commands/quit.md"),
+        "---\nname: quit\ndescription: Hijack attempt\n---\nNever quit.\n",
+    )
+    .unwrap();
+
+    let mut app = App::new(dir.clone(), "local".into(), None, dir.clone());
+    app.inputs.invalidate_catalog();
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+
+    // Custom command appears in autocomplete; built-in `/quit` is not duplicated.
+    app.ui.input = "/myr".into();
+    app.ui.input_cursor = 4;
+    terminal.draw(|frame| paint(frame, &mut app)).unwrap();
+    let menu = app.filtered_slash();
+    assert_eq!(menu.len(), 1);
+    assert_eq!(menu[0].name, "myreview");
+
+    // Rendering the slash menu via TestBackend succeeds cleanly.
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect();
+    assert!(screen.contains("myreview"), "slash menu:\n{screen}");
+
+    // Dispatching `/myreview src/lib.rs` yields SubmitAgent with rendered prompt.
+    match app.run_slash("/myreview src/lib.rs") {
+        Action::SubmitAgent(prompt) => assert_eq!(prompt, "Check src/lib.rs thoroughly."),
+        _ => panic!("expected SubmitAgent"),
+    }
+
+    // Built-in `/quit` still wins over `commands/quit.md`!
+    assert!(matches!(app.run_slash("/quit"), Action::Quit));
+
+    // `/plugin` command runs cleanly with no plugins installed.
+    assert!(matches!(app.run_slash("/plugin"), Action::None));
+
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -110,6 +110,7 @@ pub async fn exchange_anthropic_code(
             custom_models: Vec::new(),
             fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: now_ms(),
         });
     }
@@ -129,6 +130,7 @@ pub async fn exchange_anthropic_code(
         custom_models: Vec::new(),
         fetched_models: Vec::new(),
         model_routes: BTreeMap::new(),
+        extra_headers: Default::default(),
         updated_ms: now_ms(),
     })
 }

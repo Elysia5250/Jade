@@ -12,7 +12,10 @@ mod anthropic_body;
 mod openai_chat;
 mod openai_chat_body;
 mod openai_codex;
+pub mod registry;
 mod sse;
+
+pub use registry::{ModelProvider, ProviderRegistry, StreamRequest};
 
 #[cfg(test)]
 pub(crate) use anthropic_body::{anthropic_messages, mark_last_tool, system_blocks};
@@ -153,32 +156,63 @@ pub(crate) fn opencode_session_value(provider_id: &str, session_id: &str) -> Str
     }
 }
 
-pub(crate) fn apply_opencode_session(
-    req: reqwest::RequestBuilder,
+/// Sanitize a declarative header value, substituting `${SESSION_ID}` and
+/// stripping CR/LF/control bytes to prevent header injection.
+pub(crate) fn render_header_value(raw: &str, provider_id: &str, session_id: &str) -> String {
+    let sess = opencode_session_value(provider_id, session_id);
+    raw.replace("${SESSION_ID}", &sess)
+        .chars()
+        .filter(|c| *c != '\r' && *c != '\n' && *c != '\0' && (!c.is_control() || *c == '\t'))
+        .collect()
+}
+
+/// Apply provider-declared `extra_headers` plus compatibility defaults (such as
+/// `x-opencode-session` for OpenCode gateways unless explicitly overridden).
+pub(crate) fn apply_extra_headers(
+    mut req: reqwest::RequestBuilder,
     provider: &StoredProvider,
     session_id: &str,
 ) -> reqwest::RequestBuilder {
-    if !requires_opencode_session(&provider.id, &provider.base_url) {
-        return req;
+    let mut has_opencode_session = false;
+    for (name, raw_val) in &provider.extra_headers {
+        let trimmed_name = name.trim();
+        if trimmed_name.is_empty()
+            || trimmed_name
+                .bytes()
+                .any(|b| b <= 0x20 || b >= 0x7f || b == b':')
+        {
+            continue;
+        }
+        if trimmed_name.eq_ignore_ascii_case(OPENCODE_SESSION) {
+            has_opencode_session = true;
+        }
+        let val = render_header_value(raw_val, &provider.id, session_id);
+        if !val.is_empty() {
+            req = req.header(trimmed_name, val);
+        }
     }
-    req.header(
-        OPENCODE_SESSION,
-        opencode_session_value(&provider.id, session_id),
-    )
+    if !has_opencode_session && requires_opencode_session(&provider.id, &provider.base_url) {
+        req = req.header(
+            OPENCODE_SESSION,
+            opencode_session_value(&provider.id, session_id),
+        );
+    }
+    req
 }
 
-pub(super) struct StreamReply {
-    pub(super) text: String,
-    pub(super) reasoning: String,
-    pub(super) tool_calls: Vec<ToolCall>,
-    pub(super) input_tokens: u64,
-    pub(super) output_tokens: u64,
-    pub(super) cache_read_tokens: u64,
-    pub(super) cache_create_tokens: u64,
-    pub(super) reasoning_blocks: Vec<crate::session::ReasoningBlock>,
+#[derive(Debug, Default)]
+pub struct StreamReply {
+    pub text: String,
+    pub reasoning: String,
+    pub tool_calls: Vec<ToolCall>,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_create_tokens: u64,
+    pub reasoning_blocks: Vec<crate::session::ReasoningBlock>,
     /// False when this reply followed overflow compaction, so its token
     /// count must not move [`crate::agent::context::TokenCalibration`].
-    pub(super) calibrate: bool,
+    pub calibrate: bool,
 }
 
 pub(crate) fn prompt_cache_key(session_id: &str) -> String {
@@ -232,6 +266,18 @@ mod tests {
         assert_eq!(
             opencode_session_value("opencode-go", "  "),
             "jade-opencode-go"
+        );
+    }
+
+    #[test]
+    fn render_header_value_substitutes_session_and_strips_crlf() {
+        assert_eq!(
+            render_header_value("trace-${SESSION_ID}", "corp", "ses_42"),
+            "trace-ses_42"
+        );
+        assert_eq!(
+            render_header_value("good\r\nX-Injected: evil", "corp", "ses_42"),
+            "goodX-Injected: evil"
         );
     }
 

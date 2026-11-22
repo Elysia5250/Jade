@@ -60,6 +60,18 @@ impl PermissionMode {
             Self::Turbo => "perm:turbo",
         }
     }
+
+    /// Privilege rank for model-driven mode transitions:
+    /// `Plan (0) < Default (1) < AcceptEdits (2) < Auto (3) < Turbo (4)`.
+    pub fn privilege_rank(self) -> u8 {
+        match self {
+            Self::Plan => 0,
+            Self::Default => 1,
+            Self::AcceptEdits => 2,
+            Self::Auto => 3,
+            Self::Turbo => 4,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,5 +155,71 @@ impl SandboxOverride {
             "danger-full-access" | "full" | "unrestricted" => Some(Self::DangerFullAccess),
             _ => None,
         }
+    }
+}
+
+/// Session permission-mode state, tracking pre-plan mode and written plan files.
+#[derive(Debug, Clone)]
+pub(super) struct ModeState {
+    pub(super) mode: PermissionMode,
+    pub(super) previous_mode: Option<PermissionMode>,
+    pub(super) plan_files: Vec<std::path::PathBuf>,
+}
+
+impl ModeState {
+    pub(super) fn new(mode: PermissionMode) -> Self {
+        Self {
+            mode,
+            previous_mode: None,
+            plan_files: Vec::new(),
+        }
+    }
+
+    pub(super) fn set_mode(&mut self, next: PermissionMode) -> bool {
+        if self.mode == next {
+            return false;
+        }
+        if next == PermissionMode::Plan {
+            self.previous_mode = Some(self.mode);
+            self.plan_files.clear();
+        } else {
+            self.previous_mode = None;
+            self.plan_files.clear();
+        }
+        self.mode = next;
+        true
+    }
+
+    pub(super) fn plan_exit_target(&self) -> PermissionMode {
+        match self.previous_mode {
+            Some(prev) if prev != PermissionMode::Plan => prev,
+            _ => PermissionMode::AcceptEdits,
+        }
+    }
+
+    pub(super) fn record_plan_file(&mut self, canonical: std::path::PathBuf, non_empty: bool) {
+        if self.mode != PermissionMode::Plan {
+            return;
+        }
+        self.plan_files.retain(|p| p != &canonical);
+        if non_empty {
+            self.plan_files.push(canonical);
+        }
+    }
+
+    pub(super) fn resolve_plan_file(&self, canonical: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+        if self.mode != PermissionMode::Plan {
+            return None;
+        }
+        match canonical {
+            Some(target) => self.plan_files.iter().find(|p| p.as_path() == target).cloned(),
+            None => self.plan_files.last().cloned(),
+        }
+    }
+
+    pub(super) fn latest_plan_file(&self) -> Option<std::path::PathBuf> {
+        (self.mode == PermissionMode::Plan)
+            .then(|| self.plan_files.last().cloned())
+            .flatten()
     }
 }

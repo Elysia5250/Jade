@@ -221,6 +221,7 @@ mod tests {
             custom_models: Vec::new(),
             fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: 1,
         }
     }

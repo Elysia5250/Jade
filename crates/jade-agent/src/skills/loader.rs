@@ -51,7 +51,17 @@ pub struct LoadedSkill {
 }
 
 pub fn discover_skills(data_dir: &Path, cwd: &Path) -> Vec<SkillSummary> {
-    let mut roots: Vec<(SkillScope, PathBuf)> = vec![(SkillScope::User, data_dir.join("skills"))];
+    let plugins = crate::plugins::enabled_plugins(data_dir, cwd);
+    let mut roots: Vec<(SkillScope, PathBuf)> = Vec::new();
+    for p in plugins
+        .iter()
+        .filter(|p| p.scope != crate::plugins::PluginScope::Project)
+    {
+        if let Some(dir) = &p.skills_dir {
+            roots.push((SkillScope::User, dir.clone()));
+        }
+    }
+    roots.push((SkillScope::User, data_dir.join("skills")));
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
         roots.push((SkillScope::User, home.join(".jade").join("skills")));
         roots.push((SkillScope::User, home.join(".agents").join("skills")));
@@ -59,6 +69,14 @@ pub fn discover_skills(data_dir: &Path, cwd: &Path) -> Vec<SkillSummary> {
     }
 
     if is_workspace_trusted(data_dir, cwd) {
+        for p in plugins
+            .iter()
+            .filter(|p| p.scope == crate::plugins::PluginScope::Project)
+        {
+            if let Some(dir) = &p.skills_dir {
+                roots.push((SkillScope::Project, dir.clone()));
+            }
+        }
         roots.push((SkillScope::Project, cwd.join(".jade").join("skills")));
         roots.push((SkillScope::Project, cwd.join(".agents").join("skills")));
         roots.push((SkillScope::Project, cwd.join(".claude").join("skills")));
@@ -115,6 +133,11 @@ fn jade_skill_root(data_dir: &Path, cwd: &Path, skill: &SkillSummary) -> bool {
         roots.push(home.join(".jade").join("skills"));
     }
     roots.push(cwd.join(".jade").join("skills"));
+    for p in crate::plugins::enabled_plugins(data_dir, cwd) {
+        if let Some(dir) = p.skills_dir {
+            roots.push(dir);
+        }
+    }
     roots.into_iter().any(|root| path_under(&root, &skill.dir))
 }
 

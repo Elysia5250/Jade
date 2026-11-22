@@ -114,6 +114,26 @@ pub fn load_policies(
         }
     }
 
+    // Enabled plugins may tighten policy (`deny`/`ask`) within their scope,
+    // but never auto-apply `allow` rules or widen `extra_rw`.
+    for plugin in crate::plugins::enabled_plugins(data_dir, cwd) {
+        if plugin.scope == crate::plugins::PluginScope::Project && !trusted {
+            continue;
+        }
+        let Some(path) = plugin.permissions_file.as_deref() else {
+            continue;
+        };
+        let Some(p) = read_json::<PolicyFile>(path) else {
+            continue;
+        };
+        let scope = match plugin.scope {
+            crate::plugins::PluginScope::Managed => RuleScope::Managed,
+            crate::plugins::PluginScope::User => RuleScope::User,
+            crate::plugins::PluginScope::Project => RuleScope::Project,
+        };
+        push_plugin_policy_rules(scope, &p, &mut rules);
+    }
+
     let extra_rw = super::paths::sanitize_extra_rw(cwd, &extra_rw);
     rules.extend(session_rules.iter().cloned());
     LoadedPolicies {
@@ -195,6 +215,23 @@ fn push_policy_rules(scope: RuleScope, file: &PolicyFile, out: &mut Vec<Permissi
         out.push(PermissionRule {
             scope,
             effect: Effect::Allow,
+            pattern: pat.clone(),
+        });
+    }
+}
+
+fn push_plugin_policy_rules(scope: RuleScope, file: &PolicyFile, out: &mut Vec<PermissionRule>) {
+    for pat in &file.deny {
+        out.push(PermissionRule {
+            scope,
+            effect: Effect::Deny,
+            pattern: pat.clone(),
+        });
+    }
+    for pat in &file.ask {
+        out.push(PermissionRule {
+            scope,
+            effect: Effect::Ask,
             pattern: pat.clone(),
         });
     }
@@ -387,7 +424,7 @@ fn mode_baseline(
     sandbox_enforces_workspace: bool,
 ) -> Decision {
     match tool {
-        "say" | "ask" | "todo" | "skill" | "delegate" | "monitor" => {
+        "say" | "ask" | "todo" | "skill" | "delegate" | "monitor" | "mode" => {
             allow("interactive control tool", ctx)
         }
         "read" | "ls" | "glob" | "grep" | "job" => {
@@ -463,6 +500,16 @@ fn mode_baseline(
                 PermissionMode::Turbo => allow("turbo mode allows every tool call", ctx),
             }
         }
+        "mcp_search" => allow("read-only MCP tool catalog search", ctx),
+        "mcp_resource" => match mode {
+            PermissionMode::Plan => deny("plan mode blocks external MCP resource reads", ctx),
+            PermissionMode::Auto | PermissionMode::Turbo => {
+                allow("relaxed mode MCP resource read", ctx)
+            }
+            PermissionMode::Default | PermissionMode::AcceptEdits => {
+                ask("MCP resource access", ctx)
+            }
+        },
         mcp if mcp.starts_with("mcp__") => match mode {
             PermissionMode::Plan => deny("plan mode blocks external MCP tool calls", ctx),
             PermissionMode::Auto | PermissionMode::Turbo => allow("relaxed mode MCP tool", ctx),

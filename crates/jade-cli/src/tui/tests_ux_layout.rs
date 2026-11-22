@@ -122,6 +122,7 @@ fn setup_signed_in_provider(dir: &std::path::Path, model: &str) {
             custom_models: Vec::new(),
             fetched_models: Vec::new(),
             model_routes: std::collections::BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: now_ms(),
         },
         Some(model.into()),

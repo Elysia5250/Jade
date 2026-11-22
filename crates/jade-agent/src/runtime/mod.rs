@@ -107,6 +107,7 @@ mod tests {
             custom_models: vec![],
             fetched_models: vec![],
             model_routes: std::collections::BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: 0,
         };
         crate::auth::record_provider_login(&dir, prov, Some("gpt-6-astra".into())).unwrap();

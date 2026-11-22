@@ -15,10 +15,12 @@ use super::tools::ToolFilter;
 use crate::auth::ensure_fresh_provider;
 use crate::daemon;
 use crate::mcp::client::McpManager;
+use crate::mcp::extras::McpTurnView;
 use crate::session::{ChatMessage, ChatRole};
 use anyhow::Result;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 pub(super) const DEFAULT_TOOL_STEPS: usize = 100;
@@ -61,6 +63,9 @@ pub async fn run_agent_turn(cfg: TurnConfig, tx: mpsc::UnboundedSender<AgentEven
         model: cfg.model.clone(),
         asks: cfg.asks.clone(),
         permissions: cfg.permissions.clone(),
+        mcp_pool: cfg.mcp_pool.clone(),
+        tools: cfg.tools.clone(),
+        providers: cfg.providers.clone(),
         hooks: cfg.hooks.clone(),
         turn_seq: cfg.turn_seq,
     };
@@ -168,21 +173,21 @@ pub(crate) async fn execute_loop(
     );
 
     let mcp = if opts.connect_mcp {
-        Some(McpManager::connect_configured(&cfg.data_dir, &cfg.cwd).await)
+        let mgr = match &cfg.mcp_pool {
+            Some(pool) => pool.get_or_connect(&cfg.cwd).await,
+            None => Arc::new(McpManager::connect_configured(&cfg.data_dir, &cfg.cwd).await),
+        };
+        Some(McpTurnView::new(mgr))
     } else {
         None
     };
-    let extra_tools = mcp
-        .as_ref()
-        .map(McpManager::extra_tool_schemas)
-        .unwrap_or_default();
 
     let mut tool_filter = ToolFilter {
         depth: opts.depth,
         allowed: opts.allowed_tools,
+        non_interactive: cfg.asks.is_non_interactive(),
     };
     let system = opts.system;
-    let overhead = tools_overhead_for(Some(&cfg.permissions), &tool_filter, &extra_tools);
     let mut plan = resolve_budget(&cfg.data_dir, &cfg.provider.id, &cfg.model.model_id);
     let max_steps = opts.max_steps.clamp(1, HARD_MAX_TOOL_STEPS);
     let mut hook_session = TurnHookSession {
@@ -204,9 +209,28 @@ pub(crate) async fn execute_loop(
                 let _ = tx.send(AgentEvent::AssistantStart {
                     model: cfg.model.display(),
                 });
+                if let Some(view) = &mcp {
+                    let _ = view.manager().refresh_dirty_tools().await;
+                }
             }
+            let mut extra_tools = cfg
+                .tools
+                .as_ref()
+                .map(|r| r.custom_tool_schemas())
+                .unwrap_or_default();
+            if let Some(view) = &mcp {
+                extra_tools.extend(view.extra_tool_schemas());
+            }
+            hook_session.permission_mode = cfg.permissions.mode().label().to_string();
+            let overhead = tools_overhead_for(Some(&cfg.permissions), &tool_filter, &extra_tools);
             provider = ensure_fresh_provider(&http, &cfg.data_dir, provider).await?;
-            let note = env_disk.note(&cfg.data_dir, cfg.permissions.session_id(), opts.depth);
+            let note = env_disk.note_with_mode(
+                &cfg.data_dir,
+                &cfg.cwd,
+                &cfg.permissions,
+                opts.depth,
+                !cfg.asks.is_non_interactive(),
+            );
             sync_environment(&mut messages, note.as_deref());
 
             let before_tokens = estimate_turn_tokens(&system, &messages, overhead, calibration);
@@ -382,6 +406,7 @@ pub(crate) async fn execute_loop(
                     &cfg.asks,
                     &cfg.permissions,
                     mcp.as_ref(),
+                    cfg.tools.as_deref(),
                     &mut tool_filter,
                     opts.subagent_host.as_ref(),
                     cfg.monitors.as_ref(),

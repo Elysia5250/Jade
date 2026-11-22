@@ -35,7 +35,7 @@ pub struct PermissionEngine {
     cwd: PathBuf,
     session_id: String,
     target: String,
-    mode: Mutex<PermissionMode>,
+    mode_state: Mutex<types::ModeState>,
     session_allows: Mutex<Vec<PermissionRule>>,
     managed_override: Option<PathBuf>,
     skip_permissions: Mutex<bool>,
@@ -62,7 +62,7 @@ impl PermissionEngine {
             cwd,
             session_id,
             target,
-            mode: Mutex::new(effective_mode),
+            mode_state: Mutex::new(types::ModeState::new(effective_mode)),
             session_allows: Mutex::new(Vec::new()),
             managed_override: None,
             skip_permissions: Mutex::new(false),
@@ -86,7 +86,7 @@ impl PermissionEngine {
             cwd,
             session_id: self.session_id.clone(),
             target: self.target.clone(),
-            mode: Mutex::new(mode),
+            mode_state: Mutex::new(types::ModeState::new(mode)),
             session_allows: Mutex::new(session_allows),
             managed_override: self.managed_override.clone(),
             skip_permissions: Mutex::new(*self.skip_permissions.lock().unwrap()),
@@ -101,23 +101,94 @@ impl PermissionEngine {
     }
 
     pub fn mode(&self) -> PermissionMode {
-        *self.mode.lock().unwrap()
+        self.mode_state.lock().unwrap().mode
     }
 
     pub fn set_mode(&self, mode: PermissionMode) {
-        *self.mode.lock().unwrap() = mode;
+        self.mode_state.lock().unwrap().set_mode(mode);
+    }
+
+    pub fn plan_exit_target(&self) -> PermissionMode {
+        self.mode_state.lock().unwrap().plan_exit_target()
+    }
+
+    pub fn record_plan_file_write(&self, raw_path: &str, non_empty: bool) {
+        let resolved = paths::resolve_path_pair(&self.cwd, raw_path);
+        if !paths::is_plan_file(&self.data_dir, &self.cwd, &resolved) {
+            return;
+        }
+        self.mode_state
+            .lock()
+            .unwrap()
+            .record_plan_file(resolved.canonical, non_empty);
+    }
+
+    pub fn resolve_written_plan_file(&self, requested: Option<&str>) -> Option<PathBuf> {
+        let canonical = match requested.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(raw) => {
+                let resolved = paths::resolve_path_pair(&self.cwd, raw);
+                if !paths::is_plan_file(&self.data_dir, &self.cwd, &resolved) {
+                    return None;
+                }
+                Some(resolved.canonical)
+            }
+            None => None,
+        };
+        self.mode_state
+            .lock()
+            .unwrap()
+            .resolve_plan_file(canonical.as_deref())
+    }
+
+    pub fn latest_plan_file(&self) -> Option<PathBuf> {
+        self.mode_state.lock().unwrap().latest_plan_file()
+    }
+
+    pub fn record_mode_audit(
+        &self,
+        from: PermissionMode,
+        to: PermissionMode,
+        decision: &str,
+        resolution: &str,
+        reason: &str,
+        tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        log_audit(
+            &self.data_dir,
+            audit::PermissionAuditEntry {
+                ts_ms: audit::now_ms(),
+                session_id: &self.session_id,
+                target: &self.target,
+                mode: from.label(),
+                tool: "mode",
+                detail: format!("{} -> {}", from.label(), to.label()),
+                decision,
+                resolution,
+                reason,
+                sandbox: "none".into(),
+            },
+            tx,
+        );
     }
 
     /// Fresh engine rooted at `cwd` / `target`, keeping this session's mode,
     /// saved allows, and sandbox override. The next turn picks it up.
     pub fn rebind_workspace(&self, cwd: PathBuf, target: String) -> Arc<Self> {
+        let prev_state = self.mode_state.lock().unwrap().clone();
         let next = Self::new(
             self.data_dir.clone(),
-            cwd,
+            cwd.clone(),
             self.session_id.clone(),
             target,
-            self.mode(),
+            prev_state.mode,
         );
+        {
+            let mut dst = next.mode_state.lock().unwrap();
+            dst.previous_mode = prev_state.previous_mode;
+            if cwd == self.cwd {
+                dst.plan_files = prev_state.plan_files;
+            }
+        }
         *next.session_allows.lock().unwrap() = self.session_allows.lock().unwrap().clone();
         next.set_skip_permissions(self.skip_permissions());
         next.set_sandbox_override(self.sandbox_override());

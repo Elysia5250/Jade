@@ -235,6 +235,7 @@ mod tests {
             custom_models: Vec::new(),
             fetched_models: Vec::new(),
             model_routes: std::collections::BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: 0,
         };
         let anthropic = StoredProvider {
@@ -248,6 +249,7 @@ mod tests {
             custom_models: vec!["claude-test".into()],
             fetched_models: Vec::new(),
             model_routes: std::collections::BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: 0,
         };
         record_provider_login(&dir, deepseek, None).unwrap();

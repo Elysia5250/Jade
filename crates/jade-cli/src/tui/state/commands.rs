@@ -212,6 +212,18 @@ impl App {
             None => (body, ""),
         };
         let Some(kind) = lookup_slash(name) else {
+            if let Some(custom) = jade_agent::commands::resolve_command(
+                &self.data_dir,
+                &self.session.current.cwd,
+                name,
+            ) {
+                let rendered = jade_agent::commands::render_command(&custom, arg);
+                if rendered.is_empty() {
+                    self.set_toast(format!("custom command /{name} produced an empty prompt"), true);
+                    return Action::None;
+                }
+                return Action::SubmitAgent(rendered);
+            }
             self.set_toast(format!("unknown command: /{name} (try /help)"), true);
             return Action::None;
         };
@@ -351,6 +363,10 @@ impl App {
             }
             SlashCmdKind::Mcp => {
                 self.run_mcp_command(arg);
+                Action::None
+            }
+            SlashCmdKind::Plugin => {
+                self.run_plugin_command(arg);
                 Action::None
             }
             SlashCmdKind::Skill => {
@@ -519,19 +535,34 @@ impl App {
         Some(rest)
     }
 
-    pub(in crate::tui) fn filtered_slash(&self) -> Vec<&'static SlashCommand> {
+    pub(in crate::tui) fn filtered_slash(&self) -> Vec<SlashMenuItem<'_>> {
         let Some(query) = self.slash_query() else {
             return Vec::new();
         };
         let q = query.to_ascii_lowercase();
-        SLASH_COMMANDS
+        let mut items: Vec<SlashMenuItem<'_>> = SLASH_COMMANDS
             .iter()
             .filter(|cmd| {
                 q.is_empty()
                     || cmd.name.starts_with(&q)
                     || cmd.aliases.iter().any(|a| a.starts_with(&q))
             })
-            .collect()
+            .map(|cmd| SlashMenuItem {
+                name: cmd.name,
+                args: cmd.args,
+                about: cmd.about,
+            })
+            .collect();
+        for custom in &self.inputs.catalog.commands {
+            if q.is_empty() || custom.name.to_ascii_lowercase().starts_with(&q) {
+                items.push(SlashMenuItem {
+                    name: &custom.name,
+                    args: &custom.args,
+                    about: &custom.about,
+                });
+            }
+        }
+        items
     }
 
     pub(in crate::tui) fn cd_query(&self) -> Option<&str> {

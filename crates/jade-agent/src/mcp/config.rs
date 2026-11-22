@@ -1,4 +1,5 @@
-//! MCP client server configuration discovery with workspace-trust gating.
+//! MCP client server configuration discovery with workspace-trust gating
+//! and `Managed > User > Project` precedence.
 
 use crate::permissions::is_workspace_trusted;
 use serde::{Deserialize, Serialize};
@@ -6,8 +7,11 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+const DEFAULT_MANAGED_MCP_PATH: &str = "/etc/jade/mcp.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum McpScope {
+    Managed,
     User,
     Project,
 }
@@ -15,6 +19,7 @@ pub enum McpScope {
 impl McpScope {
     pub fn label(self) -> &'static str {
         match self {
+            Self::Managed => "managed",
             Self::User => "user",
             Self::Project => "project",
         }
@@ -48,6 +53,8 @@ pub struct McpServerConfig {
 pub struct McpConfigReport {
     pub servers: Vec<McpServerConfig>,
     pub skipped_untrusted: Vec<PathBuf>,
+    pub managed_error: Option<String>,
+    pub fingerprint: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -80,22 +87,96 @@ struct RawServerEntry {
     timeout_s: Option<u64>,
 }
 
+fn managed_mcp_path(override_path: Option<&Path>) -> PathBuf {
+    if let Some(p) = override_path {
+        return p.to_path_buf();
+    }
+    #[cfg(test)]
+    if let Ok(env_path) = std::env::var("JADE_MANAGED_MCP") {
+        if !env_path.trim().is_empty() {
+            return PathBuf::from(env_path);
+        }
+    }
+    PathBuf::from(DEFAULT_MANAGED_MCP_PATH)
+}
+
+fn read_mcp_file_strict(path: &Path) -> Result<Option<RawMcpFile>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str::<RawMcpFile>(&text)
+            .map(Some)
+            .map_err(|e| format!("{}: invalid JSON ({e})", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: read error ({e})", path.display())),
+    }
+}
+
 pub fn load_mcp_configs(data_dir: &Path, cwd: &Path) -> McpConfigReport {
+    load_mcp_configs_with_managed(data_dir, cwd, None)
+}
+
+pub fn load_mcp_configs_with_managed(
+    data_dir: &Path,
+    cwd: &Path,
+    managed_override: Option<&Path>,
+) -> McpConfigReport {
+    let extra: Vec<(McpScope, PathBuf)> = crate::plugins::enabled_plugins(data_dir, cwd)
+        .into_iter()
+        .filter_map(|p| {
+            let file = p.mcp_file?;
+            let scope = match p.scope {
+                crate::plugins::PluginScope::Managed => McpScope::Managed,
+                crate::plugins::PluginScope::User => McpScope::User,
+                crate::plugins::PluginScope::Project => McpScope::Project,
+            };
+            Some((scope, file))
+        })
+        .collect();
+    load_mcp_configs_with_extra(data_dir, cwd, managed_override, &extra)
+}
+
+/// Load MCP server configs in strict `Managed > User > Project` precedence,
+/// optionally folding in extra `(scope, path)` sources (used by plugins).
+pub(crate) fn load_mcp_configs_with_extra(
+    data_dir: &Path,
+    cwd: &Path,
+    managed_override: Option<&Path>,
+    extra_sources: &[(McpScope, PathBuf)],
+) -> McpConfigReport {
     let mut report = McpConfigReport::default();
     let mut by_name: BTreeMap<String, McpServerConfig> = BTreeMap::new();
+
+    let managed_path = managed_mcp_path(managed_override);
+    match read_mcp_file_strict(&managed_path) {
+        Ok(Some(parsed)) => apply_parsed(parsed, McpScope::Managed, &managed_path, cwd, true, &mut by_name),
+        Ok(None) => {}
+        Err(err) => {
+            report.managed_error = Some(err);
+            report.fingerprint = compute_fingerprint(&report);
+            return report;
+        }
+    }
+    for (scope, path) in extra_sources.iter().filter(|(s, _)| *s == McpScope::Managed) {
+        load_file(path, *scope, cwd, false, &mut by_name);
+    }
 
     load_file(
         &data_dir.join("mcp.json"),
         McpScope::User,
         cwd,
-        true,
+        false,
         &mut by_name,
     );
+    for (scope, path) in extra_sources.iter().filter(|(s, _)| *s == McpScope::User) {
+        load_file(path, *scope, cwd, false, &mut by_name);
+    }
 
     let project_candidates = [cwd.join(".mcp.json"), cwd.join(".jade").join("mcp.json")];
     if is_workspace_trusted(data_dir, cwd) {
         for path in project_candidates {
             load_file(&path, McpScope::Project, cwd, false, &mut by_name);
+        }
+        for (scope, path) in extra_sources.iter().filter(|(s, _)| *s == McpScope::Project) {
+            load_file(path, *scope, cwd, false, &mut by_name);
         }
     } else {
         for path in project_candidates {
@@ -103,9 +184,15 @@ pub fn load_mcp_configs(data_dir: &Path, cwd: &Path) -> McpConfigReport {
                 report.skipped_untrusted.push(path);
             }
         }
+        for (_, path) in extra_sources.iter().filter(|(s, _)| *s == McpScope::Project) {
+            if path.is_file() {
+                report.skipped_untrusted.push(path.clone());
+            }
+        }
     }
 
     report.servers = by_name.into_values().collect();
+    report.fingerprint = compute_fingerprint(&report);
     report
 }
 
@@ -122,12 +209,24 @@ fn load_file(
     let Ok(parsed) = serde_json::from_str::<RawMcpFile>(&text) else {
         return;
     };
+    apply_parsed(parsed, scope, path, workspace_cwd, allow_overwrite, out);
+}
+
+fn apply_parsed(
+    parsed: RawMcpFile,
+    scope: McpScope,
+    path: &Path,
+    workspace_cwd: &Path,
+    allow_overwrite: bool,
+    out: &mut BTreeMap<String, McpServerConfig>,
+) {
     for (name, raw) in parsed.mcp_servers {
         if !allow_overwrite && out.contains_key(&name) {
             tracing::warn!(
                 server = %name,
+                scope = scope.label(),
                 path = %path.display(),
-                "ignoring project MCP server overriding higher-scope config"
+                "ignoring MCP server overriding higher-scope config"
             );
             continue;
         }
@@ -178,6 +277,72 @@ fn load_file(
             },
         );
     }
+}
+
+fn compute_fingerprint(report: &McpConfigReport) -> String {
+    let mut hasher = Sha256::new();
+    if let Some(err) = &report.managed_error {
+        hasher.update(b"managed_error:");
+        hasher.update(err.as_bytes());
+        hasher.update([0u8]);
+    }
+    for p in &report.skipped_untrusted {
+        hasher.update(b"skip:");
+        hasher.update(p.to_string_lossy().as_bytes());
+        hasher.update([0u8]);
+    }
+    for s in &report.servers {
+        hasher.update(s.name.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(s.scope.label().as_bytes());
+        hasher.update([0u8]);
+        hasher.update(s.timeout_s.to_le_bytes());
+        hasher.update([u8::from(s.disabled)]);
+        match &s.transport {
+            McpTransportConfig::Stdio {
+                command,
+                args,
+                env,
+                cwd,
+            } => {
+                hasher.update(b"stdio");
+                hasher.update(command.as_bytes());
+                hasher.update([0u8]);
+                for a in args {
+                    hasher.update(a.as_bytes());
+                    hasher.update([0u8]);
+                }
+                for (k, v) in env {
+                    hasher.update(k.as_bytes());
+                    hasher.update([b'=']);
+                    hasher.update(v.as_bytes());
+                    hasher.update([0u8]);
+                }
+                if let Some(dir) = cwd {
+                    hasher.update(dir.to_string_lossy().as_bytes());
+                }
+            }
+            McpTransportConfig::Http { url, headers } => {
+                hasher.update(b"http");
+                hasher.update(url.as_bytes());
+                hasher.update([0u8]);
+                for (k, v) in headers {
+                    hasher.update(k.as_bytes());
+                    hasher.update([b':']);
+                    hasher.update(v.as_bytes());
+                    hasher.update([0u8]);
+                }
+            }
+        }
+        hasher.update([0xffu8]);
+    }
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for b in digest {
+        use std::fmt::Write;
+        let _ = write!(&mut hex, "{b:02x}");
+    }
+    hex
 }
 
 pub fn sanitize_ident(raw: &str) -> String {
@@ -249,7 +414,7 @@ fn expand_env_vars(input: &str, scope: McpScope, safe_vars: &[&str]) -> String {
         let after = &rest[start + 2..];
         if let Some(end) = after.find('}') {
             let var_name = &after[..end];
-            let allowed = scope == McpScope::User || safe_vars.contains(&var_name);
+            let allowed = scope != McpScope::Project || safe_vars.contains(&var_name);
             if allowed {
                 if let Ok(val) = std::env::var(var_name) {
                     out.push_str(&val);

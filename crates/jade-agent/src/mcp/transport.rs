@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -17,6 +17,13 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 const MAX_MCP_LINE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_MCP_HTTP_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ServerCapabilities {
+    pub tools: bool,
+    pub resources: bool,
+    pub prompts: bool,
+}
 
 #[allow(clippy::large_enum_variant)]
 pub enum McpTransport {
@@ -30,6 +37,7 @@ pub struct StdioTransport {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: AtomicU64,
+    tools_dirty: AtomicBool,
 }
 
 pub struct HttpTransport {
@@ -46,7 +54,7 @@ impl McpTransport {
         scope: McpScope,
         workspace_cwd: &Path,
         timeout_s: u64,
-    ) -> Result<Self> {
+    ) -> Result<(Self, ServerCapabilities)> {
         let mut conn = match cfg {
             McpTransportConfig::Stdio {
                 command,
@@ -78,11 +86,19 @@ impl McpTransport {
                 "version": env!("CARGO_PKG_VERSION"),
             }
         });
-        let _ = conn.request("initialize", init_params, timeout).await?;
+        let init_res = conn.request("initialize", init_params, timeout).await?;
+        let caps = parse_capabilities(&init_res);
         let _ = conn
             .notify("notifications/initialized", json!({}), timeout)
             .await;
-        Ok(conn)
+        Ok((conn, caps))
+    }
+
+    pub fn take_tools_dirty(&self) -> bool {
+        match self {
+            Self::Stdio(s) => s.tools_dirty.swap(false, Ordering::AcqRel),
+            Self::Http(_) => false,
+        }
     }
 
     pub async fn request(
@@ -102,6 +118,21 @@ impl McpTransport {
             Self::Stdio(s) => s.notify(method, params).await,
             Self::Http(h) => h.notify(method, params, timeout).await,
         }
+    }
+}
+
+fn parse_capabilities(init_result: &Value) -> ServerCapabilities {
+    let Some(caps) = init_result.get("capabilities").and_then(Value::as_object) else {
+        return ServerCapabilities {
+            tools: true,
+            resources: false,
+            prompts: false,
+        };
+    };
+    ServerCapabilities {
+        tools: caps.contains_key("tools") || caps.is_empty(),
+        resources: caps.contains_key("resources"),
+        prompts: caps.contains_key("prompts"),
     }
 }
 
@@ -202,6 +233,7 @@ impl StdioTransport {
             stdin,
             stdout,
             next_id: AtomicU64::new(1),
+            tools_dirty: AtomicBool::new(false),
         })
     }
 
@@ -243,6 +275,11 @@ impl StdioTransport {
                 let Ok(msg) = serde_json::from_str::<Value>(trimmed) else {
                     continue;
                 };
+                if msg.get("method").and_then(Value::as_str)
+                    == Some("notifications/tools/list_changed")
+                {
+                    self.tools_dirty.store(true, Ordering::Release);
+                }
                 if msg.get("id").and_then(Value::as_u64) != Some(id) {
                     continue;
                 }

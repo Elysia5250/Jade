@@ -24,6 +24,7 @@ pub struct Runtime {
     pub(crate) data_dir: PathBuf,
     pub(crate) conduit: Option<PathBuf>,
     pub(crate) local_server: Option<AgentServer>,
+    pub(crate) mcp_pool: Arc<crate::mcp::pool::McpPool>,
     sessions: Mutex<HashMap<String, Arc<Mutex<Live>>>>,
     incarnation_id: u64,
 }
@@ -42,10 +43,12 @@ impl Runtime {
         conduit: Option<PathBuf>,
         local_server: Option<AgentServer>,
     ) -> Arc<Self> {
+        let mcp_pool = crate::mcp::pool::McpPool::new(data_dir.clone());
         Arc::new(Self {
             data_dir,
             conduit,
             local_server,
+            mcp_pool,
             sessions: Mutex::new(HashMap::new()),
             incarnation_id: new_incarnation(),
         })
@@ -272,6 +275,9 @@ impl Runtime {
             steer,
             permissions,
             monitors: Some(monitors),
+            mcp_pool: Some(Arc::clone(&self.mcp_pool)),
+            tools: None,
+            providers: None,
             hooks,
             hook_state,
             hook_state_sink,

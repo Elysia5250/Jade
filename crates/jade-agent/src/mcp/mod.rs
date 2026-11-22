@@ -2,6 +2,8 @@
 
 pub mod client;
 pub mod config;
+pub mod extras;
+pub mod pool;
 pub mod server;
 mod server_tools;
 #[cfg(test)]

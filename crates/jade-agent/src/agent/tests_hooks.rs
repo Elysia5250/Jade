@@ -199,6 +199,7 @@ async fn loop_hooks_pipeline_permission_recheck_and_stop_reentry() {
             custom_models: vec!["m1".into()],
             fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: 0,
         },
         model: ModelRef {
@@ -226,6 +227,9 @@ async fn loop_hooks_pipeline_permission_recheck_and_stop_reentry() {
             PermissionMode::Default,
         ),
         monitors: None,
+        mcp_pool: None,
+        tools: None,
+        providers: None,
         hooks: Some(HookEngine::new(data.clone(), ws.clone())),
         hook_state: BTreeMap::new(),
         hook_state_sink: None,
@@ -352,6 +356,7 @@ async fn subagent_start_block_fallback_stop_and_ordered_state_merge() {
             custom_models: vec!["m1".into()],
             fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: 0,
         },
         model: ModelRef {
@@ -366,6 +371,9 @@ async fn subagent_start_block_fallback_stop_and_ordered_state_merge() {
             "local".into(),
             PermissionMode::Default,
         ),
+        mcp_pool: None,
+        tools: None,
+        providers: None,
         hooks: Some(HookEngine::new(data.clone(), ws.clone())),
         turn_seq: 1,
     };

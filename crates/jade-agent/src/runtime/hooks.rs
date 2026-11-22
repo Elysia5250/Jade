@@ -274,6 +274,7 @@ impl Runtime {
             )
             .await;
         }
+        self.mcp_pool.shutdown().await;
     }
 }
 

@@ -168,6 +168,7 @@ pub(crate) async fn cmd_auth_login(data_dir: &Path) -> Result<()> {
                 custom_models: Vec::new(),
                 fetched_models: Vec::new(),
                 model_routes: BTreeMap::new(),
+                extra_headers: Default::default(),
                 updated_ms: now_ms(),
             };
             (sp, None)
@@ -205,6 +206,7 @@ pub(crate) async fn cmd_auth_login(data_dir: &Path) -> Result<()> {
                 custom_models,
                 fetched_models: Vec::new(),
                 model_routes: BTreeMap::new(),
+                extra_headers: Default::default(),
                 updated_ms: now_ms(),
             };
             (
@@ -227,6 +229,56 @@ pub(crate) async fn cmd_auth_login(data_dir: &Path) -> Result<()> {
             model_ref.display()
         }
     );
+    Ok(())
+}
+
+pub(crate) fn cmd_auth_add(
+    data_dir: &Path,
+    id: String,
+    base_url: String,
+    protocol: String,
+    api_key: String,
+    models: Vec<String>,
+    headers: Vec<String>,
+) -> Result<()> {
+    let clean_id = slugify_provider_id(&id);
+    let proto = match protocol.trim().to_ascii_lowercase().as_str() {
+        "anthropic" | "anthropic_messages" => ProviderProtocol::Anthropic,
+        "codex" | "openai-codex" | "openai_codex" => ProviderProtocol::OpenAiCodex,
+        "openai" | "openai-chat" | "openai_chat" | "openai-compatible" => {
+            ProviderProtocol::OpenAiChat
+        }
+        other => bail!("unknown protocol `{other}` (expected: openai, anthropic, codex)"),
+    };
+    let mut extra_headers = BTreeMap::new();
+    for raw in headers {
+        let Some((k, v)) = raw.split_once('=').or_else(|| raw.split_once(':')) else {
+            bail!("invalid --header `{raw}` (expected Key=Value)");
+        };
+        let k = k.trim();
+        let v = v.trim();
+        if k.is_empty() || v.is_empty() {
+            bail!("invalid --header `{raw}` (empty key or value)");
+        }
+        extra_headers.insert(k.to_string(), v.to_string());
+    }
+    let chosen = models.first().cloned();
+    let stored = StoredProvider {
+        id: clean_id.clone(),
+        name: id,
+        protocol: proto,
+        base_url: base_url.trim_end_matches('/').to_string(),
+        credential: Credential::ApiKey {
+            key: api_key.trim().to_string(),
+        },
+        custom_models: models,
+        fetched_models: Vec::new(),
+        model_routes: BTreeMap::new(),
+        extra_headers,
+        updated_ms: now_ms(),
+    };
+    let model_ref = record_provider_login(data_dir, stored, chosen)?;
+    println!("Added provider `{clean_id}` (active: {})", model_ref.display());
     Ok(())
 }
 

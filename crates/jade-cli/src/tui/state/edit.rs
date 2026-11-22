@@ -78,10 +78,12 @@ impl App {
                 }
                 KeyCode::Tab => {
                     let cmd = menu[self.ui.menu_selected.min(last)];
-                    self.ui.input = if cmd.args.is_empty() {
-                        format!("/{}", cmd.name)
+                    let name = cmd.name.to_string();
+                    let args_empty = cmd.args.is_empty();
+                    self.ui.input = if args_empty {
+                        format!("/{name}")
                     } else {
-                        format!("/{} ", cmd.name)
+                        format!("/{name} ")
                     };
                     self.ui.input_cursor = self.ui.input.chars().count();
                     self.ui.menu_selected = 0;
@@ -89,13 +91,15 @@ impl App {
                 }
                 KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
                     let cmd = menu[self.ui.menu_selected.min(last)];
-                    if cmd.args.is_empty() || cmd.args.starts_with('[') {
+                    let name = cmd.name.to_string();
+                    let immediate = cmd.args.is_empty() || cmd.args.starts_with('[');
+                    if immediate {
                         self.ui.input.clear();
                         self.ui.input_cursor = 0;
                         self.ui.menu_selected = 0;
-                        return self.run_slash(&format!("/{}", cmd.name));
+                        return self.run_slash(&format!("/{name}"));
                     }
-                    self.ui.input = format!("/{} ", cmd.name);
+                    self.ui.input = format!("/{name} ");
                     self.ui.input_cursor = self.ui.input.chars().count();
                     self.ui.menu_selected = 0;
                     return Action::None;

@@ -163,7 +163,7 @@ impl Runtime {
     }
 
     pub async fn probe_mcp(&self, cwd: PathBuf) -> Vec<String> {
-        let mgr = crate::mcp::client::McpManager::connect_configured(&self.data_dir, &cwd).await;
+        let mgr = self.mcp_pool.reconnect(&cwd).await;
         let mut lines = Vec::new();
         for p in mgr.skipped_untrusted() {
             lines.push(format!(
@@ -175,9 +175,18 @@ impl Runtime {
             if let Some(err) = &s.error {
                 lines.push(format!("{} [{}] error: {}", s.name, s.transport_label, err));
             } else {
+                let mut caps = vec![format!("{} tools", s.tool_count)];
+                if s.has_resources {
+                    caps.push("resources".into());
+                }
+                if s.has_prompts {
+                    caps.push("prompts".into());
+                }
                 lines.push(format!(
-                    "{} [{}] connected ({} tools)",
-                    s.name, s.transport_label, s.tool_count
+                    "{} [{}] connected ({})",
+                    s.name,
+                    s.transport_label,
+                    caps.join(", ")
                 ));
             }
         }

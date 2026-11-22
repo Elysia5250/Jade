@@ -33,6 +33,9 @@ _None at present._
 
 Completed plans:
 
+- `harness-extensibility-p0-p1.md` — daemon MCP pool + protocol completion,
+  narrow `Tool`/`ModelProvider` traits & registries, declarative `plugin.json`
+  bundles, and custom `/command` prompt templates.
 - `extract-agent-crate-and-harden-ci.md` — harden CI (clippy/fmt/macOS),
   extract `jade-agent` out of `jade-cli`, trim redline files, and record
   core ADRs.

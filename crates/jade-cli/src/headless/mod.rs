@@ -129,6 +129,24 @@ fn read_prompt(raw: Option<String>) -> Result<String> {
     Ok(prompt)
 }
 
+fn expand_custom_command(data_dir: &std::path::Path, cwd: &std::path::Path, raw: &str) -> String {
+    let trimmed = raw.trim();
+    let Some(rest) = trimmed.strip_prefix('/') else {
+        return raw.to_string();
+    };
+    let (name, arg) = match rest.split_once(char::is_whitespace) {
+        Some((n, a)) => (n, a.trim()),
+        None => (rest, ""),
+    };
+    if name.is_empty() || crate::tui::lookup_slash(name).is_some() {
+        return raw.to_string();
+    }
+    match jade_agent::commands::resolve_command(data_dir, cwd, name) {
+        Some(cmd) => jade_agent::commands::render_command(&cmd, arg),
+        None => raw.to_string(),
+    }
+}
+
 pub(crate) async fn run_ask(
     ctx: &Ctx,
     continue_last: bool,
@@ -159,7 +177,8 @@ pub(crate) async fn run_with_writers<WOut: Write, WErr: Write>(
     out: &mut WOut,
     err: &mut WErr,
 ) -> Result<()> {
-    let prompt = read_prompt(args.prompt.clone())?;
+    let raw_prompt = read_prompt(args.prompt.clone())?;
+    let prompt = expand_custom_command(&ctx.data_dir, &ctx.cwd, &raw_prompt);
 
     let perm_mode = match args.permission_mode.as_deref() {
         Some(raw) => PermissionMode::parse(raw).with_context(|| {
@@ -370,6 +389,7 @@ mod tests {
             custom_models: vec!["gpt-test".into()],
             fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: now_ms(),
         };
         record_provider_login(data, prov, Some("gpt-test".into())).unwrap();

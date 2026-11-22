@@ -132,6 +132,13 @@ pub(super) fn summarize_call(tool: &str, args: &Value) -> String {
             .map(|a| format!("delegate {a}"))
             .unwrap_or_else(|| "delegate batch".into()),
         "monitor" => format!("monitor {}", args["action"].as_str().unwrap_or("list")),
+        "mode" => {
+            let action = args["action"].as_str().unwrap_or("");
+            match args["target"].as_str() {
+                Some(target) if !target.is_empty() => format!("mode {action} {target}"),
+                _ => format!("mode {action}"),
+            }
+        }
         other => other.to_string(),
     }
 }

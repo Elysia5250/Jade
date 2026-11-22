@@ -131,6 +131,8 @@ pub struct StoredProvider {
     #[serde(default)]
     pub model_routes: BTreeMap<String, ModelRoute>,
     #[serde(default)]
+    pub extra_headers: BTreeMap<String, String>,
+    #[serde(default)]
     pub updated_ms: u64,
 }
 
@@ -521,6 +523,7 @@ mod tests {
             custom_models: vec![],
             fetched_models: vec![],
             model_routes: BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: now_ms(),
         };
         let model_ref = record_provider_login(&dir, sp, None).unwrap();
@@ -565,6 +568,7 @@ mod tests {
             custom_models: vec!["claude-test".into()],
             fetched_models: vec![],
             model_routes: BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: now_ms(),
         };
         let deepseek = StoredProvider {
@@ -578,6 +582,7 @@ mod tests {
             custom_models: vec!["deepseek-v4.1-flash".into(), "deepseek-flash".into()],
             fetched_models: vec![],
             model_routes: BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: now_ms(),
         };
         record_provider_login(&dir, anthropic, Some("claude-test".into())).unwrap();

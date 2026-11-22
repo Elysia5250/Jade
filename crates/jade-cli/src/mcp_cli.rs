@@ -18,6 +18,16 @@ pub(crate) enum McpCmd {
     List,
     /// Connect to configured MCP servers and list discovered tools.
     Tools,
+    /// Connect to configured MCP servers and list exposed resources.
+    Resources {
+        /// Optional MCP server name filter.
+        server: Option<String>,
+    },
+    /// Connect to configured MCP servers and list exposed prompts.
+    Prompts {
+        /// Optional MCP server name filter.
+        server: Option<String>,
+    },
 }
 
 pub(crate) async fn cmd_mcp(
@@ -80,6 +90,30 @@ pub(crate) async fn cmd_mcp(
                     "  {} -> {}:{}  {}",
                     t.qualified_name, t.server, t.raw_name, t.description
                 );
+            }
+            Ok(())
+        }
+        McpCmd::Resources { server } => {
+            let mgr = client::McpManager::connect_configured(&data_dir, &cwd).await;
+            let items = mgr.list_resources(server.as_deref()).await?;
+            if items.is_empty() {
+                println!("no MCP resources available");
+                return Ok(());
+            }
+            for r in items {
+                println!("  [{}] {} ({})  {}", r.server, r.uri, r.name, r.description);
+            }
+            Ok(())
+        }
+        McpCmd::Prompts { server } => {
+            let mgr = client::McpManager::connect_configured(&data_dir, &cwd).await;
+            let items = mgr.list_prompts(server.as_deref()).await?;
+            if items.is_empty() {
+                println!("no MCP prompts available");
+                return Ok(());
+            }
+            for p in items {
+                println!("  [{}] {}  {}", p.server, p.name, p.description);
             }
             Ok(())
         }

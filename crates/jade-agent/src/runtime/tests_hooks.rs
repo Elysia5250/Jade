@@ -147,6 +147,7 @@ async fn session_start_and_user_prompt_submit_thread_hook_context_and_block() {
         custom_models: vec!["m1".into()],
         fetched_models: Vec::new(),
         model_routes: BTreeMap::new(),
+        extra_headers: Default::default(),
         updated_ms: 0,
     };
 
@@ -176,6 +177,9 @@ async fn session_start_and_user_prompt_submit_thread_hook_context_and_block() {
                 PermissionMode::Default,
             ),
             monitors: None,
+            mcp_pool: None,
+            tools: None,
+            providers: None,
             hooks: Some(Arc::clone(&st.hooks)),
             hook_state,
             hook_state_sink: Some(Arc::clone(&st.hook_state)),

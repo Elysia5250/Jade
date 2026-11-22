@@ -8,12 +8,10 @@ use super::context::{
 };
 use super::events::AgentEvent;
 use super::loop_hooks::TurnHookSession;
-use super::providers::{
-    anthropic_max_tokens, stream_anthropic, stream_openai_chat, stream_openai_codex, StreamReply,
-};
+use super::providers::{anthropic_max_tokens, ProviderRegistry, StreamReply, StreamRequest};
 use super::r#loop::LoopOutcome;
 use super::tools::ToolFilter;
-use crate::auth::{ProviderProtocol, StoredProvider};
+use crate::auth::StoredProvider;
 use crate::session::{ChatMessage, ChatRole};
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -39,6 +37,7 @@ pub(crate) async fn call_provider_with_overflow_retry(
 ) -> Result<StreamReply> {
     let mut max_tokens = turn_max_tokens(cfg);
     let first = dispatch_stream(
+        cfg.providers.as_deref(),
         http,
         provider,
         &cfg.model.model_id,
@@ -134,6 +133,7 @@ pub(crate) async fn call_provider_with_overflow_retry(
 
     max_tokens = turn_max_tokens(cfg);
     let mut reply = dispatch_stream(
+        cfg.providers.as_deref(),
         http,
         provider,
         &cfg.model.model_id,
@@ -162,6 +162,7 @@ fn turn_max_tokens(cfg: &TurnConfig) -> u32 {
 
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_stream(
+    providers: Option<&ProviderRegistry>,
     http: &reqwest::Client,
     provider: &StoredProvider,
     model_id: &str,
@@ -176,57 +177,29 @@ async fn dispatch_stream(
 ) -> Result<StreamReply> {
     let provider = provider.routed_for(model_id);
     let session_id = permissions.map(|p| p.session_id()).unwrap_or("");
-    match provider.protocol {
-        ProviderProtocol::OpenAiChat => {
-            stream_openai_chat(
-                http,
-                &provider,
-                model_id,
-                system,
-                messages,
-                permissions,
-                tool_filter,
-                extra_tools,
-                session_id,
-                data_dir,
-                tx,
-            )
-            .await
+    let default_reg;
+    let reg = match providers {
+        Some(r) => r,
+        None => {
+            default_reg = ProviderRegistry::with_builtins();
+            &default_reg
         }
-        ProviderProtocol::OpenAiCodex => {
-            stream_openai_codex(
-                http,
-                &provider,
-                model_id,
-                system,
-                messages,
-                permissions,
-                tool_filter,
-                extra_tools,
-                session_id,
-                data_dir,
-                tx,
-            )
-            .await
-        }
-        ProviderProtocol::Anthropic => {
-            stream_anthropic(
-                http,
-                &provider,
-                model_id,
-                system,
-                messages,
-                permissions,
-                tool_filter,
-                extra_tools,
-                max_tokens,
-                session_id,
-                data_dir,
-                tx,
-            )
-            .await
-        }
-    }
+    };
+    reg.stream(StreamRequest {
+        http,
+        provider: &provider,
+        model_id,
+        system,
+        messages,
+        permissions,
+        tool_filter,
+        extra_tools,
+        max_tokens,
+        session_id,
+        data_dir,
+        tx,
+    })
+    .await
 }
 
 /// The step cap ended on a tool call. Ask once more with every tool removed so
@@ -263,11 +236,9 @@ pub(super) async fn finalize_step_limit(
         reasoning_blocks: Vec::new(),
     images: Vec::new(),
     });
-    let no_tools = ToolFilter {
-        depth: 0,
-        allowed: Some(Vec::new()),
-    };
+    let no_tools = ToolFilter::none();
     let reply = dispatch_stream(
+        cfg.providers.as_deref(),
         http,
         provider,
         &cfg.model.model_id,

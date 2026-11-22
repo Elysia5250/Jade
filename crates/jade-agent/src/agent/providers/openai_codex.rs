@@ -55,7 +55,7 @@ pub(crate) async fn stream_openai_codex(
     if let Some(acct) = account_id {
         req = req.header("ChatGPT-Account-ID", acct);
     }
-    req = super::apply_opencode_session(req, provider, session_id);
+    req = super::apply_extra_headers(req, provider, session_id);
 
     let resp = super::send_with_retry(req, &body, "calling OpenAI Codex endpoint").await?;
     let status = resp.status();
@@ -419,6 +419,7 @@ mod tests {
             custom_models: vec![],
             fetched_models: vec![],
             model_routes: Default::default(),
+            extra_headers: Default::default(),
             updated_ms: 0,
         }
     }

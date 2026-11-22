@@ -34,6 +34,9 @@ pub(crate) struct SubagentHost {
     pub(crate) model: ModelRef,
     pub(crate) asks: Arc<AskBroker>,
     pub(crate) permissions: Arc<PermissionEngine>,
+    pub(crate) mcp_pool: Option<Arc<crate::mcp::pool::McpPool>>,
+    pub(crate) tools: Option<Arc<crate::agent::tools::ToolRegistry>>,
+    pub(crate) providers: Option<Arc<crate::agent::providers::ProviderRegistry>>,
     pub(crate) hooks: Option<Arc<HookEngine>>,
     pub(crate) turn_seq: u64,
 }
@@ -354,6 +357,7 @@ mod tests {
             custom_models: vec!["fast-mini".into()],
             fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: 0,
         };
         let host = SubagentHost {
@@ -376,6 +380,9 @@ mod tests {
                 "local".into(),
                 PermissionMode::Default,
             ),
+            mcp_pool: None,
+            tools: None,
+            providers: None,
             hooks: None,
             turn_seq: 1,
         };

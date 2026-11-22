@@ -6,6 +6,7 @@ use jade_proto::{SandboxPolicy, SubmitRequest, TaskSpec, DEFAULT_GROUP};
 use std::path::PathBuf;
 
 use crate::mcp_cli;
+use crate::plugin_cli;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Commands {
@@ -103,12 +104,37 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         cmd: mcp_cli::McpCmd,
     },
+    /// Manage declarative plugin bundles (`plugin.json`).
+    Plugin {
+        #[command(subcommand)]
+        cmd: plugin_cli::PluginCmd,
+    },
 }
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum AuthCmd {
     /// Connect an LLM provider (API key, OAuth, or custom endpoint).
     Login,
+    /// Add or update a named custom provider endpoint non-interactively.
+    Add {
+        /// Provider identifier (e.g. `ollama`, `vllm`, `corp-gateway`).
+        id: String,
+        /// Base URL for the provider API.
+        #[arg(long)]
+        base_url: String,
+        /// Wire protocol (`openai`, `anthropic`, or `codex`).
+        #[arg(long, default_value = "openai")]
+        protocol: String,
+        /// Optional API key (or empty for local servers like Ollama).
+        #[arg(long, default_value = "")]
+        api_key: String,
+        /// Default model ID (repeatable).
+        #[arg(long = "model")]
+        models: Vec<String>,
+        /// Extra HTTP header `Key=Value` (repeatable; supports `${SESSION_ID}`).
+        #[arg(long = "header")]
+        headers: Vec<String>,
+    },
     /// List connected providers and credentials.
     List,
     /// Remove stored credentials for a provider.

@@ -118,6 +118,7 @@ impl App {
                                 custom_models,
                                 fetched_models: Vec::new(),
                                 model_routes: std::collections::BTreeMap::new(),
+                                extra_headers: Default::default(),
                                 updated_ms: now_ms(),
                             };
                             let chosen = if model.trim().is_empty() {
@@ -211,6 +212,7 @@ impl App {
                                 custom_models: vec![model.trim().to_string()],
                                 fetched_models: Vec::new(),
                                 model_routes: std::collections::BTreeMap::new(),
+                                extra_headers: Default::default(),
                                 updated_ms: now_ms(),
                             };
                             let pname = sp.name.clone();

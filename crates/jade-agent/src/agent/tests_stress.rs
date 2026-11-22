@@ -220,6 +220,7 @@ async fn stress_250_step_loop_with_compaction_and_fd_rss_profile() {
             custom_models: vec!["gpt-5.4".into()],
             fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: 0,
         },
         model: ModelRef {
@@ -247,6 +248,9 @@ async fn stress_250_step_loop_with_compaction_and_fd_rss_profile() {
             PermissionMode::Auto,
         ),
         monitors: None,
+        mcp_pool: None,
+        tools: None,
+        providers: None,
         hooks: None,
         hook_state: BTreeMap::new(),
         hook_state_sink: None,
@@ -374,6 +378,7 @@ async fn stress_8way_parallel_subagents_and_midflight_abort() {
             custom_models: vec!["m1".into()],
             fetched_models: Vec::new(),
             model_routes: BTreeMap::new(),
+            extra_headers: Default::default(),
             updated_ms: 0,
         },
         model: ModelRef {
@@ -388,6 +393,9 @@ async fn stress_8way_parallel_subagents_and_midflight_abort() {
             "local".into(),
             PermissionMode::Auto,
         ),
+        mcp_pool: None,
+        tools: None,
+        providers: None,
         hooks: Some(HookEngine::new(data.clone(), ws.clone())),
         turn_seq: 1,
     };

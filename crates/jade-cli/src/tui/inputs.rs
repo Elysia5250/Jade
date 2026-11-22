@@ -35,6 +35,12 @@ pub(crate) struct SkillSnap {
     pub(crate) scope: String,
 }
 
+pub(crate) struct CustomCommandSnap {
+    pub(crate) name: String,
+    pub(crate) args: String,
+    pub(crate) about: String,
+}
+
 pub(crate) struct SkillFlag {
     pub(crate) kind: &'static str,
     pub(crate) injected: bool,
@@ -61,6 +67,7 @@ pub(crate) struct Catalog {
     pub(crate) git_dirty: bool,
     pub(crate) mcp: Vec<McpSnap>,
     pub(crate) skills: Vec<SkillSnap>,
+    pub(crate) commands: Vec<CustomCommandSnap>,
     pub(crate) todos: Vec<TodoSnap>,
     pub(crate) welcome_flags: Vec<SkillFlag>,
 }
@@ -331,6 +338,22 @@ fn fill_catalog(app: &mut App) {
             name: skill.name.clone(),
             description: skill.description.clone(),
             scope: skill.scope.label().to_string(),
+        })
+        .collect();
+    let custom_cmds = jade_agent::commands::discover_commands(&app.data_dir, &cwd);
+    catalog.commands = custom_cmds
+        .into_iter()
+        .filter(|cmd| lookup_slash(&cmd.name).is_none())
+        .map(|cmd| {
+            let tag = match &cmd.plugin_id {
+                Some(pid) => format!("[plugin:{pid}]"),
+                None => format!("[{}]", cmd.scope.label()),
+            };
+            CustomCommandSnap {
+                name: cmd.name,
+                args: cmd.args,
+                about: format!("{tag} {}", cmd.description),
+            }
         })
         .collect();
     catalog.todos =

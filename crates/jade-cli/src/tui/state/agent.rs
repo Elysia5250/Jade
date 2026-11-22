@@ -460,6 +460,10 @@ impl App {
             .events
             .iter()
             .any(|item| matches!(item.event, AgentEvent::SessionReset));
+        let saw_perm_mode = accum
+            .events
+            .iter()
+            .any(|item| matches!(item.event, AgentEvent::PermissionModeChanged { .. }));
         let SnapshotAccum {
             running,
             events,
@@ -497,7 +501,7 @@ impl App {
             self.set_toast("daemon back - sending queued prompt", false);
             self.flush_outbox();
         }
-        if self.session.perm_mode != PermissionMode::Default {
+        if !saw_perm_mode && self.session.perm_mode != PermissionMode::Default {
             self.push_permission_mode_to_daemon(self.session.perm_mode);
         }
     }
