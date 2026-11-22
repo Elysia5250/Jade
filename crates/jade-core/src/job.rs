@@ -105,6 +105,9 @@ impl Jobs {
                                 },
                             };
                             job.pid = None;
+                            job.log_bytes = std::fs::metadata(logs.path(job.id))
+                                .map(|m| m.len())
+                                .unwrap_or(job.log_bytes);
                         }
                         table.next_id = table.next_id.max(job.id + 1);
                         table.jobs.insert(
@@ -359,6 +362,9 @@ impl Jobs {
     }
 
     fn attach_log_bytes(&self, job: &mut Job) {
+        if job.state.is_done() {
+            return;
+        }
         job.log_bytes = std::fs::metadata(self.inner.logs.path(job.id))
             .map(|m| m.len())
             .unwrap_or(0);
@@ -489,6 +495,9 @@ impl Jobs {
     }
 
     fn finish(&self, id: JobId, mut result: JobResult) {
+        let final_log_bytes = std::fs::metadata(self.inner.logs.path(id))
+            .map(|m| m.len())
+            .unwrap_or(0);
         let known = {
             let mut t = self.inner.table.lock().unwrap();
             match t.jobs.get_mut(&id) {
@@ -501,6 +510,7 @@ impl Jobs {
                         result,
                     };
                     e.job.pid = None;
+                    e.job.log_bytes = final_log_bytes;
                     e.cancel = None;
                     true
                 }

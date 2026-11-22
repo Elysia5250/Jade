@@ -529,15 +529,61 @@ fn extract_last_preview(items: &[TranscriptItem]) -> String {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionFileStamp {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+    ino: u64,
+}
+
+fn session_file_stamp(meta: &std::fs::Metadata) -> SessionFileStamp {
+    #[cfg(unix)]
+    let ino = {
+        use std::os::unix::fs::MetadataExt;
+        meta.ino()
+    };
+    #[cfg(not(unix))]
+    let ino = 0;
+    SessionFileStamp {
+        modified: meta.modified().ok(),
+        len: meta.len(),
+        ino,
+    }
+}
+
+type SessionCacheMap = std::collections::HashMap<PathBuf, (SessionFileStamp, SessionSummary)>;
+
+fn summary_cache() -> &'static std::sync::Mutex<SessionCacheMap> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<SessionCacheMap>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
 pub fn list_sessions(data_dir: &Path) -> Vec<SessionSummary> {
     let dir = sessions_dir(data_dir);
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
     };
     let mut out = Vec::new();
+    let mut seen_paths = std::collections::HashSet::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let stamp = session_file_stamp(&meta);
+        seen_paths.insert(path.clone());
+        if let Some(cached) = summary_cache()
+            .lock()
+            .unwrap()
+            .get(&path)
+            .filter(|(s, _)| *s == stamp)
+            .map(|(_, summary)| summary.clone())
+        {
+            out.push(cached);
             continue;
         }
         let Ok(raw) = std::fs::read_to_string(&path) else {
@@ -546,8 +592,7 @@ pub fn list_sessions(data_dir: &Path) -> Vec<SessionSummary> {
         let Ok(s) = serde_json::from_str::<Session>(&raw) else {
             continue;
         };
-        let last_preview = extract_last_preview(&s.items);
-        out.push(SessionSummary {
+        let summary = SessionSummary {
             id: s.id,
             title: s.title,
             cwd: s.cwd,
@@ -556,9 +601,18 @@ pub fn list_sessions(data_dir: &Path) -> Vec<SessionSummary> {
             item_count: s.items.len(),
             prompt_tokens: s.prompt_tokens,
             changed_files: s.changed_files.len(),
-            last_preview,
-        });
+            last_preview: extract_last_preview(&s.items),
+        };
+        summary_cache()
+            .lock()
+            .unwrap()
+            .insert(path, (stamp, summary.clone()));
+        out.push(summary);
     }
+    summary_cache()
+        .lock()
+        .unwrap()
+        .retain(|p, _| !p.starts_with(&dir) || seen_paths.contains(p));
     out.sort_by_key(|s| std::cmp::Reverse(s.updated_ms));
     out
 }
@@ -732,6 +786,9 @@ mod tests {
 
         delete_session(&dir, &s.id).unwrap();
         assert!(list_sessions(&dir).is_empty());
+        // Cache should have pruned the deleted session entry.
+        let path = sessions_dir(&dir).join(format!("{}.json", s.id));
+        assert!(!summary_cache().lock().unwrap().contains_key(&path));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
